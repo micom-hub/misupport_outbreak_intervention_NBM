@@ -9,42 +9,40 @@ import matplotlib.pyplot as plt
 
 import heapq
 
-print("Initializing Network...")
+
+# TODO check parameters against literature values, find some parameters for contacts
+MeaslesParameters = {
+    # Disease Params
+    "R0": 15.0,  # transmission rate
+    "incubation_period": 10.5,  # time from t_infected to symptom onset (days)
+    "infectious_period": 5,  #
+    "school_contacts": 5.63424,
+    "other_contacts": 2.2823,
+    # Contact Params
+    # Model Setting Params:
+    "population": 100,  # list of population sizes if running multiple in parallel
+    "I0": [1, 5],
+    "is_stochastic": True,  # False for deterministic,
+    "simulation_seed": 123456789,
+}
 
 
+# TODO make more realistic contact networks with some preferential mixing
 def contactNetwork(N, nNeighbors):
+    print("Initializing Network...")
     G = Graph.Watts_Strogatz(
         1, N, nNeighbors, 0.3
     )  # .5 right now to have a fairly random graph
     return G
 
 
-MeaslesParameters = {
-    # Disease Params
-    "R0": 15.0,  # transmission rate
-    "incubation_period": 10.5,  # time from t_infected to symptom onset (days)
-    "infectious_period": 5,  #
-    # Contact Params
-    "school_contacts": 5.63424,
-    "other_contacts": 2.2823,
-    "random_network": True,
-    # Model Setting Params:
-    "population": 20,  # list of population sizes if running multiple in parallel
-    "I0": [1, 5],
-    "threshold_values": [10],  # outbreak threshold, only first value used for now
-    "is_stochastic": True,  # False for deterministic,
-    "simulation_seed": 123456789,
-}
-
-
 # %% EPN Time!
 def network2epn(contactNetwork: ig.Graph, params: dict = None) -> ig.Graph:
+    print("Producing Epidemic Percolation Network")
     """
     Args:
         contactNetwork (ig.Graph): _description_
         params (dict): A dictionary containing SEIR parameters
-            params["latent_distr"]
-            params["infectious_distr"]
             params["beta"]
 
     Returns:
@@ -68,6 +66,7 @@ def network2epn(contactNetwork: ig.Graph, params: dict = None) -> ig.Graph:
     epn.add_vertices(n)
 
     # Assume exponential distributions for now
+    # TODO add a more realistic distribution here
     incubation_distr = expon(scale=params["incubation_period"])
     infectious_distr = expon(scale=params["infectious_period"])
 
@@ -142,6 +141,8 @@ def network2epn(contactNetwork: ig.Graph, params: dict = None) -> ig.Graph:
 
 
 def simulate_epidemic(epn: ig.Graph, imported_infections: list):
+    print("Simulating Epidemic")
+
     n = epn.vcount()
     t_infected = np.full(n, np.inf)
     # set initial infections
@@ -177,7 +178,7 @@ def epicurve(times):
     itimes = np.sort(times[np.isfinite(times)])
     curve = np.arange(1, len(itimes + 1))
     plt.hist(itimes)
-    
+
 def getAttackRate(times):
     attack_rate = np.sum(np.isfinite(times))/ len(times)
     
@@ -186,10 +187,10 @@ def getAttackRate(times):
 
 # example run
 if __name__ == "__main__":
-    G = contactNetwork(100, 2)
+    G = contactNetwork(MeaslesParameters["population"], 2)
     epn = network2epn(G, MeaslesParameters)
     ig.plot(epn)
-    out = simulate_epidemic(epn, [2])
+    out = simulate_epidemic(epn, [2, 5])
     print(out)
     epicurve(out)
     print(getAttackRate(out))
