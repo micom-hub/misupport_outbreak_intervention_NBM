@@ -178,5 +178,6 @@ model = NetworkSEIR(aM, imported_infections)
 model.run(tMax=100, beta=0.3, sigma=0.2, gamma=0.1)
 S, E, I, R = model.get_output()
 for i in range(len(I)):
-    model.visualize_network(timestep=i)
+    model.visualize_network(timestep=i, show=False)
 # %%
+

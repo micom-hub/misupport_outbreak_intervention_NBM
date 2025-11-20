@@ -1,0 +1,1 @@
+##Build an adjacency matrix (or layered adjacency matrices) representing synthetic populations
