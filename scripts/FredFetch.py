@@ -7,11 +7,10 @@ from selenium.webdriver.support import expected_conditions as EC
 import os
 import re
 import glob
-import shutil
 import zipfile
 
 
-def downloadPopData(state, county):
+def downloadPopData(state, county, projectDirectory):
     """Function that downloads population data from the FRED Public Health Synthetic Population Website
     Wheaton, W.D., U.S. Synthetic Population 2010 Version 1.0 Quick Start Guide, RTI International, May 2014.
 
@@ -21,7 +20,7 @@ def downloadPopData(state, county):
         state: Name of a US State
         county Name of a County in said state
     """
-
+    cd = projectDirectory
     data_dir = cd + "/data"
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
@@ -100,12 +99,11 @@ def downloadPopData(state, county):
                     zout.writestr(new_name, source.read())
         os.remove(latest_zip)
     print(f"Data for {county} County, {state} saved to {new_zip_path}")
-    
+
     return(new_zip_path)
 
 
 if __name__ == "__main__":
-    cd = os.getcwd()
     state = "Michigan"
     county = "Washtenaw"
     downloadPopData(state, county)
