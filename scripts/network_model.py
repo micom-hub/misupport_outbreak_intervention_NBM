@@ -1,10 +1,12 @@
+import os
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
 import igraph as ig
 from typing import TypedDict, List
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
-from scripts.syntheticAM import df_to_adjacency
+from scripts.SynthDataProcessing import build_edge_list, build_individual_lookup
 
 class ModelParameters(TypedDict):
     # Epi Params
@@ -25,13 +27,26 @@ class ModelParameters(TypedDict):
     sch_contacts: int
     gq_contacts: int
     cas_contacts: int
+    hh_weight: float
+    wp_weight: float
+    sch_weight: float
+    gq_weight: float
+    cas_weight: float
+
 
 
     # Simulation Settings
+    run_name: str #prefix for model run
     simulation_duration: int  # days
     dt: float  # steps per day
     I0: List[int]
     seed: int
+    county: str #county to run on
+    state: str #state to run on
+    save_data_files: bool
+    make_movie: bool
+
+
 
 DefaultModelParams: ModelParameters = {
     "base_transmission_prob": 0.8,
@@ -42,40 +57,69 @@ DefaultModelParams: ModelParameters = {
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
     "vax_efficacy": 0.997,
-    "vax_uptake": 0, #.85
+    "vax_uptake": 0.85, 
 
-    "hh_contacts": 1,
-    "wp_contacts": 1,
-    "sch_contacts": 1,
-    "gq_contacts": 1,
+    "wp_contacts": 10,
+    "sch_contacts": 10,
+    "gq_contacts": 20,
     "cas_contacts": 1,
 
+    "hh_weight": 1,
+    "wp_weight": .5,
+    "sch_weight": .6,
+    "gq_weight": .3,
+    "cas_weight": .1,
+
+    "run_name" : "test_run",
     "simulation_duration": 45,
     "dt": 1,
-    "I0": [0],
-    "seed": 2026
-
+    "I0": [906],
+    "seed": 2026,
+    "county": "Keweenaw",
+    "state": "Michigan",
+    "save_data_files": True,
+    "make_movie": False
 
 }
 
 class NetworkModel:
-    def __init__(self, adj_csr, params = DefaultModelParams):
+    def __init__(self, contacts_df, params = DefaultModelParams):
         """
         Unpack parameters, set-up storage variables, and initialize model
         """
 #Unpack params and model settings
         
         self.params = params
-        self.adj_csr = adj_csr
-        self.N = adj_csr.shape[0]
-        self.Tmax = self.params["simulation_duration"]
+        self.contacts_df = contacts_df
+        self.N = self.contacts_df.shape[0]
+        self.Tmax = self.params["simulation_duration"] #how long it could run
         self.rng = np.random.default_rng(self.params["seed"])
+        self.county = self.params["county"]
+
+        self.edge_list = build_edge_list(contacts_df = self.contacts_df, 
+        params = self.params, 
+        rng = self.rng, 
+        save = self.params["save_data_files"],
+        county = self.county)
+
+        self.individual_lookup = build_individual_lookup(self.contacts_df)
+
+        self.neighbor_map = self.build_neighbor_map()
 
 
-    #set a full graph with positions
-        # self.full_graph = ig.Graph.Adjacency((self.adj_csr.toarray() != 0).tolist())
-        # self.full_graph.vs["name"] = list(range(self.N))
-        # self.fixed_layout = self.full_graph.layout("fr")
+    #Set a theoretical full with axis positions for visualization purposes
+        self.full_node_list = sorted(set(self.edge_list['source']).union(set(self.edge_list['target'])))
+        g_full = ig.Graph()
+        g_full.add_vertices(len(self.full_node_list))
+        g_full.vs['name'] = self.full_node_list
+
+        full_edges = list(zip(
+            [self.full_node_list.index(src) for src in self.edge_list['source']],
+            [self.full_node_list.index(tgt) for tgt in self.edge_list['target']]
+        ))
+        g_full.add_edges(full_edges)
+        self.fixed_layout = g_full.layout('fr') #set a layout for the full graph
+        self.layout_node_names = self.full_node_list
 
 
 #State tracking: 0 = S, 1 = E, 2 = I, 3 = R
@@ -104,7 +148,7 @@ class NetworkModel:
         #Initial States Variables
         S = list(set(range(self.N)) - set(initial_infectious))
         E = []
-        I = initial_infectious
+        I = initial_infectious  # noqa: E741
         R = []
         self.states_over_time.append([S,E,I,R])
 
@@ -112,81 +156,136 @@ class NetworkModel:
         self.new_infections = [initial_infectious] #track which individuals became infected at which timestep
 
 #Set Simulation Tags
-        self.simulation_end_day = None
+        self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
         self.model_has_run = False
+
+
+#Set-up results folder
+        if self.params["save_data_files"]:
+            self.results_folder = os.path.join(os.getcwd(), 
+            "results", self.params["run_name"]
+            )
+            if not os.path.exists(self.results_folder):
+                os.mkdir(self.results_folder)
     
-#TODO remove duplicated edges
+    def build_neighbor_map(self):
+        """
+        Build a mapping from node to list of (neighbor, weight) (make neighbor queries O(1))
+        """
+        neighbor_map = {}
+        for row in self.edge_list.itertuples(index = False):
+            src, tgt, w, ct = row.source, row.target, row.weight, row.contact_type
+            if src not in neighbor_map:
+                neighbor_map[src] = []
+            neighbor_map[src].append((tgt, w, ct))
+        return neighbor_map
+
     def initialize_graph(self, indices):
         """
-        Initialize an igraph with a given index and all it's neighbors from self.adj_csr
+        Initialize an igraph with the provided index/indices and all their neighbors, with weighted edges
         """
-        if isinstance(indices, int):
-            indices = [indices]
-
+        # Make sure all indices are ints and unique
+        indices = [int(i) for i in (indices if isinstance(indices, (list, np.ndarray)) else [indices])]
         node_set = set(indices)
-        node_set.update(int(n) for ind in indices for n in self.adj_csr[ind].indices)
-        node_list = list(node_set)
+
+        # Add neighbors ensuring all are plain int
+        for ind in indices:
+            ind = int(ind)
+            neighbors = self.neighbor_map.get(ind, [])
+            for neighbor, _, _ in neighbors:
+                node_set.add(int(neighbor))
+        node_list = sorted([int(n) for n in node_set])
+
+        name_to_vertex = {int(name): v for v, name in enumerate(node_list)}
+
+        # Preventing duplicates; all int
+        edge_set = set()
+        edge_data = {}  # i, j, weight, ct
+
+        induced_nodes = set([int(n) for n in node_list])
+        for ind in node_list:
+            ind = int(ind)
+            for neighbor, weight, ct in self.neighbor_map.get(ind, []):
+                neighbor = int(neighbor)
+                if neighbor in induced_nodes and ind != neighbor:
+                    edge_tuple = tuple(sorted((ind, neighbor)))
+                    if edge_tuple not in edge_set:
+                        edge_set.add(edge_tuple)
+                        edge_data[edge_tuple] = (weight, ct)
+
+        edges, weights, types = [], [], []
+        for (i, j), (w, t) in edge_data.items():
+            edges.append((name_to_vertex[int(i)], name_to_vertex[int(j)]))
+            weights.append(w)
+            types.append(t)
 
         g = ig.Graph()
         g.add_vertices(len(node_list))
-        g.vs["name"] = node_list
-
-        name_to_vertex = {name: vtx for vtx, name in enumerate(node_list)}
-
-        edges = []
-        weights = []
-        for ind in indices:
-            for n in self.adj_csr[ind].indices:
-                s = name_to_vertex[ind]
-                t = name_to_vertex[n]
-                edges.append((s, t))
-                weights.append(float(self.adj_csr[ind, n]))
-        
-        g.add_edges(edges)
-        g.es["weight"] = weights
+        g.vs["name"] = [int(n) for n in node_list]
+        if edges:
+            g.add_edges(edges)
+            g.es["weight"] = weights
+            g.es["contact_type"] = types
 
         return g
-        
 
     def add_to_graph(self, g: ig.Graph, indices):
         """
-        Quickly add neighbors of 'indices' to an igraph, using adjacency from self.adj_csr
-
+        Quickly add all neighbors of indices to igraph g without duplicates, ensuring all node names are ints.
         """
+        # Always treat indices as list of ints
         if isinstance(indices, int):
             indices = [indices]
-        indices = np.asarray(indices, dtype = int)
+        indices = [int(i) for i in np.asarray(indices)]
 
-        #names of nodes correspond to indexes in the adjacency matrix
-        existing_names = set(g.vs["name"])
+        existing_names = set([int(name) for name in g.vs["name"]])
 
-        #get all neighbors for all indices
-        indptr = self.adj_csr.indptr
-        neighbors = np.concatenate([
-            self.adj_csr.indices[indptr[ind]:indptr[ind+1]] for ind in indices
-        ])
-        new_names = set(neighbors) - existing_names
-        if new_names:
-            g.add_vertices(len(new_names))
-            newly_added = list(new_names)
-            g.vs[-len(new_names):]["name"] = newly_added
-        
-        name_to_vertex = {v["name"]: v.index for v in g.vs}
+        # Gather current edges as tuples of int
+        existing_edge_set = set()
+        for e in g.es:
+            i, j = int(g.vs[e.source]["name"]), int(g.vs[e.target]["name"])
+            edge_tuple = tuple(sorted((i, j)))
+            existing_edge_set.add(edge_tuple)
 
-        edges = []
-        weights = []
+        new_nodes = set()
+        edge_set = set()
+        edge_data = {}
+
         for ind in indices:
-            source = name_to_vertex[ind]
-            targets = self.adj_csr.indices[indptr[ind]:indptr[ind+1]]
-            for t in targets:
-                target = name_to_vertex[t]
-                edges.append((source, target))
-                weights.append(float(self.adj_csr[ind, t]))
+            ind = int(ind)
+            for neighbor, weight, ct in self.neighbor_map.get(ind, []):
+                neighbor = int(neighbor)
+                if neighbor not in existing_names:
+                    new_nodes.add(neighbor)
+                if ind != neighbor:
+                    edge_tuple = tuple(sorted((ind, neighbor)))
+                    if edge_tuple not in existing_edge_set and edge_tuple not in edge_set:
+                        edge_set.add(edge_tuple)
+                        edge_data[edge_tuple] = (weight, ct)
+
+        if new_nodes:
+            g.add_vertices(len(new_nodes))
+            newly_added = sorted([int(n) for n in new_nodes])
+            g.vs[-len(new_nodes):]["name"] = newly_added
+            existing_names.update(newly_added)
+
         
-        #Remove duplicate edges
-        g.add_edges(edges)
-        g.es[-len(edges):]["weight"] = weights
+
+        # Update mapping, all int
+        name_to_vertex = {int(v["name"]): v.index for v in g.vs}
+
+        edges, weights, types = [], [], []
+        for (i, j), (w, t) in edge_data.items():
+            edges.append((name_to_vertex[int(i)], name_to_vertex[int(j)]))
+            weights.append(w)
+            types.append(t)
+        if edges:
+            g.add_edges(edges)
+            g.es[-len(edges):]["weight"] = weights
+            g.es[-len(edges):]["contact_type"] = types
+
+
 
         return g
     
@@ -208,8 +307,6 @@ class NetworkModel:
 
         return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inf)
 
-        
-
     def step(self):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
@@ -223,13 +320,19 @@ class NetworkModel:
         infectious_nodes = current_nodes[self.state[current_nodes] == 2]
 
         for infec_ind in infectious_nodes:
-            neighbors_raw = self.epi_g.neighbors(infec_ind)
-            neighbors = np.array([int(n) if not isinstance(n, int) else n for n in neighbors_raw], dtype = int)
+            #note infectious indices correspond to names in the igraph
+            node_index = self.epi_g.vs.find(name = infec_ind).index
+            neighbor_indices = self.epi_g.neighbors(node_index)
+            neighbors = np.array([int(self.epi_g.vs[n]["name"]) for n in neighbor_indices])
             sus_neighbors = neighbors[self.state[neighbors] == 0]
 
             if sus_neighbors.size:
                 #get edge weights
-                eids = [self.epi_g.get_eid(infec_ind, nbr) for nbr in sus_neighbors]
+                eids = [self.epi_g.get_eid(
+                    self.epi_g.vs.find(name = infec_ind).index,
+                    self.epi_g.vs.find(name = nbr).index) 
+                    for nbr in sus_neighbors]
+
                 weights = np.array([self.epi_g.es[eid]["weight"] for eid in eids])
                 #calculate transmission prob for each
                 prob = self.params["base_transmission_prob"]*weights
@@ -276,61 +379,39 @@ class NetworkModel:
         inactive_nodes = current_nodes[inactive_mask]
         self.time_in_state[inactive_nodes] += 1
 
+        #New nodes list, adding new nodes to S
+        updated_nodes = np.array([int(v["name"]) for v in self.epi_g.vs])
+
 
         #Save timestep data
-        S = current_nodes[self.state[current_nodes] == 0].tolist()
-        E = current_nodes[self.state[current_nodes] == 1].tolist()
-        I = current_nodes[self.state[current_nodes] == 2].tolist()
-        R = current_nodes[self.state[current_nodes] == 3].tolist()
+        S = updated_nodes[self.state[updated_nodes] == 0].tolist()
+        E = updated_nodes[self.state[updated_nodes] == 1].tolist()
+        I = updated_nodes[self.state[updated_nodes] == 2].tolist()  # noqa: E741
+        R = updated_nodes[self.state[updated_nodes] == 3].tolist()
 
         self.states_over_time.append([S,E,I,R])
         self.epi_graphs.append(self.epi_g.copy())
 
         self.new_exposures.append(newly_exposed)
         self.new_infections.append(to_infectious)
-    
-
-
-    #FUNCTION NOTES
-        #take data from previous step's self.state
-
-
-        #For each infectious individual, find which of their neighbors are susceptible, and do a probabilistic draw (transmission_prob*contact_weight*vax_efficacy (if exposee is vaccinated) *relative_infectiousness_vax (if infectious is vaccinated)))
-        #For individuals who become exposed, add them to a newly_exposed list
-
-        #For all exposed individuals, check if their time in state is greater than their incubation period. If yes, add them to newly_infectious, else, do nothing
-
-        #For all infectious individuals, check if their time-in-state is greater than their infectious period. if yes, add them to newly_recovered, else do nothing.
-
-
-
-        #Add 1 to everybody's time in state
-
-        #Add all neighbors of newly-infected I to the graph as susceptible
-
-        #Move all newly exposed, newly infectious, and newly-recovered to their new states, and reset their time in state to 0
-
 
     def simulate(self):
-        t = 1
+        t = 0
         while t < self.Tmax:
             self.step()
-            S, E, I, R = self.states_over_time[-1]
+            S, E, I, R = self.states_over_time[-1]  # noqa: E741
             if not E and not I:
-                self.simulation_end_day = t
+                self.simulation_end_day = t + 1 #as it did run another step 
                 self.stochastic_dieout = True
                 break
             t += 1
         self.model_has_run = True
 
-    
-
-
-
     def epi_curve(self):
 
         #Produce an epi-curve of the number of individuals infected at each timestep
         counts = [len(exposed) for exposed in self.new_exposures]
+        counts[0] = len(self.params["I0"]) #add initial infections
         plt.figure(figsize=((8,4)))
         plt.bar(range(len(counts)), counts, color = 'orange', label = "Infections Over Time")
         plt.xlabel("Timestep")
@@ -339,23 +420,25 @@ class NetworkModel:
         plt.tight_layout()
         plt.show()
 
-
-
-
-
-    def draw_network(self, t, ax=None, clear=True):
+    def draw_network(self, t: int, ax=None, clear: bool =True):
 
         #Take a timestep t as an input, and return a plot of the graph
         g = self.epi_graphs[t]
-        S, E, I, R = self.states_over_time[t]
+        S, E, I, R = self.states_over_time[t]  # noqa: E741
         color_map = {i: "blue" for i in S}
         color_map.update({i: "orange" for i in E})
         color_map.update({i: "red" for i in I})
         color_map.update({i: "green" for i in R})
         colors = [color_map[v["name"]] for v in g.vs]
 
-        node_ind = [int(v["name"]) for v in g.vs]
-        layout = g.layout('fr')
+        indices = [self.layout_node_names.index(v["name"]) for v in g.vs]
+        layout = [self.fixed_layout[i] for i in indices]
+
+        node_labels = g.vs["name"]
+        if len(g.vs) > 40:
+            node_labels = None
+
+
         if ax is None:
             fig, ax = plt.subplots(figsize = (8,8))
             show_plot = True
@@ -371,28 +454,66 @@ class NetworkModel:
             edge_color = "gray",
             bbox = (600,600),
             target = ax,
-            vertex_label = g.vs["name"]
+            vertex_label = node_labels
         )
         ax.set_title(f"Network at t = {t}")
         if show_plot:
             plt.show()
 
+        return
 
+    def make_movie(self, dt: int = 1, filename: str = "network_outbreak.mp4", fps: int = 3) -> None:
+        """_summary_
 
+        Args:
+            dt (int, optional): Time interval between network visualizations Defaults to 1.
+            filename (str, optional): Name to save to Defaults to "network_outbreak.mp4".
+            fps (int, optional): Defaults to 3.
 
+        Creates a .mp4 file of the network evolution saved in results/run_name
+        """
+        if not self.params["save_data_files"]:
+            raise Exception("save_data_files is false, but a network movie was requested")
+        out_path = os.path.join(self.results_folder, filename)
 
+        fig, ax = plt.subplots(figsize = (8,8))
 
+        #get timesteps
+        timesteps = list(range(0, len(self.epi_graphs), dt))
+        if (len(self.epi_graphs)-1) not in timesteps:
+            timesteps.append(len(self.epi_graphs)-1) #always show last step
+        
+        def update(frame):
+            t = timesteps[frame]
+            ax.clear()
+            self.draw_network(t, ax = ax, clear = False)
+            ax.set_title(f"{self.params['run_name']} | Day {t}")
+            return ax
+        
+        ani = animation.FuncAnimation(fig, update, frames = len(timesteps), interval = 1000/fps, blit = False, repeat = False)
 
-    def make_movie(self, dt=1, movie_file="network_outbreak.mp4", fps=3):
-        #To be completed later
+        print("Saving outbreak movie...")
+        #ffmpeg MUST BE INSTALLED
+        try:
+            ani.save(out_path, writer = 'ffmpeg', fps = fps)
+        except(FileNotFoundError, ValueError) as e:
+            print("\nERROR: FFmpag is needed to save mp4 movies, but wasn't found")
+            print("Install ffmpeg and ensure it is in your system path")
+            print(f"Error Message: {e}")
+        finally:
+            plt.close(fig)
+
+        print(f"Outbreak movie saved to {out_path}...")
+
         return
        
 
 
-
+#Test run on a really small population
 if __name__ == "__main__":
-    Keweenaw_adj = df_to_adjacency(county = "Alcona", saveFile = False, sparse = True)
-    testModel = NetworkModel(adj_csr = Keweenaw_adj)
+    Keweenaw_contacts = pd.read_parquet("./data/Keweenaw/contacts.parquet")
+
+    testModel = NetworkModel(contacts_df = Keweenaw_contacts)
     print("Running Model on Keweenaw County...")
     testModel.simulate()
 

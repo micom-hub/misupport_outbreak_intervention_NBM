@@ -1,5 +1,8 @@
-# %%
-from selenium import webdriver
+# Script to go and download the FRED synthetic data for a specified state and county
+#NOTE uses chromedriver which won't be supported later 2026
+#NOTE check occasionally to ensure that the synthpop download url hasn't changed
+
+from selenium import webdriver 
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -9,8 +12,7 @@ import re
 import glob
 import zipfile
 
-
-def downloadPopData(state, county, projectDirectory):
+def downloadPopData(state, county, projectDirectory = os.getcwd()):
     """Function that downloads population data from the FRED Public Health Synthetic Population Website
     Wheaton, W.D., U.S. Synthetic Population 2010 Version 1.0 Quick Start Guide, RTI International, May 2014.
 
@@ -18,13 +20,13 @@ def downloadPopData(state, county, projectDirectory):
 
     Args: --- ENSURE CORRECT SPELLINGS
         state: Name of a US State
-        county Name of a County in said state
+        county: Name of a County in said state
+        projectDirectory: Filepath to where the project is stored
+
+    Output: A {county}.zip file in the data folder of the projectDirectory
     """
     cd = projectDirectory
     data_dir = cd + "/data"
-
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
 
     options = webdriver.ChromeOptions()
     prefs = {

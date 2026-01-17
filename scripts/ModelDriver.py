@@ -1,0 +1,109 @@
+import os
+import pandas as pd
+
+from scripts.FredFetch import downloadPopData
+from scripts.SynthDataProcessing import synthetic_data_process
+from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401
+
+############################################
+# Run Settings: Alter runParameters values #
+############################################
+
+runParameters: ModelParameters = {
+#Epidemiological Parameters
+    "base_transmission_prob": 0.8,
+    "incubation_period": 10.5,
+    "infectious_period": 5,
+    "gamma_alpha": 20,
+    "incubation_period_vax": 10.5,
+    "infectious_period_vax": 5,
+    "relative_infectiousness_vax": 0.05,
+    "vax_efficacy": 0.997,
+    "vax_uptake": 0.85,
+
+#Number of contacts assigned to each individual from each location
+    "wp_contacts": 1,
+    "sch_contacts": 1,
+    "gq_contacts": 1,
+    "cas_contacts": 1,
+
+#Weighting of each contact type
+    "hh_weight": 1,
+    "wp_weight": .5,
+    "sch_weight": .6,
+    "gq_weight": .3,
+    "cas_weight": .1,
+
+#Simulation settings
+    "run_name": "test_run",
+    "simulation_duration": 45,
+    "dt": 1,
+    "I0": [0],
+    "seed": 2026,
+    "county": "Keweenaw", 
+    "state": "Michigan",
+    "save_data_files": True,
+    "make_movie": True
+}
+
+# ----- Process data for model run -----
+
+#Check if /data contains a file named for params["county"]
+county = runParameters["county"].lower().capitalize()
+state = runParameters["state"].lower().capitalize()
+cd = os.getcwd()
+
+#Check if project directory has a data folder
+data_dir = os.path.join(cd, "data")
+if not os.path.exists(data_dir):
+    os.mkdir(data_dir)
+
+#Check if the data folder contains the county's synthetic population data, if not download it
+files = os.listdir(data_dir)
+matching = [f for f in files if f.startswith(county)]
+
+if not matching:
+    downloadPopData(state = state, county = county)
+
+    matching = [f for f in os.listdir(data_dir) if f.startswith(county)]
+
+#Check if there is already a contacts.parquet file within matching
+countyfoldername = matching[0]
+countyfolder = os.path.join(data_dir, countyfoldername)
+
+if countyfolder.endswith('.zip'):
+    contacts_df = synthetic_data_process(county, save_files = runParameters["save_data_files"])
+    if runParameters["save_data_files"]: #if saving data as a folder, delete the zip
+        os.remove(countyfolder)
+else:
+    parquet_saved = False
+    for filename in os.listdir(countyfolder):
+        if filename == "contacts.parquet":
+            parquet_saved = True
+            parquet_path = os.path.join(countyfolder, filename)
+
+    if parquet_saved:
+        contacts_df = pd.read_parquet(parquet_path)
+    else:
+        contacts_df = synthetic_data_process(county, save_files = runParameters["save_data_files"])
+
+
+
+# ---- Run the Model ------
+
+print("Initializing model...")
+model = NetworkModel(contacts_df = contacts_df, params = runParameters)
+
+print("Running model...")
+model.simulate()
+
+print("Displaying epidemic curve...")
+model.epi_curve()
+
+print(f"Drawing network at final day = {model.simulation_end_day}... ")
+model.draw_network(model.simulation_end_day)
+
+if runParameters["make_movie"]:
+    model.make_movie()
+
+
