@@ -2,3 +2,5 @@
 scripts/test.py
 ref/
 data
+__pycache__
+.pytest_cache

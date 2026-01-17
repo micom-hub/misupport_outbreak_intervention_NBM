@@ -22,6 +22,7 @@ def downloadPopData(state, county, projectDirectory):
     """
     cd = projectDirectory
     data_dir = cd + "/data"
+
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
@@ -35,7 +36,7 @@ def downloadPopData(state, county, projectDirectory):
 
     driver = webdriver.Chrome(options=options)
 
-    driver.get("https://fred.publichealth.pitt.edu/fredweb/public/syn_pops")
+    driver.get("https://fred.publichealth.pitt.edu/syn_pops")
 
     # Normalize case
     state = state.lower().capitalize()
@@ -50,6 +51,7 @@ def downloadPopData(state, county, projectDirectory):
     WebDriverWait(driver, 15).until(
         lambda d: len(Select(d.find_element(By.ID, "states")).options) > 1
     )
+
     state_dropdown = Select(driver.find_element(By.ID, "states"))
     state_dropdown.select_by_visible_text(state)
 
@@ -105,5 +107,5 @@ def downloadPopData(state, county, projectDirectory):
 
 if __name__ == "__main__":
     state = "Michigan"
-    county = "Washtenaw"
-    downloadPopData(state, county)
+    county = "Chippewa"
+    downloadPopData(state, county, os.getcwd())

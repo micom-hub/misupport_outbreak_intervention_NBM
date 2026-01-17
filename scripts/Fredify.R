@@ -85,6 +85,7 @@ contacts_dt <- sch_members_dt[contacts_dt, on = "sch_id"]
 
 
 
+
 #Build a DF of locations
 school_locations <- sch_members_dt[, .(
   id = as.character(sch_id),
@@ -112,6 +113,18 @@ locations_dt <- rbindlist(
 )
 
 locations_dt[, size := lengths(members)]
+contacts_dt <- contacts_dt[, .(
+  aPID,
+  hh_id,
+  wp_id,
+  sch_id,
+  gq_id,
+  age,
+  sex,
+  race,
+  relate,
+  gq
+)]
 
 
 print("Data Wrangled!")

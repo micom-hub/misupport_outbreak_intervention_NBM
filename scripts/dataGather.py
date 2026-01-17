@@ -1,10 +1,10 @@
 import pandas as pd
 import subprocess
 import os
-from FredFetch import downloadPopData
+from scripts.FredFetch import downloadPopData
 
 state = "Michigan"
-county = "Alcona"
+county = "Chippewa"
 save_to_parquet = True
 projectDirectory = os.getcwd()
 
