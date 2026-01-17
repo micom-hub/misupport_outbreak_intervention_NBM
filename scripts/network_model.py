@@ -96,11 +96,25 @@ class NetworkModel:
         self.rng = np.random.default_rng(self.params["seed"])
         self.county = self.params["county"]
 
-        self.edge_list = build_edge_list(contacts_df = self.contacts_df, 
-        params = self.params, 
-        rng = self.rng, 
-        save = self.params["save_data_files"],
-        county = self.county)
+        if os.path.isfile(
+            os.path.join(os.getcwd(), 
+            "data", 
+            self.county, 
+            (self.params["run_name"]+ "_edgeList.parquet")
+            )):
+            print(f"Edge list found for {self.params["run_name"]}, reading...")
+            self.edge_list = pd.read_parquet(os.path.join(os.getcwd(), 
+            "data", 
+            self.county, 
+            (self.params["run_name"]+ "_edgeList.parquet")
+            ))
+        else:
+            self.edge_list = build_edge_list(
+                contacts_df = self.contacts_df,
+                params = self.params, 
+                rng = self.rng, 
+                save = self.params["save_data_files"],
+                county = self.county)
 
         self.individual_lookup = build_individual_lookup(self.contacts_df)
 
@@ -152,8 +166,9 @@ class NetworkModel:
         R = []
         self.states_over_time.append([S,E,I,R])
 
-        self.new_exposures = [[]] #track which individuals became exposed at which timestep
-        self.new_infections = [initial_infectious] #track which individuals became infected at which timestep
+        self.new_exposures = [[]] #track which individuals became exposed at which timestep, which really correlates to pre-infectious in this model
+
+        self.new_infections = [initial_infectious] #track which individuals became infectious at which timestep
 
 #Set Simulation Tags
         self.simulation_end_day = self.Tmax
@@ -420,6 +435,46 @@ class NetworkModel:
         plt.tight_layout()
         plt.show()
 
+    def cumulative_incidence_plot(self, time: int = None, strata:str = None) -> None:
+        """
+        Plots cumulative incidence over time, optionally stratified
+
+        Args:
+            time (int, optional): time range for plot, 0-t, defaults to full timespan
+            strata (str, optional)  stratification factor for plot
+
+        Creates a matplotlib plot
+        """
+        pop_size = self.N
+
+        if time is None:
+            time = len(self.states_over_time)
+
+        #Track cumulatively infected individuals
+        exposures = self.new_exposures
+        if len(exposures) > 0 and len(exposures[0]) == 0:
+            exposures[0] = list(self.params["I0"])
+
+        max_time = len(exposures) - 1 if time is None else min(time, len(exposures) - 1)
+
+        cum_inf = []
+        tot = 0
+        for t in range(max_time+1):
+            tot += len(exposures[t])
+            cum_inf.append(tot/pop_size)
+        
+        plt.figure(figsize = (7, 4))
+        plt.plot(range(max_time+ 1), cum_inf, color = "red", linewidth = 2)
+        plt.xlabel("Time step (day)")
+        plt.ylabel("Cumulative Incidence (fraction of population)")
+        plt.title(f"Cumulative Incidence Over Time for  {self.params["run_name"]}")
+        plt.grid(True, axis = "y", alpha = 0.5)
+        plt.tight_layout()
+        plt.show()
+
+
+
+
     def draw_network(self, t: int, ax=None, clear: bool =True):
 
         #Take a timestep t as an input, and return a plot of the graph
@@ -523,6 +578,7 @@ if __name__ == "__main__":
     final_timestep = testModel.simulation_end_day
     print(f"Drawing Network at timestep {final_timestep}...")
     testModel.draw_network(final_timestep)
+    testModel.cumulative_incidence_plot()
 
 
 
