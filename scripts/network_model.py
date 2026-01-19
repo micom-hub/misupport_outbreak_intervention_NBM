@@ -33,10 +33,9 @@ class ModelParameters(TypedDict):
     gq_weight: float
     cas_weight: float
 
-
-
     # Simulation Settings
     run_name: str #prefix for model run
+    try_reload_edge_list: bool #Try to reload previously generated edge list for this run to save time
     simulation_duration: int  # days
     dt: float  # steps per day
     I0: List[int]
@@ -71,6 +70,7 @@ DefaultModelParams: ModelParameters = {
     "cas_weight": .1,
 
     "run_name" : "test_run",
+    "try_reload_edge_list": True,
     "simulation_duration": 45,
     "dt": 1,
     "I0": [906],
@@ -96,7 +96,7 @@ class NetworkModel:
         self.rng = np.random.default_rng(self.params["seed"])
         self.county = self.params["county"]
 
-        if os.path.isfile(
+        if self.params["try_reload_edge_list"] and os.path.isfile(
             os.path.join(os.getcwd(), 
             "data", 
             self.county, 

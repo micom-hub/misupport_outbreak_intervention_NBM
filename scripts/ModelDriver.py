@@ -36,6 +36,7 @@ runParameters: ModelParameters = {
 
 #Simulation settings
     "run_name": "test_run",
+    "try_reload_edge_list": True
     "simulation_duration": 45,
     "dt": 1,
     "I0": [0],
@@ -105,5 +106,7 @@ model.draw_network(model.simulation_end_day)
 
 if runParameters["make_movie"]:
     model.make_movie()
+
+
 
 
