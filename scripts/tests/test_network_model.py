@@ -13,11 +13,11 @@ from scripts.SynthDataProcessing import build_edge_list, build_individual_lookup
 def sample_contacts_df():
     # Small synthetic population:
     data = [
-        {"age": 34, "sex": "M", "race": "White", "hh_id": "A", "wp_id": "X", "sch_id": np.nan, "gq_id": np.nan},
-        {"age": 29, "sex": "F", "race": "Black", "hh_id": "A", "wp_id": "Y", "sch_id": np.nan, "gq_id": np.nan},
-        {"age": 17, "sex": "F", "race": "Asian", "hh_id": "B", "wp_id": "Y", "sch_id": "S1", "gq_id": np.nan},
-        {"age": 15, "sex": "M", "race": "White", "hh_id": "B", "wp_id": np.nan, "sch_id": "S1", "gq_id": np.nan},
-        {"age": 60, "sex": "F", "race": "Latino", "hh_id": "C", "wp_id": np.nan, "sch_id": np.nan, "gq_id": "G1"},
+        {"age": 60, "sex": "F", "race": "Latino", "hh_id": "C", "wp_id": np.nan, "sch_id": np.nan, "gq_id": "1", "gq": True},
+        {"age": 34, "sex": "M", "race": "White", "hh_id": "A", "wp_id": "X", "sch_id": np.nan, "gq_id": np.nan, "gq": False}, 
+        {"age": 29, "sex": "F", "race": "Black", "hh_id": "A", "wp_id": "Y", "sch_id": np.nan, "gq_id": np.nan, "gq": False},
+        {"age": 17, "sex": "F", "race": "Asian", "hh_id": "B", "wp_id": "Y", "sch_id": "S1", "gq_id": np.nan, "gq": False},
+        {"age": 15, "sex": "M", "race": "White", "hh_id": "B", "wp_id": np.nan, "sch_id": "S1", "gq_id": np.nan, "gq": False}
     ]
     return pd.DataFrame(data).reset_index(drop=True)
 
@@ -29,13 +29,56 @@ def net_model(sample_contacts_df):
         "simulation_duration": 5,
         "seed": 123,
         "try_reload_edge_list": False,
-        "save": False
+        "save_data_files": False
     })
     return NetworkModel(contacts_df=sample_contacts_df, params=params)
 
 ##################
 # Tests
 ##################
+
+
+#### Helper Functions
+def test_name_to_ind_single_and_batch(net_model):
+    g = net_model.epi_g
+    # Get all names (model indices) from graph
+    node_names = np.array(g.vs["name"])
+
+    # Test single name
+    test_name = node_names[0]
+    node_ind = net_model.name_to_ind(g, test_name)
+    assert g.vs[node_ind]["name"] == test_name
+
+    # Test list of names
+    some_names = node_names[:3]
+    node_inds = net_model.name_to_ind(g, some_names)
+    assert all(g.vs[ind]["name"] == name for ind, name in zip(node_inds, some_names))
+
+    # Test numpy array of names
+    arr_names = node_names[:3]
+    inds_arr = net_model.name_to_ind(g, arr_names)
+    assert (np.array([g.vs[i]["name"] for i in inds_arr]) == arr_names).all()
+
+
+def test_ind_to_name_single_and_batch(net_model):
+    g = net_model.epi_g
+    node_names = np.array(g.vs["name"])
+    node_inds = np.arange(len(node_names))
+
+    # Test single ind
+    test_ind = node_inds[0]
+    assert net_model.ind_to_name(g, test_ind) == g.vs[test_ind]["name"]
+
+    # Test list of inds
+    some_inds = node_inds[:3]
+    names_list = net_model.ind_to_name(g, some_inds)
+    for ind, name_returned in zip(some_inds, names_list):
+        assert name_returned == g.vs[ind]["name"]
+
+    # Test numpy array of inds
+    inds_arr = node_inds[:3]
+    names_arr = net_model.ind_to_name(g, inds_arr)
+    assert (np.array([g.vs[i]["name"] for i in inds_arr]) == names_arr).all()
 
 #### Input/Output Consistency
 
@@ -84,7 +127,7 @@ def test_graph_edge_attributes(net_model):
     if g.ecount() > 0:
         for e in g.es:
             assert isinstance(e["weight"], float)
-            assert e["contact_type"] in ("hh", "wp", "sch", "gq")
+            assert e["contact_type"] in ("hh", "wp", "sch", "gq", "cas")
 
 #### State Tracking and Transitions
 
@@ -132,7 +175,7 @@ def test_draw_network_runs(net_model, monkeypatch):
     final_timestep = getattr(net_model, "simulation_end_day", None) or (len(net_model.epi_graphs)-1)
     net_model.draw_network(final_timestep)
 
-#### Population Lookup
+#### Population Lookup and Attribute Creation
 
 def test_lookup_demographics(net_model):
     lookup = net_model.individual_lookup
@@ -142,7 +185,21 @@ def test_lookup_demographics(net_model):
         assert "race" in lookup.columns
         assert "sex" in lookup.columns
 
-#### Integration/Sanity
+def test_assign_node_attribute_works(net_model, sample_contacts_df):
+    g = net_model.epi_g
+    node_names = np.array(g.vs["name"])
+    ages = net_model.contacts_df.iloc[node_names]["age"].to_numpy()
+
+    net_model.assign_node_attribute("age", ages, node_names, g)
+
+    #verify they are correct
+    for idx, expected_age in zip(node_names, ages):
+        node_ind = next(i for i, name in enumerate(g.vs["name"]) if name == idx)
+        actual_age = g.vs[node_ind]["age"]
+        assert actual_age == expected_age
+
+
+#### Integration Tests
 
 def test_full_run_success(net_model, monkeypatch):
     import matplotlib.pyplot as plt

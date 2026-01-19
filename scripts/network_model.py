@@ -6,6 +6,7 @@ from typing import TypedDict, List
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
+
 from scripts.SynthDataProcessing import build_edge_list, build_individual_lookup
 
 class ModelParameters(TypedDict):
@@ -42,13 +43,15 @@ class ModelParameters(TypedDict):
     seed: int
     county: str #county to run on
     state: str #state to run on
+    save_plots: bool
     save_data_files: bool
     make_movie: bool
+    display_plots: bool
 
 
 
 DefaultModelParams: ModelParameters = {
-    "base_transmission_prob": 0.8,
+    "base_transmission_prob": 0.4,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -58,11 +61,11 @@ DefaultModelParams: ModelParameters = {
     "vax_efficacy": 0.997,
     "vax_uptake": 0.85, 
 
-    "wp_contacts": 10,
-    "sch_contacts": 10,
-    "gq_contacts": 20,
-    "cas_contacts": 1,
 
+    "wp_contacts": 1,
+    "sch_contacts": 1,
+    "gq_contacts": 2,
+    "cas_contacts": 2,
     "hh_weight": 1,
     "wp_weight": .5,
     "sch_weight": .6,
@@ -70,15 +73,17 @@ DefaultModelParams: ModelParameters = {
     "cas_weight": .1,
 
     "run_name" : "test_run",
-    "try_reload_edge_list": True,
+    "try_reload_edge_list": False,
     "simulation_duration": 45,
     "dt": 1,
     "I0": [906],
     "seed": 2026,
     "county": "Keweenaw",
     "state": "Michigan",
+    "save_plots": True,
     "save_data_files": True,
-    "make_movie": False
+    "make_movie": False,
+    "display_plots": True
 
 }
 
@@ -124,8 +129,9 @@ class NetworkModel:
     #Set a theoretical full with axis positions for visualization purposes
         self.full_node_list = sorted(set(self.edge_list['source']).union(set(self.edge_list['target'])))
         g_full = ig.Graph()
+        g_full = ig.Graph()
         g_full.add_vertices(len(self.full_node_list))
-        g_full.vs['name'] = self.full_node_list
+        g_full.vs['name'] = self.full_node_list #Node names in the graph correspond to model individual indices
 
         full_edges = list(zip(
             [self.full_node_list.index(src) for src in self.edge_list['source']],
@@ -177,12 +183,53 @@ class NetworkModel:
 
 
 #Set-up results folder
+        
+        self.results_folder = os.path.join(os.getcwd(), 
+            "results", self.params["run_name"])
         if self.params["save_data_files"]:
-            self.results_folder = os.path.join(os.getcwd(), 
-            "results", self.params["run_name"]
-            )
             if not os.path.exists(self.results_folder):
-                os.mkdir(self.results_folder)
+                os.mkdir(self.results_folder, exist_ok = True)
+
+    #Helper functions to convert between
+    #Name: an individual's number (index of contact_df/individual_lookup))
+    #Ind: the index of the individual's vertex in the model
+    def name_to_ind(self, g: ig.Graph, names):
+        """Convert individual's names to igraph vertex indices
+
+        Args:
+            g (ig.Graph): a graph with named nodes
+            names (int/list/np.array): a list of individual names 
+
+        Returns: graph indices of the same datatype as names
+        """
+        name_to_index = {int(v["name"]): v.index for v in g.vs}
+        if isinstance(names, (int, np.integer)):
+            return name_to_index[names]
+        elif isinstance(names, (list, np.ndarray)):
+            inds = [name_to_index[n] for n in names]
+            return np.array(inds, dtype = int)
+        else:
+            raise TypeError("names must be int, list, or numpy array.")
+        
+    def ind_to_name(self, g: ig.Graph, inds):
+        """Convert nodes of an igraph to their corresponding names
+
+        Args:
+            g (ig.Graph): an igraph object with named nodes
+            inds (int/list/np.array/range): a list of indices present in g
+
+        Returns: Names of graph indices as np.array
+        """
+        if isinstance(inds, (int, np.integer)):
+            return g.vs[inds]["name"]
+        elif isinstance(inds, (list, np.ndarray, range)):
+            names = [int(g.vs[i]["name"]) for i in inds]
+            return np.array(names, dtype = int)
+
+        else:
+            raise TypeError("inds myst be int, list, or numpy array.")
+            
+
     
     def build_neighbor_map(self):
         """
@@ -212,18 +259,20 @@ class NetworkModel:
                 node_set.add(int(neighbor))
         node_list = sorted([int(n) for n in node_set])
 
-        name_to_vertex = {int(name): v for v, name in enumerate(node_list)}
+        g = ig.Graph()
+        g.add_vertices(len(node_list))
+        g.vs["name"] = node_list
 
         # Preventing duplicates; all int
         edge_set = set()
         edge_data = {}  # i, j, weight, ct
 
-        induced_nodes = set([int(n) for n in node_list])
+        name_to_ind_graph = {name: idx for idx, name in enumerate(node_list)}
         for ind in node_list:
             ind = int(ind)
             for neighbor, weight, ct in self.neighbor_map.get(ind, []):
                 neighbor = int(neighbor)
-                if neighbor in induced_nodes and ind != neighbor:
+                if neighbor in node_list and ind != neighbor:
                     edge_tuple = tuple(sorted((ind, neighbor)))
                     if edge_tuple not in edge_set:
                         edge_set.add(edge_tuple)
@@ -231,7 +280,7 @@ class NetworkModel:
 
         edges, weights, types = [], [], []
         for (i, j), (w, t) in edge_data.items():
-            edges.append((name_to_vertex[int(i)], name_to_vertex[int(j)]))
+            edges.append((name_to_ind_graph[int(i)], name_to_ind_graph[int(j)]))
             weights.append(w)
             types.append(t)
 
@@ -243,18 +292,23 @@ class NetworkModel:
             g.es["weight"] = weights
             g.es["contact_type"] = types
 
+        ages = self.individual_lookup.loc[node_list, "age"].to_numpy()
+        sexes = self.individual_lookup.loc[node_list, "sex"].to_numpy()
+        self.assign_node_attribute("age", ages, node_list, g)
+        self.assign_node_attribute("sex", sexes, node_list, g)
+
         return g
 
     def add_to_graph(self, g: ig.Graph, indices):
         """
-        Quickly add all neighbors of indices to igraph g without duplicates, ensuring all node names are ints.
+        Quickly add all neighbors of indices to igraph g without duplicates, ensuring all node names are ints, assigns demographic attributes to each new node when added
         """
         # Always treat indices as list of ints
         if isinstance(indices, int):
             indices = [indices]
         indices = [int(i) for i in np.asarray(indices)]
 
-        existing_names = set([int(name) for name in g.vs["name"]])
+        existing_names = set(self.ind_to_name(g, range(g.vcount())))
 
         # Gather current edges as tuples of int
         existing_edge_set = set()
@@ -285,7 +339,11 @@ class NetworkModel:
             g.vs[-len(new_nodes):]["name"] = newly_added
             existing_names.update(newly_added)
 
-        
+        #Assign age and sex to new nodes
+            ages = self.individual_lookup.loc[newly_added, "age"].to_numpy()
+            sexes = self.individual_lookup.loc[newly_added, "sex"].to_numpy()
+            self.assign_node_attribute("age", ages, newly_added, g)
+            self.assign_node_attribute("sex", sexes, newly_added, g)
 
         # Update mapping, all int
         name_to_vertex = {int(v["name"]): v.index for v in g.vs}
@@ -304,6 +362,36 @@ class NetworkModel:
 
         return g
     
+    def assign_node_attribute(self, attr_name: str, vals: np.ndarray, indices: np.ndarray, g: ig.Graph) -> ig.Graph:
+        """Assigns a node attribute to specified nodes in an igraph Graph object
+
+        Args:
+            attr_name (str): The name of the attribute to be assigned
+            vals (np.ndarray): An array of values to be assigned
+            indices (np.ndarray): An array of MODEL INDICES (node names) for assignment
+            g (ig.Graph): an igraph containing the indices provided
+
+        Returns:
+            ig.Graph: The provided igraph with added attribute names
+
+        DO NOT USE for assigning node names
+        """
+
+        if len(vals) != len(indices):
+            raise ValueError("Length of values must match length of indices")
+
+        available_names = set(g.vs["name"])
+        if (set(indices) - available_names):
+            raise ValueError("Indices not present in the graph cannot have attributes added")
+
+        
+        name_to_ind = {v["name"]: v.index for v in g.vs}
+
+        node_ind = [name_to_ind[ind] for ind in indices]
+        g.vs[node_ind][attr_name] = vals
+        return g
+
+        
     def assign_incubation_period(self, inds):
         """
         Take a list of newly-assigned exposed indices and assign an incubation period
@@ -331,22 +419,22 @@ class NetworkModel:
         #Determine new exposures
         newly_exposed = []
 
-        current_nodes = np.array([int(v["name"]) for v in self.epi_g.vs])
+        current_nodes = self.ind_to_name(self.epi_g, range(self.epi_g.vcount()))
         infectious_nodes = current_nodes[self.state[current_nodes] == 2]
 
         for infec_ind in infectious_nodes:
             #note infectious indices correspond to names in the igraph
-            node_index = self.epi_g.vs.find(name = infec_ind).index
+            node_index = self.name_to_ind(self.epi_g, infec_ind)
             neighbor_indices = self.epi_g.neighbors(node_index)
-            neighbors = np.array([int(self.epi_g.vs[n]["name"]) for n in neighbor_indices], dtype = int)
+            neighbors = self.ind_to_name(self.epi_g, neighbor_indices)
 
             sus_neighbors = neighbors[self.state[neighbors] == 0]
 
             if sus_neighbors.size:
                 #get edge weights
                 eids = [self.epi_g.get_eid(
-                    self.epi_g.vs.find(name = infec_ind).index,
-                    self.epi_g.vs.find(name = nbr).index) 
+                    self.name_to_ind(self.epi_g, infec_ind),
+                    self.name_to_ind(self.epi_g, nbr))
                     for nbr in sus_neighbors]
 
                 weights = np.array([self.epi_g.es[eid]["weight"] for eid in eids])
@@ -396,7 +484,7 @@ class NetworkModel:
         self.time_in_state[inactive_nodes] += 1
 
         #New nodes list, adding new nodes to S
-        updated_nodes = np.array([int(v["name"]) for v in self.epi_g.vs])
+        updated_nodes = self.ind_to_name(self.epi_g, range(self.epi_g.vcount()))
 
 
         #Save timestep data
@@ -434,7 +522,14 @@ class NetworkModel:
         plt.ylabel("Number of Infectious Contacts Made")
         plt.grid(axis = 'y', alpha = 0.5)
         plt.tight_layout()
-        plt.show()
+        if self.params["save_plots"]:
+            plt.savefig(os.path.join(self.results_folder, "epi_curve.png"))
+
+        if self.params["display_plots"]:
+            plt.show()
+        plt.close()
+
+        return
 
     def cumulative_incidence_plot(self, time: int = None, strata:str = None) -> None:
         """
@@ -471,12 +566,16 @@ class NetworkModel:
         plt.title(f"Cumulative Incidence Over Time for  {self.params["run_name"]}")
         plt.grid(True, axis = "y", alpha = 0.5)
         plt.tight_layout()
-        plt.show()
+        if self.params["save_plots"]:
+            plt.savefig(os.path.join(self.results_folder, "cumulative_incidence"))
+        if self.params["display_plots"]:
+            plt.show()
+        plt.close()
 
 
 
 
-    def draw_network(self, t: int, ax=None, clear: bool =True):
+    def draw_network(self, t: int, ax=None, clear: bool =True, saveFile: bool = False):
 
         #Take a timestep t as an input, and return a plot of the graph
         g = self.epi_graphs[t]
@@ -489,8 +588,8 @@ class NetworkModel:
 
         indices = [self.layout_node_names.index(v["name"]) for v in g.vs]
         layout = [self.fixed_layout[i] for i in indices]
-
         node_labels = g.vs["name"]
+
         if len(g.vs) > 40:
             node_labels = None
 
@@ -506,15 +605,19 @@ class NetworkModel:
             g,
             layout = layout,
             vertex_color = colors,
-            vertex_size = 30,
+            vertex_size = 15,
             edge_color = "gray",
             bbox = (600,600),
             target = ax,
             vertex_label = node_labels
         )
         ax.set_title(f"Network at t = {t}")
-        if show_plot:
+        if saveFile:
+            plt.savefig(os.path.join(self.results_folder, str("network_at_" + str(t))))
+        if show_plot and self.params["display_plots"]:
             plt.show()
+        plt.close()
+
 
         return
 
@@ -577,8 +680,10 @@ if __name__ == "__main__":
     testModel.epi_curve()
 
     final_timestep = testModel.simulation_end_day
+
     print(f"Drawing Network at timestep {final_timestep}...")
-    testModel.draw_network(final_timestep)
+
+    testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
     testModel.cumulative_incidence_plot()
 
 

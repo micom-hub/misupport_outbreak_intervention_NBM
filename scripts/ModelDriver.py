@@ -36,7 +36,7 @@ runParameters: ModelParameters = {
 
 #Simulation settings
     "run_name": "test_run",
-    "try_reload_edge_list": True
+    "try_reload_edge_list": True,
     "simulation_duration": 45,
     "dt": 1,
     "I0": [0],
