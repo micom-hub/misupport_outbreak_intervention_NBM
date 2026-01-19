@@ -28,7 +28,8 @@ def net_model(sample_contacts_df):
         "I0": [1],         # Infect individual 1 (person with index 1)
         "simulation_duration": 5,
         "seed": 123,
-        "try_reload_edge_list": False
+        "try_reload_edge_list": False,
+        "save": False
     })
     return NetworkModel(contacts_df=sample_contacts_df, params=params)
 

@@ -338,7 +338,8 @@ class NetworkModel:
             #note infectious indices correspond to names in the igraph
             node_index = self.epi_g.vs.find(name = infec_ind).index
             neighbor_indices = self.epi_g.neighbors(node_index)
-            neighbors = np.array([int(self.epi_g.vs[n]["name"]) for n in neighbor_indices])
+            neighbors = np.array([int(self.epi_g.vs[n]["name"]) for n in neighbor_indices], dtype = int)
+
             sus_neighbors = neighbors[self.state[neighbors] == 0]
 
             if sus_neighbors.size:
