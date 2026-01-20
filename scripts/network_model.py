@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import igraph as ig
+import networkx as nx
 from typing import TypedDict, List
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
@@ -125,9 +126,11 @@ class NetworkModel:
                 county = self.county)
 
         self.individual_lookup = build_individual_lookup(self.contacts_df)
-
         self.neighbor_map = self.build_neighbor_map()
-
+        self.existing_edge_set= set() # track existing edges
+        self.fast_neighbor_map = {} #preprocess dict of dicts to speed up later
+        for src, nbr_list in self.neighbor_map.items():
+            self.fast_neighbor_map[src] = {tgt: (weight, ct) for tgt, weight, ct in nbr_list}
 
     #Set a theoretical full with axis positions for visualization purposes
         self.full_node_list = sorted(set(self.edge_list['source']).union(set(self.edge_list['target'])))
@@ -141,8 +144,9 @@ class NetworkModel:
             [self.full_node_list.index(tgt) for tgt in self.edge_list['target']]
         ))
         g_full.add_edges(full_edges)
-        self.fixed_layout = g_full.layout('fr') #set a layout for the full graph
+        self.fixed_layout = g_full.layout('grid') #set a layout for the full graph
         self.layout_node_names = self.full_node_list
+        self.layout_name_to_ind = {name:i for i, name in enumerate(self.layout_node_names)}
 
 
 #State tracking: 0 = S, 1 = E, 2 = I, 3 = R
@@ -300,8 +304,16 @@ class NetworkModel:
         self.assign_node_attribute("age", ages, node_list, g)
         self.assign_node_attribute("sex", sexes, node_list, g)
 
-        return g
 
+        #track edges
+        self.existing_edge_set = set()
+        for e in g.es:
+            i = int(g.vs[e.source]["name"])
+            j = int(g.vs[e.target]["name"])
+            edge_tuple =tuple(sorted((i, j)))
+            self.existing_edge_set.add(edge_tuple)
+        return g
+    #@profile
     def add_to_graph(self, g: ig.Graph, indices):
         """
         Quickly add all neighbors of indices to igraph g without duplicates, ensuring all node names are ints, assigns demographic attributes to each new node when added
@@ -314,25 +326,21 @@ class NetworkModel:
         existing_names = set(self.ind_to_name(g, range(g.vcount())))
 
         # Gather current edges as tuples of int
-        existing_edge_set = set()
-        for e in g.es:
-            i, j = int(g.vs[e.source]["name"]), int(g.vs[e.target]["name"])
-            edge_tuple = tuple(sorted((i, j)))
-            existing_edge_set.add(edge_tuple)
-
         new_nodes = set()
         edge_set = set()
         edge_data = {}
 
         for ind in indices:
-            ind = int(ind)
-            for neighbor, weight, ct in self.neighbor_map.get(ind, []):
+            neighbors_dict = self.fast_neighbor_map.get(ind, {})
+            for neighbor, (weight, ct) in neighbors_dict.items():
                 neighbor = int(neighbor)
+                #only add a node if it isn't present
                 if neighbor not in existing_names:
                     new_nodes.add(neighbor)
+                #don't duplicate edges or add loops
                 if ind != neighbor:
                     edge_tuple = tuple(sorted((ind, neighbor)))
-                    if edge_tuple not in existing_edge_set and edge_tuple not in edge_set:
+                    if edge_tuple not in self.existing_edge_set and edge_tuple not in edge_set:
                         edge_set.add(edge_tuple)
                         edge_data[edge_tuple] = (weight, ct)
 
@@ -356,12 +364,12 @@ class NetworkModel:
             edges.append((name_to_vertex[int(i)], name_to_vertex[int(j)]))
             weights.append(w)
             types.append(t)
+            self.existing_edge_set.add((min(i,j),max(i,j))) #update existing edges
+            
         if edges:
             g.add_edges(edges)
             g.es[-len(edges):]["weight"] = weights
             g.es[-len(edges):]["contact_type"] = types
-
-
 
         return g
     
@@ -413,56 +421,64 @@ class NetworkModel:
 
         return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inf)
 
+    #@profile
+    def determine_new_exposures(self):
+        """
+    Uses the current epi_g, self.neighbor_map, and self.individual_lookup to determine who is newly exposed in a given step
+        """
+        infectious_nodes = np.where(self.state == 2)[0]
+
+        pairs_source = []
+        pairs_target = []
+        contact_weights = []
+        contact_types = []
+
+        for src in infectious_nodes:
+            for tgt in self.fast_neighbor_map.get(src, {}):
+                if self.state[tgt] == 0: #target must be susceptible
+                    weight, ctype = self.fast_neighbor_map[src][tgt]
+                    pairs_source.append(src)
+                    pairs_target.append(tgt)
+                    contact_weights.append(weight)
+                    contact_types.append(ctype)
+
+        if not pairs_source:
+            return np.array([], dtype = int)
+        
+        pairs_source = np.array(pairs_source)
+        pairs_target = np.array(pairs_target)
+        contact_weights = np.array(contact_weights)
+
+        #calculate transmission 
+        prob = self.params["base_transmission_prob"] * contact_weights
+
+        source_vax = self.is_vaccinated[pairs_source]
+        target_vax = self.is_vaccinated[pairs_target]
+        prob = prob*np.where(source_vax, self.params["relative_infectiousness_vax"], 1)
+        prob = prob * ((1- self.params["vax_efficacy"]) ** target_vax)
+
+        #Factor in individual heterogeneity 
+        ages_target = self.individual_lookup.loc[pairs_target, "age"].to_numpy()
+        under_five_mask = ages_target <= 5
+        prob[under_five_mask] *= self.params["susceptibility_multiplier_under_five"]
+        
+        #Do random draws
+        draws = self.rng.random(len(prob))
+        new_exposed = np.array(pairs_target[draws < prob], dtype = int)
+        return np.unique(new_exposed)
+
+    #@profile
     def step(self):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
         """
 
-
         #Determine new exposures
-        newly_exposed = []
 
         current_nodes = self.ind_to_name(self.epi_g, range(self.epi_g.vcount()))
         infectious_nodes = current_nodes[self.state[current_nodes] == 2]
-
-        for infec_ind in infectious_nodes:
-            #note infectious indices correspond to names in the igraph
-            node_index = self.name_to_ind(self.epi_g, infec_ind)
-            neighbor_indices = self.epi_g.neighbors(node_index)
-            neighbors = self.ind_to_name(self.epi_g, neighbor_indices)
-
-            sus_neighbors = neighbors[self.state[neighbors] == 0]
-
-            if sus_neighbors.size:
-                #get edge weights
-                eids = [self.epi_g.get_eid(
-                    self.name_to_ind(self.epi_g, infec_ind),
-                    self.name_to_ind(self.epi_g, nbr))
-                    for nbr in sus_neighbors]
-
-                weights = np.array([self.epi_g.es[eid]["weight"] for eid in eids])
-                
-                #calculate transmission prob for each
-                prob = self.params["base_transmission_prob"]*weights
-                #adjust for vaccination of i, j
-                source_vax = self.is_vaccinated[infec_ind]
-                exposed_vax = self.is_vaccinated[sus_neighbors]
-                if source_vax:
-                    prob *= self.params["relative_infectiousness_vax"]
-                prob *= ((1- self.params["vax_efficacy"]) ** exposed_vax)
-
-                #EXAMPLE OF INCREASING INDIVIDUAL HETEROGENEITY
-                #Increasing susceptibility of those under five
-                #TODO change this to realistic 
-                ages_sus = np.array(self.epi_g.vs[self.name_to_ind(self.epi_g, sus_neighbors)]["age"])
-                is_under_five = ages_sus <= 5
-                prob[is_under_five] *= self.params["susceptibility_multiplier_under_five"]
-
-                draws = self.rng.random(sus_neighbors.shape)
-                new_exposed = sus_neighbors[draws < prob]
-                newly_exposed.extend(new_exposed.tolist())
-
-        newly_exposed = np.unique(newly_exposed)
+        newly_exposed = []
+        newly_exposed = self.determine_new_exposures()
 
         #Determine exposed to infectious
         exposed_nodes = current_nodes[self.state[current_nodes] == 1]
@@ -510,6 +526,7 @@ class NetworkModel:
         self.new_exposures.append(newly_exposed)
         self.new_infections.append(to_infectious)
 
+   # #@profile
     def simulate(self):
         t = 0
         while t < self.Tmax:
@@ -658,7 +675,7 @@ class NetworkModel:
 
 
 
-
+    #@profile
     def draw_network(self, t: int, ax=None, clear: bool =True, saveFile: bool = False):
 
         #Take a timestep t as an input, and return a plot of the graph
@@ -670,7 +687,7 @@ class NetworkModel:
         color_map.update({i: "green" for i in R})
         colors = [color_map[v["name"]] for v in g.vs]
 
-        indices = [self.layout_node_names.index(v["name"]) for v in g.vs]
+        indices = [self.layout_name_to_ind[v["name"]] for v in g.vs]
         layout = [self.fixed_layout[i] for i in indices]
         node_labels = g.vs["name"]
 
@@ -679,7 +696,7 @@ class NetworkModel:
 
 
         if ax is None:
-            fig, ax = plt.subplots(figsize = (8,8))
+            fig, ax = plt.subplots(figsize = (10,10))
             show_plot = True
         else:
             show_plot = False
@@ -749,8 +766,54 @@ class NetworkModel:
         print(f"Outbreak movie saved to {out_path}...")
 
         return
+
+    def make_graphi_file(self, t: int):
+        """ Visualize the network at a given timestep using graphi
+
+        Args:
+            t (int): a timestep of the network to visualize
+
+        Returns:
+            Saves a .graphml of the network to open on gephi
+        """
+        def igraph_to_networkx(g: ig.Graph) -> nx.Graph:
+
+            """
+            Takes an igraph graph object and converts it to a networkX graph to be visualized with graphi
+
+            Args:
+                g (ig.Graph): an igraph Graph
+
+            Returns:
+                nx.Graph: a networkX graph object
+            """
+          
+            G = nx.Graph()
+            #add attributes
+            for v in g.vs:
+                node_id = v["name"]
+                attrs = v.attributes().copy()
+                attrs.pop("name", None) #don't duplicate name
+                G.add_node(node_id, **attrs)
+
+            for e in g.es:
+                u = g.vs[e.source]["name"]
+                v = g.vs[e.target]["name"]
+                attrs = e.attributes().copy()
+                G.add_edge(u, v, **attrs)
+            return G
+        nx_g = igraph_to_networkx(self.epi_graphs[t])
+        self.nx_g = nx_g
+        if self.params["save_data_files"]:
+            nx.write_graphml(nx_g, os.path.join(self.results_folder, "network.graphml"))
+
+        return
+
+
        
 
+
+    
 
 #Test run on a really small population
 if __name__ == "__main__":
@@ -769,6 +832,8 @@ if __name__ == "__main__":
     # testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
     print("Displaying cumulative incidence...")
     testModel.cumulative_incidence_plot()
+
+
 
 
 

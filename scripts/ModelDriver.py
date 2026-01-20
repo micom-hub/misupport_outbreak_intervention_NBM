@@ -37,7 +37,7 @@ runParameters: ModelParameters = {
     "cas_weight": .1,
 
 #Simulation settings
-    "run_name": "test_run",
+    "run_name": "driver_run",
     "try_reload_edge_list": False, #Must be true to render changes in contact structure
     "simulation_duration": 45,
     "dt": 1,
