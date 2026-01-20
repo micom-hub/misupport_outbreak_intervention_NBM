@@ -539,7 +539,7 @@ class NetworkModel:
             t += 1
         self.model_has_run = True
 
-    def epi_curve(self):
+    def epi_curve(self, suffix: str = None):
 
         #Produce an epi-curve of the number of individuals infected at each timestep
         counts = [len(exposed) for exposed in self.new_exposures]
@@ -551,7 +551,12 @@ class NetworkModel:
         plt.grid(axis = 'y', alpha = 0.5)
         plt.tight_layout()
         if self.params["save_plots"]:
-            plt.savefig(os.path.join(self.results_folder, "epi_curve.png"))
+            plotpath = os.path.join(self.results_folder,"epi_curve")
+            if suffix:
+                plotpath = plotpath + suffix
+            
+
+            plt.savefig(f"{plotpath}.png")
 
         if self.params["display_plots"]:
             plt.show()
@@ -559,7 +564,7 @@ class NetworkModel:
 
         return
 
-    def cumulative_incidence_plot(self, strata:str = None, time: int = None) -> None:
+    def cumulative_incidence_plot(self, strata:str = None, time: int = None, suffix: str = None) -> None:
         """
         Plots cumulative incidence over time, optionally stratified
 
@@ -620,14 +625,13 @@ class NetworkModel:
             strata_members = {label: node_names[strata_vals == label] for label in labels}
             #assign colors
 
-        elif strata and not (strata in g.vs.attributes()):
+        elif strata and (strata not in g.vs.attributes()):
             raise ValueError(f"stratifying factor {strata} is not an attribute of this graph. Check spelling and try again")
         
         else:
              strata = None
 
         overall_cumulative = []
-        tot = 0
         exposed_set = set()
         for t in x_vals:
             exposed_set.update(exposures[t]) #generalizeable to models with recovery
@@ -665,10 +669,14 @@ class NetworkModel:
             plt.title(f"Cumulative Incidence Over Time for  {self.params["run_name"]}")
         plt.grid(True, axis = "y", alpha = 0.5)
         plt.tight_layout()
+        plotpath = os.path.join(self.results_folder, "cumulative_incidence")
+        if suffix:
+            plotpath = plotpath + suffix
         if self.params["save_plots"]:
             if strata:
-                plt.savefig(os.path.join(self.results_folder, f"cumulative_incidence_{strata}"))
-            else: plt.savefig(os.path.join(self.results_folder, "cumulative_incidence"))
+                plt.savefig(f"{plotpath}_by{strata}.png")
+            else: 
+                plt.savefig(f"{plotpath}.png")
         if self.params["display_plots"]:
             plt.show()
         plt.close()
@@ -676,7 +684,7 @@ class NetworkModel:
 
 
     #@profile
-    def draw_network(self, t: int, ax=None, clear: bool =True, saveFile: bool = False):
+    def draw_network(self, t: int, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
 
         #Take a timestep t as an input, and return a plot of the graph
         g = self.epi_graphs[t]
@@ -714,7 +722,10 @@ class NetworkModel:
         )
         ax.set_title(f"Network at t = {t}")
         if saveFile:
-            plt.savefig(os.path.join(self.results_folder, str("network_at_" + str(t))))
+            plotpath = os.path.join(self.results_folder, f"network_at_{str(t)}")
+            if suffix:
+                plotpath = plotpath + suffix
+            plt.savefig(f"{plotpath}.png")
         if show_plot and self.params["display_plots"]:
             plt.show()
         plt.close()
@@ -767,7 +778,7 @@ class NetworkModel:
 
         return
 
-    def make_graphi_file(self, t: int):
+    def make_graphi_file(self, t: int, suffix: str = None):
         """ Visualize the network at a given timestep using graphi
 
         Args:
@@ -805,7 +816,10 @@ class NetworkModel:
         nx_g = igraph_to_networkx(self.epi_graphs[t])
         self.nx_g = nx_g
         if self.params["save_data_files"]:
-            nx.write_graphml(nx_g, os.path.join(self.results_folder, "network.graphml"))
+            netpath = os.path.join(self.results_folder, "networkfile")
+            if suffix:
+                netpath = netpath + suffix
+            nx.write_graphml(nx_g, (self.netpath + ".graphml"))
 
         return
 
