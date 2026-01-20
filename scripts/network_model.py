@@ -4,6 +4,7 @@ import pandas as pd
 import igraph as ig
 from typing import TypedDict, List
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import matplotlib.animation as animation
 
 
@@ -20,6 +21,8 @@ class ModelParameters(TypedDict):
 
     relative_infectiousness_vax: float
     vax_efficacy: float
+    vax_uptake: float
+    susceptibility_multiplier_under_five: float #increase in susceptibility if age <= 5
 
     # Population Params
     vax_uptake: float
@@ -51,7 +54,7 @@ class ModelParameters(TypedDict):
 
 
 DefaultModelParams: ModelParameters = {
-    "base_transmission_prob": 0.4,
+    "base_transmission_prob": 0.8,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -60,12 +63,12 @@ DefaultModelParams: ModelParameters = {
     "relative_infectiousness_vax": 0.05,
     "vax_efficacy": 0.997,
     "vax_uptake": 0.85, 
+    "susceptibility_multiplier_under_five": 2.0,
 
-
-    "wp_contacts": 1,
-    "sch_contacts": 1,
-    "gq_contacts": 2,
-    "cas_contacts": 2,
+    "wp_contacts": 10,
+    "sch_contacts": 10,
+    "gq_contacts": 10,
+    "cas_contacts": 5,
     "hh_weight": 1,
     "wp_weight": .5,
     "sch_weight": .6,
@@ -438,6 +441,7 @@ class NetworkModel:
                     for nbr in sus_neighbors]
 
                 weights = np.array([self.epi_g.es[eid]["weight"] for eid in eids])
+                
                 #calculate transmission prob for each
                 prob = self.params["base_transmission_prob"]*weights
                 #adjust for vaccination of i, j
@@ -446,6 +450,13 @@ class NetworkModel:
                 if source_vax:
                     prob *= self.params["relative_infectiousness_vax"]
                 prob *= ((1- self.params["vax_efficacy"]) ** exposed_vax)
+
+                #EXAMPLE OF INCREASING INDIVIDUAL HETEROGENEITY
+                #Increasing susceptibility of those under five
+                #TODO change this to realistic 
+                ages_sus = np.array(self.epi_g.vs[self.name_to_ind(self.epi_g, sus_neighbors)]["age"])
+                is_under_five = ages_sus <= 5
+                prob[is_under_five] *= self.params["susceptibility_multiplier_under_five"]
 
                 draws = self.rng.random(sus_neighbors.shape)
                 new_exposed = sus_neighbors[draws < prob]
@@ -531,7 +542,7 @@ class NetworkModel:
 
         return
 
-    def cumulative_incidence_plot(self, time: int = None, strata:str = None) -> None:
+    def cumulative_incidence_plot(self, strata:str = None, time: int = None) -> None:
         """
         Plots cumulative incidence over time, optionally stratified
 
@@ -542,6 +553,8 @@ class NetworkModel:
         Creates a matplotlib plot
         """
         pop_size = self.N
+        if isinstance(strata, str):
+            strata = strata.lower()
 
         if time is None:
             time = len(self.states_over_time)
@@ -552,22 +565,93 @@ class NetworkModel:
             exposures[0] = list(self.params["I0"])
 
         max_time = len(exposures) - 1 if time is None else min(time, len(exposures) - 1)
+        x_vals = range(max_time + 1)
 
-        cum_inf = []
-        tot = 0
-        for t in range(max_time+1):
-            tot += len(exposures[t])
-            cum_inf.append(tot/pop_size)
+
+
+        #Map node indices to strata values
+        strata_labels, strata_members, strata_colors = None, None, None
+
+        g = self.epi_graphs[time - 1] #last step, or corresponding graph
+        node_names = np.array(g.vs["name"])
+
+        #Stratification
+        if strata and (strata in g.vs.attributes()):
+            attr_vals = np.array(g.vs[strata])
+            if strata == "age":
+                #Age bins directly input here, change as needed
+                bins = [0, 6, 19, 35, 65, 200]
+                labels = ["0-5", "6-18", "19-34", "35-64", "65+"]
+                attr_vals = np.array(attr_vals)
+                strata_vals = pd.cut(attr_vals, bins, right = False, labels = labels)
+                strata_colors = [
+        "#e41a1c",  # Red for 0-5
+        "#377eb8",  # Blue for 6-18
+        "#4daf4a",  # Green for 19-34
+        "#984ea3",  # Purple for 35-64
+        "#ff7f00",  # Orange for 65+
+    ]
+
+            elif strata == "sex":
+                strata_vals = attr_vals
+                labels = sorted(np.unique(attr_vals))
+                label_to_color = {lab: ("red" if lab == "F" else "blue") for lab in labels}
+                strata_colors = [label_to_color[lab] for lab in labels]
+        #assign strata labels and members
+            strata_labels = labels
+            #mask for each stratum
+            strata_members = {label: node_names[strata_vals == label] for label in labels}
+            #assign colors
+
+        elif strata and not (strata in g.vs.attributes()):
+            raise ValueError(f"stratifying factor {strata} is not an attribute of this graph. Check spelling and try again")
         
-        plt.figure(figsize = (7, 4))
-        plt.plot(range(max_time+ 1), cum_inf, color = "red", linewidth = 2)
+        else:
+             strata = None
+
+        overall_cumulative = []
+        tot = 0
+        exposed_set = set()
+        for t in x_vals:
+            exposed_set.update(exposures[t]) #generalizeable to models with recovery
+            overall_cumulative.append(len(exposed_set)/pop_size)
+
+        if strata:
+            strata_cum = {label: [] for label in strata_labels}
+            exposed_by_strata = {label: set() for label in strata_labels}
+            for t in x_vals:
+                newly_exposed = set(exposures[t])
+                for label in strata_labels:
+                    this_group = set(strata_members[label])
+                    exposed_by_strata[label].update(newly_exposed & this_group)
+                    group_size = len(strata_members[label])
+                    if group_size > 0:
+                        strata_cum[label].append(len(exposed_by_strata[label]) / group_size)
+                    else:
+                        strata_cum[label].append(0.0)
+        
+        plt.figure(figsize = (8, 5))
+        plt.plot(x_vals, overall_cumulative, color = "black", label = "Total", linewidth = 2, zorder = 3)
+        if strata:
+            bottom = np.zeros(len(x_vals))
+            for i, label in enumerate(strata_labels):
+                plt.fill_between(x_vals, bottom, np.array(bottom) + np.array(strata_cum[label]) * (len(strata_members[label])/pop_size), 
+                step = None , color = strata_colors[i], alpha = 0.5, label = str(label))
+                bottom += np.array(strata_cum[label]) * (len(strata_members[label])/pop_size)
         plt.xlabel("Time step (day)")
         plt.ylabel("Cumulative Incidence (fraction of population)")
-        plt.title(f"Cumulative Incidence Over Time for  {self.params["run_name"]}")
+        if strata:
+            plt.title(f"Cumulative Incidence (Stratified by {strata})\nRun {self.params['run_name']}")
+            legend_handles = [Patch(color = strata_colors[i], label = str(label)) for i, label in enumerate(strata_labels)]
+            plt.legend(handles = legend_handles, loc = "upper left")
+        else:
+            plt.title(f"Cumulative Incidence Over Time for  {self.params["run_name"]}")
         plt.grid(True, axis = "y", alpha = 0.5)
         plt.tight_layout()
         if self.params["save_plots"]:
-            plt.savefig(os.path.join(self.results_folder, "cumulative_incidence"))
+            if strata:
+                plt.savefig(os.path.join(self.results_folder, f"cumulative_incidence_{strata}"))
+            else: plt.savefig(os.path.join(self.results_folder, "cumulative_incidence"))
         if self.params["display_plots"]:
             plt.show()
         plt.close()
@@ -681,9 +765,9 @@ if __name__ == "__main__":
 
     final_timestep = testModel.simulation_end_day
 
-    print(f"Drawing Network at timestep {final_timestep}...")
-
-    testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
+    # print(f"Drawing Network at timestep {final_timestep}...")
+    # testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
+    print("Displaying cumulative incidence...")
     testModel.cumulative_incidence_plot()
 
 
