@@ -906,8 +906,10 @@ if __name__ == "__main__":
 
     final_timestep = testModel.simulation_end_day
 
-    print(f"Drawing Network at timestep {final_timestep}...")
-    testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
+    # print(f"Drawing Network at timestep {final_timestep}...")
+    # testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
+
+
 
     print("Displaying cumulative incidence...")
     testModel.cumulative_incidence_plot()
