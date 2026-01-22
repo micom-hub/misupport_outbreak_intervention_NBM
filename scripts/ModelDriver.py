@@ -2,16 +2,16 @@ import os
 import pandas as pd
 import json
 
-from scripts.FredFetch import downloadPopData
-from scripts.SynthDataProcessing import synthetic_data_process
-from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401
+from FredFetch import downloadPopData
+from SynthDataProcessing import synthetic_data_process
+from network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401
 
 ############################################
 # Run Settings: Alter runParameters values #
 ############################################
 
 runParameters: ModelParameters = {
-#Epidemiological Parameters
+    #Epidemiological Parameters
     "base_transmission_prob": 0.8,
     "incubation_period": 10.5,
     "infectious_period": 5,
@@ -24,20 +24,20 @@ runParameters: ModelParameters = {
     "susceptibility_multiplier_under_five": 2.0,
 
 
-#Number of contacts assigned to each individual from each location
+    #Number of contacts assigned to each individual from each location
     "wp_contacts": 10,
     "sch_contacts": 10,
     "gq_contacts": 20,
     "cas_contacts": 10,
 
-#Weighting of each contact type
+    #Weighting of each contact type
     "hh_weight": 1,
     "wp_weight": .5,
     "sch_weight": .6,
     "gq_weight": .3,
     "cas_weight": .1,
 
-#Simulation settings
+    #Simulation settings
     "run_name": "driver_run",
     "overwrite_edge_list": True, #Must be true to render changes in contact structure
     "simulation_duration": 45,

@@ -10,7 +10,7 @@ from matplotlib.patches import Patch
 import matplotlib.animation as animation
 
 
-from scripts.SynthDataProcessing import build_edge_list, build_individual_lookup
+from SynthDataProcessing import build_edge_list, build_individual_lookup
 
 class ModelParameters(TypedDict):
     # Epi Params
