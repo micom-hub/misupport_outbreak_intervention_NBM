@@ -47,7 +47,7 @@ runParameters: ModelParameters = {
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
-    "make_movie": True,
+    "make_movie": False,
     "display_plots": True
 }
 
@@ -110,10 +110,12 @@ model.cumulative_incidence_plot()
 model.cumulative_incidence_plot(strata = "age")
 model.cumulative_incidence_plot(strata = "sex")
 
+#Network visualization extremely slow
+#print(f"Drawing network at final day = {model.simulation_end_day}... ")
+#model.draw_network(model.simulation_end_day)
+#model.draw_network(0)
 
-print(f"Drawing network at final day = {model.simulation_end_day}... ")
-model.draw_network(model.simulation_end_day)
-model.draw_network(0)
+
 
 if runParameters["make_movie"]:
     model.make_movie()
