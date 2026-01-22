@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import json
 
 from scripts.FredFetch import downloadPopData
 from scripts.SynthDataProcessing import synthetic_data_process
@@ -43,7 +44,7 @@ runParameters: ModelParameters = {
     "dt": 1,
     "I0": [22],
     "seed": 2026,
-    "county": "Manistee", 
+    "county": "Keweenaw", 
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
@@ -119,5 +120,11 @@ model.cumulative_incidence_plot(strata = "sex")
 
 if runParameters["make_movie"]:
     model.make_movie()
+
+#Save parameters to json file and save graphml file
+if runParameters["save_data_files"]:
+    model.make_graphml_file(t = model.simulation_end_day)
+    with open(model.results_folder + "/run_parameters.json", "w") as f:
+        json.dump(runParameters, f, indent = 4)
 
 
