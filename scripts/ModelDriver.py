@@ -44,7 +44,7 @@ runParameters: ModelParameters = {
     "dt": 1,
     "I0": [22],
     "seed": 2026,
-    "county": "Keweenaw", 
+    "county": "Manistee", 
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
@@ -99,6 +99,7 @@ else:
 
 print("Initializing model...")
 model = NetworkModel(contacts_df = contacts_df, params = runParameters)
+model.initialize_states()
 
 print("Running model...")
 model.simulate()

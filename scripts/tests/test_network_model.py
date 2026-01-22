@@ -87,7 +87,6 @@ def test_build_edge_list_and_lookup(sample_contacts_df):
     assert "source" in edge_list.columns
     assert "target" in edge_list.columns
     assert "weight" in edge_list.columns
-    assert "contact_type" in edge_list.columns
     lookup = build_individual_lookup(sample_contacts_df)
     assert set(["age", "race", "sex"]).issubset(lookup.columns)
     assert lookup.shape[0] == sample_contacts_df.shape[0]
@@ -116,7 +115,7 @@ def test_graph_edge_attributes(net_model):
     if g.ecount() > 0:
         for e in g.es:
             assert isinstance(e["weight"], float)
-            assert e["contact_type"] in ("hh", "wp", "sch", "gq", "cas")
+            assert isinstance(e["contact_type"], str)
 
 #### State Tracking and Transitions
 

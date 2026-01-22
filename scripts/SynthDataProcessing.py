@@ -152,9 +152,9 @@ def build_individual_lookup(contact_df):
 
 #@profile
 def build_edge_list(
-    contacts_df: pd.df,
+    contacts_df: pd.DataFrame,
     params: dict,
-    rng: np.rng = None,
+    rng: np.random.Generator = None,
     save: bool = False, 
     county: str = None
 ):
@@ -188,16 +188,17 @@ def build_edge_list(
     #Create edges between all individuals in a household
     household_groups = contacts_df.groupby('hh_id').groups
 
+    hh_weight = params["hh_weight"]
     for hh_id, indices in household_groups.items():
         if hh_id == 'nan' or hh_id == '':
             continue
         ind_list = list(indices)
         for i in range(len(ind_list)):
             for j in range(i+1, len(ind_list)):
-                edge_list.append((ind_list[i], ind_list[j], params["hh_weight"], "hh"))
-                edge_list.append((ind_list[j], ind_list[i], params["hh_weight"], "hh"))
+                edge_list.append((min(ind_list[i], ind_list[j]), max(ind_list[i], ind_list[j]), hh_weight, "hh"))
         
     #Sample workplace contacts for each individual
+    wp_weight = params["wp_weight"]
     wp_groups = contacts_df.groupby('wp_id').groups
     for wp_id, indices in wp_groups.items():
         if wp_id == 'nan' or wp_id == '':
@@ -208,10 +209,11 @@ def build_edge_list(
             k = min(params["wp_contacts"], len(contacts_to_sample))
             sampled = rng.choice(contacts_to_sample, size = k, replace = False) if k > 0 else []
             for j in sampled:
-                edge_list.append((i, j, params['wp_weight'], "wp"))
-                edge_list.append((j, i, params["wp_weight"], "wp"))
+                edge_list.append((min(i, j), max(i,j), wp_weight, "wp"))
+
 
     #School sampled contacts
+    sch_weight = params["sch_weight"]
     sch_groups = contacts_df.groupby('sch_id').groups
     for sch_id, indices in sch_groups.items():
         if sch_id == 'nan' or sch_id == '':
@@ -222,11 +224,11 @@ def build_edge_list(
             k = min(params["sch_contacts"], len(contacts_to_sample))
             sampled = rng.choice(contacts_to_sample, size = k, replace = False) 
             for j in sampled:
-                edge_list.append((i, j, params['sch_weight'], "sch"))
-                edge_list.append((j, i, params["sch_weight"], "sch"))
+                edge_list.append((min(i, j), max(i,j), sch_weight, "sch"))
 
     #gq sampled contacts
 
+    gq_weight = params["gq_weight"]
     gq_groups = contacts_df.groupby('gq_id').groups
     for gq_id, indices in gq_groups.items():
         if gq_id == 'nan' or gq_id == '':
@@ -237,8 +239,7 @@ def build_edge_list(
             k = min(params["gq_contacts"], len(contacts_to_sample))
             sampled = rng.choice(contacts_to_sample, size = k, replace = False) 
             for j in sampled:
-                edge_list.append((i, j, params['gq_weight'], "gq"))
-                edge_list.append((j, i, params["gq_weight"], "gq"))
+                edge_list.append((min(i, j), max(i,j), gq_weight, "gq"))
 
     #Casual sampled contacts
     num_cas = params["cas_contacts"]
@@ -248,21 +249,36 @@ def build_edge_list(
     non_gq_mask = ~contacts_df["gq"].astype(bool)
     non_gq_indices = contacts_df.index[non_gq_mask].to_numpy()
 
+    #ensure casual contacts are outside household, workplace, or school
+    existing_pairs = set((min(i, j), max(i, j)) for i, j, _, ct in edge_list if ct in {"hh","wp","sch"})
+
+
+
     for i in non_gq_indices:
-        possible_contacts = non_gq_indices[non_gq_indices != i]
-        k = min(num_cas, len(possible_contacts))
-        cas_contacts = rng.choice(possible_contacts, size = k, replace = False) if k > 0 else []
+        potential_js = [j for j in non_gq_indices if j != i and (min(i, j), max(i, j)) not in existing_pairs]
+        k = min(num_cas, len(potential_js))
+        cas_contacts = rng.choice(potential_js, size = k, replace = False) if k > 0 else []
         for j in cas_contacts:
-            edge_list.append((i, j, cas_weight, "cas"))
-            edge_list.append((j, i, cas_weight, "cas"))
+            #append undirected edges
+            edge_list.append((min(i, j), max(i,j), cas_weight, "cas"))
+            existing_pairs.add((min(i,j),max(i,j)))
 
 
-    #Combine and deduplicate edges
+    #Build dataframe
     edges_df = pd.DataFrame(edge_list, columns = ['source', 'target', 'weight', 'contact_type'])
-    #If an individual shares a home and school/workplace as a contact, add weights
-    edges_df = edges_df.groupby(["source", "target", "contact_type"], as_index = False)["weight"].sum()
 
-    edges_df = edges_df[edges_df['source'] != edges_df['target']]
+    max_weights = edges_df.groupby(['source','target'])['weight'].max().reset_index()
+
+    edges_max = pd.merge(edges_df, max_weights, on = ['source','target','weight'])
+
+    #if two contact weights are equal, set to aggregate
+    edges_df = edges_max.groupby(['source','target']).agg({
+        'weight':'first',
+        'contact_type': lambda x: '+'.join(sorted(set(x)))
+    }).reset_index()
+
+
+    
 
     if save:
         if not county:
