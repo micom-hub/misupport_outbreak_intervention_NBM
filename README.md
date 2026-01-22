@@ -18,3 +18,10 @@ Findings from these simulations will be used to design an optimized LHD calling 
 
 **Model Assumptions**
 * Reinfection is not possible
+
+#### Environment setup
+
+Run this:
+```bash
+conda create -n contact-nbm -c conda-forge python=3.14 numpy scipy pandas matplotlib scikit-learn seaborn igraph networkx selenium ffmpeg
+```
