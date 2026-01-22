@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import igraph as ig
 import networkx as nx
+from scipy.sparse import csr_matrix
 from typing import TypedDict, List
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
@@ -82,7 +83,7 @@ DefaultModelParams: ModelParameters = {
     "dt": 1,
     "I0": [906],
     "seed": 2026,
-    "county": "Keweenaw",
+    "county": "Alcona",
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
@@ -92,6 +93,7 @@ DefaultModelParams: ModelParameters = {
 }
 
 class NetworkModel:
+    @profile
     def __init__(self, contacts_df, params = DefaultModelParams):
         """
         Unpack parameters, set-up storage variables, and initialize model
@@ -134,14 +136,15 @@ class NetworkModel:
 
     #Set a theoretical full with axis positions for visualization purposes
         self.full_node_list = sorted(set(self.edge_list['source']).union(set(self.edge_list['target'])))
+        name_to_ind_dict = {name:ind for ind, name in enumerate(self.full_node_list)}
         g_full = ig.Graph()
         g_full = ig.Graph()
         g_full.add_vertices(len(self.full_node_list))
         g_full.vs['name'] = self.full_node_list #Node names in the graph correspond to model individual indices
 
         full_edges = list(zip(
-            [self.full_node_list.index(src) for src in self.edge_list['source']],
-            [self.full_node_list.index(tgt) for tgt in self.edge_list['target']]
+            [name_to_ind_dict[src] for src in self.edge_list['source']],
+            [name_to_ind_dict[tgt] for tgt in self.edge_list['target']]
         ))
         g_full.add_edges(full_edges)
         self.fixed_layout = g_full.layout('grid') #set a layout for the full graph
@@ -237,7 +240,7 @@ class NetworkModel:
             raise TypeError("inds myst be int, list, or numpy array.")
             
 
-    
+    @profile
     def build_neighbor_map(self):
         """
         Build a mapping from node to list of (neighbor, weight) (make neighbor queries O(1))
@@ -250,70 +253,66 @@ class NetworkModel:
             neighbor_map[src].append((tgt, w, ct))
         return neighbor_map
 
+    @profile
     def initialize_graph(self, indices):
         """
         Initialize an igraph with the provided index/indices and all their neighbors, with weighted edges
         """
-        # Make sure all indices are ints and unique
+            # Make sure all indices are ints and unique
         indices = [int(i) for i in (indices if isinstance(indices, (list, np.ndarray)) else [indices])]
+        indices = np.unique(np.array(indices, dtype = int))
         node_set = set(indices)
 
-        # Add neighbors ensuring all are plain int
+        # Get all required nodes
         for ind in indices:
-            ind = int(ind)
             neighbors = self.neighbor_map.get(ind, [])
-            for neighbor, _, _ in neighbors:
-                node_set.add(int(neighbor))
-        node_list = sorted([int(n) for n in node_set])
+            node_set.update([int(neighbor) for neighbor, _, _ in neighbors])
+        node_list = sorted(node_set)
+        node_name_to_index = {name:ind for ind, name in enumerate(node_list)}
+        N_nodes = len(node_list)
 
-        g = ig.Graph()
-        g.add_vertices(len(node_list))
-        g.vs["name"] = node_list
 
-        # Preventing duplicates; all int
-        edge_set = set()
-        edge_data = {}  # i, j, weight, ct
 
-        name_to_ind_graph = {name: idx for idx, name in enumerate(node_list)}
+        # Gather all edges
+        edge_data = []
+
         for ind in node_list:
-            ind = int(ind)
             for neighbor, weight, ct in self.neighbor_map.get(ind, []):
                 neighbor = int(neighbor)
-                if neighbor in node_list and ind != neighbor:
-                    edge_tuple = tuple(sorted((ind, neighbor)))
-                    if edge_tuple not in edge_set:
-                        edge_set.add(edge_tuple)
-                        edge_data[edge_tuple] = (weight, ct)
+                if neighbor in node_set and ind != neighbor:
+                    ind1, ind2 = node_name_to_index[ind], node_name_to_index[neighbor]
+                    #avoid duplicated edges by only adding this direction
+                    if ind1 < ind2:
+                        edge_data.append((ind1, ind2, weight, ct)) 
+        #double check for no duplicate edges
+        edge_data = list(set(edge_data))
 
-        edges, weights, types = [], [], []
-        for (i, j), (w, t) in edge_data.items():
-            edges.append((name_to_ind_graph[int(i)], name_to_ind_graph[int(j)]))
-            weights.append(w)
-            types.append(t)
+        #convert to np arrays for efficiency and gather edge data
+        edge_array = np.array([(e[0],e[1]) for e in edge_data], dtype = int)
+        weight_array = np.array([e[2] for e in edge_data], dtype = float)
+        type_array = np.array([e[3] for e in edge_data], dtype = object)
+
 
         g = ig.Graph()
-        g.add_vertices(len(node_list))
-        g.vs["name"] = [int(n) for n in node_list]
-        if edges:
-            g.add_edges(edges)
-            g.es["weight"] = weights
-            g.es["contact_type"] = types
+        g.add_vertices(N_nodes)
+        g.vs["name"] = node_list
 
-        ages = self.individual_lookup.loc[node_list, "age"].to_numpy()
-        sexes = self.individual_lookup.loc[node_list, "sex"].to_numpy()
-        self.assign_node_attribute("age", ages, node_list, g)
-        self.assign_node_attribute("sex", sexes, node_list, g)
+        if edge_array.size > 0:
+            g.add_edges(edge_array.tolist())
+            g.es["weight"] = weight_array.tolist()
+            g.es["contact_type"] = type_array.tolist()
+        
+        #assign node attributes with df subsetting
+        lookup_sub = self.individual_lookup.loc[node_list]
+        g.vs["age"] = lookup_sub["age"].to_numpy()
+        g.vs["sex"] = lookup_sub["sex"].to_numpy()
 
 
         #track edges
-        self.existing_edge_set = set()
-        for e in g.es:
-            i = int(g.vs[e.source]["name"])
-            j = int(g.vs[e.target]["name"])
-            edge_tuple =tuple(sorted((i, j)))
-            self.existing_edge_set.add(edge_tuple)
+        self.existing_edge_set_init = set(tuple(sorted((node_list[e[0]], node_list[e[1]]))) for e in edge_array)
+
         return g
-    #@profile
+    @profile
     def add_to_graph(self, g: ig.Graph, indices):
         """
         Quickly add all neighbors of indices to igraph g without duplicates, ensuring all node names are ints, assigns demographic attributes to each new node when added
@@ -322,14 +321,14 @@ class NetworkModel:
         if isinstance(indices, int):
             indices = [indices]
         indices = [int(i) for i in np.asarray(indices)]
-
+        indices = np.unique(np.asarray(indices, dtype = int))
         existing_names = set(self.ind_to_name(g, range(g.vcount())))
 
         # Gather current edges as tuples of int
         new_nodes = set()
-        edge_set = set()
-        edge_data = {}
+        edge_data = []
 
+        #gather new nodes and edges
         for ind in indices:
             neighbors_dict = self.fast_neighbor_map.get(ind, {})
             for neighbor, (weight, ct) in neighbors_dict.items():
@@ -339,39 +338,43 @@ class NetworkModel:
                     new_nodes.add(neighbor)
                 #don't duplicate edges or add loops
                 if ind != neighbor:
-                    edge_tuple = tuple(sorted((ind, neighbor)))
-                    if edge_tuple not in self.existing_edge_set and edge_tuple not in edge_set:
-                        edge_set.add(edge_tuple)
-                        edge_data[edge_tuple] = (weight, ct)
+                    node1, node2 = min(ind, neighbor), max(ind, neighbor)
+                    if (node1, node2) not in self.existing_edge_set:
+                        edge_data.append((node1, node2, weight, ct))
 
+        #add new nodes to graph in batch
         if new_nodes:
             g.add_vertices(len(new_nodes))
-            newly_added = sorted([int(n) for n in new_nodes])
+            newly_added = sorted(new_nodes)
             g.vs[-len(new_nodes):]["name"] = newly_added
+
+            #assign node attributes
+            lookup_sub = self.individual_lookup.loc[newly_added]
+            g.vs[-len(new_nodes):]["age"] = lookup_sub["age"].to_numpy()
+            g.vs[-len(new_nodes):]["sex"] = lookup_sub["sex"].to_numpy()
+
             existing_names.update(newly_added)
 
-        #Assign age and sex to new nodes
-            ages = self.individual_lookup.loc[newly_added, "age"].to_numpy()
-            sexes = self.individual_lookup.loc[newly_added, "sex"].to_numpy()
-            self.assign_node_attribute("age", ages, newly_added, g)
-            self.assign_node_attribute("sex", sexes, newly_added, g)
 
-        # Update mapping, all int
-        name_to_vertex = {int(v["name"]): v.index for v in g.vs}
 
-        edges, weights, types = [], [], []
-        for (i, j), (w, t) in edge_data.items():
-            edges.append((name_to_vertex[int(i)], name_to_vertex[int(j)]))
-            weights.append(w)
-            types.append(t)
-            self.existing_edge_set.add((min(i,j),max(i,j))) #update existing edges
-            
-        if edges:
-            g.add_edges(edges)
-            g.es[-len(edges):]["weight"] = weights
-            g.es[-len(edges):]["contact_type"] = types
+        #deduplicate and add new edges to graph in batch 
+        name_to_node_ind = {int(v["name"]): v.index for v in g.vs}
+        edge_tuples = set((e[0], e[1]) for e in edge_data)
 
+        #prepare arrays for igraph
+        edges_array = np.array([(name_to_node_ind[i], name_to_node_ind[j]) for i, j in edge_tuples], dtype = int)
+        weights_array = np.array([next(e[2] for e in edge_data if (e[0], e[1]) == (i, j)) for i, j in edge_tuples], dtype=float)
+        types_array = np.array([next(e[3] for e in edge_data if (e[0], e[1]) == (i, j)) for i, j in edge_tuples], dtype=object)
+
+        if len(edges_array) > 0:
+            g.add_edges(edges_array.tolist())
+            g.es[-len(edges_array):]["weight"] = weights_array.tolist()
+            g.es[-len(edges_array):]["contact_type"] = types_array.tolist()
+
+            self.existing_edge_set.update(edge_tuples)
+    
         return g
+
     
     def assign_node_attribute(self, attr_name: str, vals: np.ndarray, indices: np.ndarray, g: ig.Graph) -> ig.Graph:
         """Assigns a node attribute to specified nodes in an igraph Graph object
@@ -421,7 +424,7 @@ class NetworkModel:
 
         return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inf)
 
-    #@profile
+    @profile
     def determine_new_exposures(self):
         """
     Uses the current epi_g, self.neighbor_map, and self.individual_lookup to determine who is newly exposed in a given step
@@ -467,7 +470,7 @@ class NetworkModel:
         new_exposed = np.array(pairs_target[draws < prob], dtype = int)
         return np.unique(new_exposed)
 
-    #@profile
+    @profile
     def step(self):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
@@ -526,7 +529,7 @@ class NetworkModel:
         self.new_exposures.append(newly_exposed)
         self.new_infections.append(to_infectious)
 
-   # #@profile
+    @profile
     def simulate(self):
         t = 0
         while t < self.Tmax:
@@ -683,7 +686,7 @@ class NetworkModel:
 
 
 
-    #@profile
+    @profile
     def draw_network(self, t: int, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
 
         #Take a timestep t as an input, and return a plot of the graph
@@ -819,7 +822,7 @@ class NetworkModel:
             netpath = os.path.join(self.results_folder, "networkfile")
             if suffix:
                 netpath = netpath + suffix
-            nx.write_graphml(nx_g, (self.netpath + ".graphml"))
+            nx.write_graphml(nx_g, (netpath + ".graphml"))
 
         return
 
@@ -831,10 +834,10 @@ class NetworkModel:
 
 #Test run on a really small population
 if __name__ == "__main__":
-    Keweenaw_contacts = pd.read_parquet("./data/Keweenaw/contacts.parquet")
+    Alcona_contacts = pd.read_parquet("./data/Alcona/contacts.parquet")
 
-    testModel = NetworkModel(contacts_df = Keweenaw_contacts)
-    print("Running Model on Keweenaw County...")
+    testModel = NetworkModel(contacts_df = Alcona_contacts)
+    print("Running Model on Alcona County...")
     testModel.simulate()
 
     print("Displaying epidemic curve...")

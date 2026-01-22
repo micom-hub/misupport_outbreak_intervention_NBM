@@ -11,7 +11,7 @@ from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkM
 
 runParameters: ModelParameters = {
 #Epidemiological Parameters
-    "base_transmission_prob": 0.8,
+    "base_transmission_prob": 10,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -43,7 +43,7 @@ runParameters: ModelParameters = {
     "dt": 1,
     "I0": [22],
     "seed": 2026,
-    "county": "Keweenaw", 
+    "county": "Antrim", 
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,

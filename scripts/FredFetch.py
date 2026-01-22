@@ -12,6 +12,7 @@ import re
 import glob
 import zipfile
 
+@profile
 def downloadPopData(state, county, projectDirectory = os.getcwd()):
     """Function that downloads population data from the FRED Public Health Synthetic Population Website
     Wheaton, W.D., U.S. Synthetic Population 2010 Version 1.0 Quick Start Guide, RTI International, May 2014.
