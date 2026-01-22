@@ -41,7 +41,7 @@ class ModelParameters(TypedDict):
 
     # Simulation Settings
     run_name: str #prefix for model run
-    try_reload_edge_list: bool #Try to reload previously generated edge list for this run to save time
+    overwrite_edge_list: bool #Try to reload previously generated edge list for this run to save time
     simulation_duration: int  # days
     dt: float  # steps per day
     I0: List[int]
@@ -63,7 +63,7 @@ DefaultModelParams: ModelParameters = {
     "incubation_period_vax": 10.5,
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
-    "vax_efficacy": 0.997,
+    "vax_efficacy": 0,
     "vax_uptake": 0.85, 
     "susceptibility_multiplier_under_five": 2.0,
 
@@ -78,12 +78,12 @@ DefaultModelParams: ModelParameters = {
     "cas_weight": .1,
 
     "run_name" : "test_run",
-    "try_reload_edge_list": False,
+    "overwrite_edge_list": True,
     "simulation_duration": 45,
     "dt": 1,
     "I0": [906],
     "seed": 2026,
-    "county": "Alcona",
+    "county": "Keweenaw",
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
@@ -93,7 +93,7 @@ DefaultModelParams: ModelParameters = {
 }
 
 class NetworkModel:
-    @profile
+    #@profile
     def __init__(self, contacts_df, params = DefaultModelParams):
         """
         Unpack parameters, set-up storage variables, and initialize model
@@ -107,7 +107,7 @@ class NetworkModel:
         self.rng = np.random.default_rng(self.params["seed"])
         self.county = self.params["county"]
 
-        if self.params["try_reload_edge_list"] and os.path.isfile(
+        if (not self.params["overwrite_edge_list"]) and os.path.isfile(
             os.path.join(os.getcwd(), 
             "data", 
             self.county, 
@@ -127,6 +127,17 @@ class NetworkModel:
                 save = self.params["save_data_files"],
                 county = self.county)
 
+        #try speeding things up with a sparse
+        src = self.edge_list['source'].to_numpy(dtype = np.int32)
+        tgt = self.edge_list['target'].to_numpy(dtype = np.int32)
+        weights = self.edge_list['weight'].to_numpy(dtype = np.float32)
+        N_nodes = self.N
+
+        row = np.concatenate([src, tgt])
+        col = np.concatenate([tgt, src])
+        dat = np.concatenate([weights, weights])
+        self.adj_matrix = csr_matrix((dat, (row, col)), shape = (N_nodes, N_nodes))
+
         self.individual_lookup = build_individual_lookup(self.contacts_df)
         self.neighbor_map = self.build_neighbor_map()
         self.existing_edge_set= set() # track existing edges
@@ -137,7 +148,6 @@ class NetworkModel:
     #Set a theoretical full with axis positions for visualization purposes
         self.full_node_list = sorted(set(self.edge_list['source']).union(set(self.edge_list['target'])))
         name_to_ind_dict = {name:ind for ind, name in enumerate(self.full_node_list)}
-        g_full = ig.Graph()
         g_full = ig.Graph()
         g_full.add_vertices(len(self.full_node_list))
         g_full.vs['name'] = self.full_node_list #Node names in the graph correspond to model individual indices
@@ -150,6 +160,7 @@ class NetworkModel:
         self.fixed_layout = g_full.layout('grid') #set a layout for the full graph
         self.layout_node_names = self.full_node_list
         self.layout_name_to_ind = {name:i for i, name in enumerate(self.layout_node_names)}
+        self.g_full = g_full.copy()
 
 
 #State tracking: 0 = S, 1 = E, 2 = I, 3 = R
@@ -198,7 +209,7 @@ class NetworkModel:
             "results", self.params["run_name"])
         if self.params["save_data_files"]:
             if not os.path.exists(self.results_folder):
-                os.mkdir(self.results_folder, exist_ok = True)
+                os.mkdir(self.results_folder)
 
     #Helper functions to convert between
     #Name: an individual's number (index of contact_df/individual_lookup))
@@ -240,7 +251,7 @@ class NetworkModel:
             raise TypeError("inds myst be int, list, or numpy array.")
             
 
-    @profile
+    #@profile
     def build_neighbor_map(self):
         """
         Build a mapping from node to list of (neighbor, weight) (make neighbor queries O(1))
@@ -253,7 +264,7 @@ class NetworkModel:
             neighbor_map[src].append((tgt, w, ct))
         return neighbor_map
 
-    @profile
+    #@profile
     def initialize_graph(self, indices):
         """
         Initialize an igraph with the provided index/indices and all their neighbors, with weighted edges
@@ -312,7 +323,7 @@ class NetworkModel:
         self.existing_edge_set_init = set(tuple(sorted((node_list[e[0]], node_list[e[1]]))) for e in edge_array)
 
         return g
-    @profile
+    #@profile
     def add_to_graph(self, g: ig.Graph, indices):
         """
         Quickly add all neighbors of indices to igraph g without duplicates, ensuring all node names are ints, assigns demographic attributes to each new node when added
@@ -424,112 +435,96 @@ class NetworkModel:
 
         return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inf)
 
-    @profile
+    #@profile
     def determine_new_exposures(self):
         """
     Uses the current epi_g, self.neighbor_map, and self.individual_lookup to determine who is newly exposed in a given step
         """
-        infectious_nodes = np.where(self.state == 2)[0]
+        N = self.N
+        newly_exposed = np.zeros(N, dtype = bool)
 
-        pairs_source = []
-        pairs_target = []
-        contact_weights = []
-        contact_types = []
-
-        for src in infectious_nodes:
-            for tgt in self.fast_neighbor_map.get(src, {}):
-                if self.state[tgt] == 0: #target must be susceptible
-                    weight, ctype = self.fast_neighbor_map[src][tgt]
-                    pairs_source.append(src)
-                    pairs_target.append(tgt)
-                    contact_weights.append(weight)
-                    contact_types.append(ctype)
-
-        if not pairs_source:
+        infectious_indices = np.where(self.state == 2)[0]
+        if len(infectious_indices) == 0:
             return np.array([], dtype = int)
         
-        pairs_source = np.array(pairs_source)
-        pairs_target = np.array(pairs_target)
-        contact_weights = np.array(contact_weights)
 
-        #calculate transmission 
-        prob = self.params["base_transmission_prob"] * contact_weights
+        for src in infectious_indices:
+            neighbors = self.adj_matrix[src].indices
+            weights = self.adj_matrix[src].data
 
-        source_vax = self.is_vaccinated[pairs_source]
-        target_vax = self.is_vaccinated[pairs_target]
-        prob = prob*np.where(source_vax, self.params["relative_infectiousness_vax"], 1)
-        prob = prob * ((1- self.params["vax_efficacy"]) ** target_vax)
-
-        #Factor in individual heterogeneity 
-        ages_target = self.individual_lookup.loc[pairs_target, "age"].to_numpy()
-        under_five_mask = ages_target <= 5
-        prob[under_five_mask] *= self.params["susceptibility_multiplier_under_five"]
+            sus_mask = (self.state[neighbors] == 0)
+            sus_neighbors = neighbors[sus_mask]
+            sus_weights = weights[sus_mask]
         
-        #Do random draws
-        draws = self.rng.random(len(prob))
-        new_exposed = np.array(pairs_target[draws < prob], dtype = int)
-        return np.unique(new_exposed)
+            vax_src = self.is_vaccinated[src]
+            vax_tgt = self.is_vaccinated[sus_neighbors]
+            ages_targets = self.individual_lookup.loc[sus_neighbors, "age"].to_numpy()
 
-    @profile
+            vax_efficacy = self.params['vax_efficacy']
+
+            prob = self.params['base_transmission_prob'] * sus_weights
+            if vax_src:
+                prob *= self.params['relative_infectiousness_vax']
+            prob *= ((1- vax_efficacy)**vax_tgt)
+
+            #example implementation of heterogeneous susceptibility
+            under_five = ages_targets <= 5
+            prob[under_five] *= self.params['susceptibility_multiplier_under_five']
+
+            draws = self.rng.random(prob.shape)
+            infected = sus_neighbors[draws < prob]
+            newly_exposed[infected] = True
+
+        result = np.where(newly_exposed)[0]
+
+
+        return result
+
+    #@profile
     def step(self):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
         """
 
-        #Determine new exposures
-
-        current_nodes = self.ind_to_name(self.epi_g, range(self.epi_g.vcount()))
-        infectious_nodes = current_nodes[self.state[current_nodes] == 2]
-        newly_exposed = []
+        #S -> E
         newly_exposed = self.determine_new_exposures()
 
-        #Determine exposed to infectious
-        exposed_nodes = current_nodes[self.state[current_nodes] == 1]
-        self.time_in_state[exposed_nodes] += 1
-        to_infectious = exposed_nodes[self.time_in_state[exposed_nodes] >= self.incubation_periods[exposed_nodes]]
-
-        #Determine infectious to recovered
-        self.time_in_state[infectious_nodes] += 1
-        to_recovered = infectious_nodes[self.time_in_state[infectious_nodes] >= self.infectious_periods[infectious_nodes]]
-
-        #Move individuals to new compartments and handle
-        if newly_exposed.size:
+        if newly_exposed.size > 0:
             self.state[newly_exposed] = 1
-            self.time_in_state[newly_exposed] = 0
+            self.time_in_state[newly_exposed] = -1 #start at -1 since 1 is immediately added in E-> I 
             self.incubation_periods[newly_exposed] = self.assign_incubation_period(newly_exposed)
 
-        #Expand graph to include newly infectious
-        if to_infectious.size:
-            self.state[to_infectious] = 2
-            self.time_in_state[to_infectious] = 0
-            self.infectious_periods[to_infectious] = self.assign_infectious_period(to_infectious)
-            self.epi_g = self.add_to_graph(g = self.epi_g, indices = to_infectious)
+        #E -> I
+        exposed = np.where(self.state == 1)[0]
+        self.time_in_state[exposed] += 1
+        to_infectious = exposed[self.time_in_state[exposed] >= self.incubation_periods[exposed]]
 
-        if to_recovered.size:
+        if len(to_infectious) > 0:
+            self.state[to_infectious] = 2
+            self.time_in_state[to_infectious] = -1 #1 added in next step
+            self.infectious_periods[to_infectious] = self.assign_infectious_period(to_infectious)
+
+        #I -> R
+        infectious = np.where(self.state == 2)[0]
+        self.time_in_state[infectious] += 1
+        to_recovered = infectious[self.time_in_state[infectious] >= self.infectious_periods[infectious]]
+
+        if len(to_recovered) > 0:
             self.state[to_recovered] = 3
             self.time_in_state[to_recovered] = 0
 
-        inactive_mask = np.logical_or(self.state[current_nodes] == 0, self.state[current_nodes] == 1)
-        inactive_nodes = current_nodes[inactive_mask]
-        self.time_in_state[inactive_nodes] += 1
-
-        #New nodes list, adding new nodes to S
-        updated_nodes = self.ind_to_name(self.epi_g, range(self.epi_g.vcount()))
-
 
         #Save timestep data
-        S = updated_nodes[self.state[updated_nodes] == 0].tolist()
-        E = updated_nodes[self.state[updated_nodes] == 1].tolist()
-        I = updated_nodes[self.state[updated_nodes] == 2].tolist()  # noqa: E741
-        R = updated_nodes[self.state[updated_nodes] == 3].tolist()
-
+        S = list(np.where(self.state == 0)[0])
+        E = list(np.where(self.state == 1)[0])
+        I = list(np.where(self.state == 2)[0])
+        R = list(np.where(self.state == 3)[0])
         self.states_over_time.append([S,E,I,R])
-        self.epi_graphs.append(self.epi_g.copy())
-
         self.new_exposures.append(newly_exposed)
         self.new_infections.append(to_infectious)
 
-    @profile
+
+    #@profile
     def simulate(self):
         t = 0
         while t < self.Tmax:
@@ -578,37 +573,40 @@ class NetworkModel:
         Creates a matplotlib plot
         """
         pop_size = self.N
-        if isinstance(strata, str):
-            strata = strata.lower()
-
-        if time is None:
-            time = len(self.states_over_time)
-
-        #Track cumulatively infected individuals
         exposures = self.new_exposures
         if len(exposures) > 0 and len(exposures[0]) == 0:
             exposures[0] = list(self.params["I0"])
 
-        max_time = len(exposures) - 1 if time is None else min(time, len(exposures) - 1)
+        if time is None: 
+            max_time = len(exposures) - 1
+        else:
+            #don't let time input overshoot
+            max_time = min(time - 1, len(exposures) - 1) 
         x_vals = range(max_time + 1)
 
+        if isinstance(strata, str):
+            strata = strata.lower()
 
 
-        #Map node indices to strata values
-        strata_labels, strata_members, strata_colors = None, None, None
+        #Track cumulatively infections
+        ever_exposed = np.zeros(pop_size, dtype = bool)
+        overall_cumulative = []
+        for t in x_vals:
+            ever_exposed[np.array(exposures[t], dtype = int)] = True
+            overall_cumulative.append(ever_exposed.sum() / pop_size)
+        
+        #Stratification Logic
+        strata_labels, strata_members, strata_colors, strata_cumulative = None, None, None, None
 
-        g = self.epi_graphs[time - 1] #last step, or corresponding graph
-        node_names = np.array(g.vs["name"])
+        if strata in ("age", "sex"):
+            strata_attr = self.individual_lookup[strata]
 
-        #Stratification
-        if strata and (strata in g.vs.attributes()):
-            attr_vals = np.array(g.vs[strata])
             if strata == "age":
                 #Age bins directly input here, change as needed
                 bins = [0, 6, 19, 35, 65, 200]
                 labels = ["0-5", "6-18", "19-34", "35-64", "65+"]
-                attr_vals = np.array(attr_vals)
-                strata_vals = pd.cut(attr_vals, bins, right = False, labels = labels)
+                strata_labels = labels
+                strata_vals = pd.cut(strata_attr, bins, right = False, labels = labels)
                 strata_colors = [
         "#e41a1c",  # Red for 0-5
         "#377eb8",  # Blue for 6-18
@@ -618,50 +616,54 @@ class NetworkModel:
     ]
 
             elif strata == "sex":
-                strata_vals = attr_vals
-                labels = sorted(np.unique(attr_vals))
+                strata_vals = strata_attr
+                labels = sorted(strata_attr.unique())
+                strata_labels = labels
                 label_to_color = {lab: ("red" if lab == "F" else "blue") for lab in labels}
                 strata_colors = [label_to_color[lab] for lab in labels]
-        #assign strata labels and members
-            strata_labels = labels
-            #mask for each stratum
-            strata_members = {label: node_names[strata_vals == label] for label in labels}
-            #assign colors
 
-        elif strata and (strata not in g.vs.attributes()):
+
+        elif strata and (strata not in self.individual_lookup.columns):
             raise ValueError(f"stratifying factor {strata} is not an attribute of this graph. Check spelling and try again")
         
         else:
              strata = None
 
-        overall_cumulative = []
-        exposed_set = set()
-        for t in x_vals:
-            exposed_set.update(exposures[t]) #generalizeable to models with recovery
-            overall_cumulative.append(len(exposed_set)/pop_size)
+        if strata_labels is not None:
+            strata_members = {label: np.where(strata_vals == label)[0] for label in strata_labels}
+            strata_cumulative = {label: [] for label in strata_labels}
+            ever_exposed_stratum = {label: np.zeros(len(strata_members[label]), dtype = bool) for label in strata_labels}
 
-        if strata:
-            strata_cum = {label: [] for label in strata_labels}
-            exposed_by_strata = {label: set() for label in strata_labels}
+            #update ever_exposed_stratums for each label
             for t in x_vals:
-                newly_exposed = set(exposures[t])
+                newly_exposed = np.array(exposures[t], dtype = int)
                 for label in strata_labels:
-                    this_group = set(strata_members[label])
-                    exposed_by_strata[label].update(newly_exposed & this_group)
-                    group_size = len(strata_members[label])
+                    members = strata_members[label]
+                    #check which belong to this stratum
+                    mask = np.isin(members, newly_exposed)
+                    ever_exposed_stratum[label][mask] = True
+                    group_size = len(members)
                     if group_size > 0:
-                        strata_cum[label].append(len(exposed_by_strata[label]) / group_size)
+                        strata_cumulative[label].append(ever_exposed_stratum[label].sum() / group_size)
                     else:
-                        strata_cum[label].append(0.0)
+                        strata_cumulative[label].append(0.0)
+
+
+
         
         plt.figure(figsize = (8, 5))
         plt.plot(x_vals, overall_cumulative, color = "black", label = "Total", linewidth = 2, zorder = 3)
-        if strata:
+
+        if strata_cumulative:
             bottom = np.zeros(len(x_vals))
             for i, label in enumerate(strata_labels):
-                plt.fill_between(x_vals, bottom, np.array(bottom) + np.array(strata_cum[label]) * (len(strata_members[label])/pop_size), 
-                step = None , color = strata_colors[i], alpha = 0.5, label = str(label))
-                bottom += np.array(strata_cum[label]) * (len(strata_members[label])/pop_size)
+                pop_fraction = len(strata_members[label]) / pop_size
+                plt.fill_between(x_vals, bottom,
+                np.array(bottom) + np.array(strata_cumulative[label])*pop_fraction,
+                step = None, color = strata_colors[i], alpha = 0.5, label = str(label))
+                bottom += np.array(strata_cumulative[label]) * pop_fraction
+
+
         plt.xlabel("Time step (day)")
         plt.ylabel("Cumulative Incidence (fraction of population)")
         if strata:
@@ -686,44 +688,85 @@ class NetworkModel:
 
 
 
-    @profile
+    #@profile
     def draw_network(self, t: int, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
+        """Visualizes the active subnetwork at a time t, that consists of all "active nodes" (E, I, or R) and all of their susceptible neighbors
 
-        #Take a timestep t as an input, and return a plot of the graph
-        g = self.epi_graphs[t]
-        S, E, I, R = self.states_over_time[t]  # noqa: E741
-        color_map = {i: "blue" for i in S}
-        color_map.update({i: "orange" for i in E})
-        color_map.update({i: "red" for i in I})
-        color_map.update({i: "green" for i in R})
-        colors = [color_map[v["name"]] for v in g.vs]
+        Args:
+            t (int): timestep to plot
+            ax (matplotlib axis, optional): axis for plotting
+            clear (bool): whether to clear axis
+            saveFile (bool): save to file
+            suffix (str): filename suffix
+        """
 
-        indices = [self.layout_name_to_ind[v["name"]] for v in g.vs]
-        layout = [self.fixed_layout[i] for i in indices]
-        node_labels = g.vs["name"]
+        #get indices of E, I, R
+        S, E, I, R = self.states_over_time[t]
+        affected_inds = set(E) | set(I) | set(R) 
 
-        if len(g.vs) > 40:
-            node_labels = None
+        #get direct neighbors of affected nodes
+        neighbors_set = set()
+        for node in affected_inds:
+            node_index = self.layout_name_to_ind[node]
+            nbr_indices = self.g_full.neighbors(node_index)
+            nbr_names = [self.g_full.vs[nbr]["name"] for nbr in nbr_indices]
+            neighbors_set.update(nbr_names)
+        #combine affected nodes and neighbors
+        plot_nodes = sorted(affected_inds | neighbors_set)
 
+        #create a subgraph from self.g_full with. these nodes
+        node_name_to_index = {v["name"]: v.index for v in self.g_full.vs}
+        subgraph_indices = [node_name_to_index[name] for name in plot_nodes]
+        subgraph = self.g_full.subgraph(subgraph_indices)
 
+        #assign colors by state
+        #note that subgraph reindexes nodes so need to remap
+        color_map = {}
+        for v in subgraph.vs:
+            name = v["name"]
+            if name in S:
+                color_map[name] = "blue"
+            elif name in E:
+                color_map[name] = "orange"
+            
+            elif name in I:
+                color_map[name] = "red"
+
+            elif name in R:
+                color_map[name] = "green"
+            
+            else:
+                color_map[name] = "gray"
+
+        colors = [color_map[v["name"]] for v in subgraph.vs] 
+
+        #Use full graph layout
+        indices_in_full = [self.layout_name_to_ind[v["name"]] for v in subgraph.vs]
+        layout = [self.fixed_layout[i] for i in indices_in_full]
+        node_labels = subgraph.vs["name"]
+
+        #plot
         if ax is None:
-            fig, ax = plt.subplots(figsize = (10,10))
+            fig, ax = plt.subplots(figsize = (10, 10))
             show_plot = True
         else:
             show_plot = False
         if clear:
             ax.clear()
+        
         ig.plot(
-            g,
+            subgraph,
             layout = layout,
             vertex_color = colors,
             vertex_size = 15,
             edge_color = "gray",
-            bbox = (600,600),
+            bbox = (600, 600),
             target = ax,
-            vertex_label = node_labels
+            vertex_label = node_labels if len(subgraph.vs) <= 40 else None
         )
         ax.set_title(f"Network at t = {t}")
+
+        #Save if requested
         if saveFile:
             plotpath = os.path.join(self.results_folder, f"network_at_{str(t)}")
             if suffix:
@@ -732,7 +775,7 @@ class NetworkModel:
         if show_plot and self.params["display_plots"]:
             plt.show()
         plt.close()
-
+    
 
         return
 
@@ -753,15 +796,15 @@ class NetworkModel:
         fig, ax = plt.subplots(figsize = (8,8))
 
         #get timesteps
-        timesteps = list(range(0, len(self.epi_graphs), dt))
-        if (len(self.epi_graphs)-1) not in timesteps:
-            timesteps.append(len(self.epi_graphs)-1) #always show last step
+        timesteps = list(range(0, len(self.states_over_time), dt))
+        if (len(self.states_over_time)-1) not in timesteps:
+            timesteps.append(len(self.states_over_time)-1) #always show last step
         
         def update(frame):
             t = timesteps[frame]
             ax.clear()
             self.draw_network(t, ax = ax, clear = False)
-            ax.set_title(f"{self.params['run_name']} | Day {t}")
+            ax.set_title(f"{self.params['run_name']} | Day {t}")
             return ax
         
         ani = animation.FuncAnimation(fig, update, frames = len(timesteps), interval = 1000/fps, blit = False, repeat = False)
@@ -781,19 +824,37 @@ class NetworkModel:
 
         return
 
-    def make_graphi_file(self, t: int, suffix: str = None):
-        """ Visualize the network at a given timestep using graphi
+    def make_graphml_file(self, t: int, suffix: str = None):
+        """ Visualize the network at a given timestep using grephi
 
         Args:
             t (int): a timestep of the network to visualize
 
         Returns:
-            Saves a .graphml of the network to open on gephi
+            Saves a .graphml of the network to open externally
         """
+
+        #Get neighbors of affected nodes from g_full
+        S, E, I, R = self.states_over_time[t]
+        affected_inds = set(E) | set(I) | set(R)
+
+        neighbors_set = set()
+        for node in affected_inds:
+            node_index = self.layout_name_to_ind[node]
+            nbr_indices = self.g_full.neighbors(node_index)
+            nbr_names = [self.g_full.vs[nbr]["name"] for nbr in nbr_indices]
+            neighbors_set.update(nbr_names)
+        plot_nodes = sorted(affected_inds | neighbors_set)
+
+        node_name_to_index = {v["name"]: v.index for v in self.g_full.vs}
+        subgraph_indices = [node_name_to_index[name] for name in plot_nodes]
+        subgraph = self.g_full.subgraph(subgraph_indices)
+
+
         def igraph_to_networkx(g: ig.Graph) -> nx.Graph:
 
             """
-            Takes an igraph graph object and converts it to a networkX graph to be visualized with graphi
+            Takes an igraph graph object and converts it to a networkX graph to be visualized with grephi
 
             Args:
                 g (ig.Graph): an igraph Graph
@@ -809,14 +870,14 @@ class NetworkModel:
                 attrs = v.attributes().copy()
                 attrs.pop("name", None) #don't duplicate name
                 G.add_node(node_id, **attrs)
-
             for e in g.es:
                 u = g.vs[e.source]["name"]
                 v = g.vs[e.target]["name"]
                 attrs = e.attributes().copy()
                 G.add_edge(u, v, **attrs)
             return G
-        nx_g = igraph_to_networkx(self.epi_graphs[t])
+
+        nx_g = igraph_to_networkx(subgraph)
         self.nx_g = nx_g
         if self.params["save_data_files"]:
             netpath = os.path.join(self.results_folder, "networkfile")
@@ -834,10 +895,10 @@ class NetworkModel:
 
 #Test run on a really small population
 if __name__ == "__main__":
-    Alcona_contacts = pd.read_parquet("./data/Alcona/contacts.parquet")
+    Keweenaw_contacts = pd.read_parquet("./data/Keweenaw/contacts.parquet")
 
-    testModel = NetworkModel(contacts_df = Alcona_contacts)
-    print("Running Model on Alcona County...")
+    testModel = NetworkModel(contacts_df = Keweenaw_contacts)
+    print("Running Model on Keweenaw County...")
     testModel.simulate()
 
     print("Displaying epidemic curve...")
@@ -845,10 +906,12 @@ if __name__ == "__main__":
 
     final_timestep = testModel.simulation_end_day
 
-    # print(f"Drawing Network at timestep {final_timestep}...")
-    # testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
+    print(f"Drawing Network at timestep {final_timestep}...")
+    testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
+
     print("Displaying cumulative incidence...")
     testModel.cumulative_incidence_plot()
+    
 
 
 

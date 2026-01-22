@@ -11,7 +11,7 @@ from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkM
 
 runParameters: ModelParameters = {
 #Epidemiological Parameters
-    "base_transmission_prob": 10,
+    "base_transmission_prob": 0.8,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -19,7 +19,7 @@ runParameters: ModelParameters = {
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
     "vax_efficacy": 0.997,
-    "vax_uptake": 0.85,
+    "vax_uptake": 0.25,
     "susceptibility_multiplier_under_five": 2.0,
 
 
@@ -38,16 +38,16 @@ runParameters: ModelParameters = {
 
 #Simulation settings
     "run_name": "driver_run",
-    "try_reload_edge_list": False, #Must be true to render changes in contact structure
+    "overwrite_edge_list": True, #Must be true to render changes in contact structure
     "simulation_duration": 45,
     "dt": 1,
     "I0": [22],
     "seed": 2026,
-    "county": "Antrim", 
+    "county": "Manistee", 
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
-    "make_movie": False,
+    "make_movie": True,
     "display_plots": True
 }
 
@@ -107,9 +107,13 @@ model.epi_curve()
 
 print("Displaying cumulative incidence...")
 model.cumulative_incidence_plot()
+model.cumulative_incidence_plot(strata = "age")
+model.cumulative_incidence_plot(strata = "sex")
+
 
 print(f"Drawing network at final day = {model.simulation_end_day}... ")
 model.draw_network(model.simulation_end_day)
+model.draw_network(0)
 
 if runParameters["make_movie"]:
     model.make_movie()

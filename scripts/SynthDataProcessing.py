@@ -3,7 +3,7 @@ import zipfile
 import pandas as pd
 import numpy as np
 
-@profile
+#@profile
 def synthetic_data_process(county="Chippewa", save_files=True):
     print("Processing FRED synthetic population data...")
     """
@@ -138,7 +138,7 @@ def synthetic_data_process(county="Chippewa", save_files=True):
 
     return contacts_pruned #, locations ## Right now not using locations df, could be useful later
 
-@profile
+#@profile
 def build_individual_lookup(contact_df):
     """
     Returns a Dataframe that is indexed from 0-(N-1) to be referred to by the network model to correspond with the NxN matrix
@@ -150,7 +150,7 @@ def build_individual_lookup(contact_df):
 
     return lookup_df
 
-@profile
+#@profile
 def build_edge_list(
     contacts_df: pd.df,
     params: dict,
