@@ -19,13 +19,15 @@ runParameters: ModelParameters = {
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
     "vax_efficacy": 0.997,
-    "vax_uptake": 0.85,
+    "vax_uptake": 0.25,
+    "susceptibility_multiplier_under_five": 2.0,
+
 
 #Number of contacts assigned to each individual from each location
-    "wp_contacts": 1,
-    "sch_contacts": 1,
-    "gq_contacts": 1,
-    "cas_contacts": 1,
+    "wp_contacts": 10,
+    "sch_contacts": 10,
+    "gq_contacts": 20,
+    "cas_contacts": 10,
 
 #Weighting of each contact type
     "hh_weight": 1,
@@ -35,15 +37,18 @@ runParameters: ModelParameters = {
     "cas_weight": .1,
 
 #Simulation settings
-    "run_name": "test_run",
+    "run_name": "driver_run",
+    "overwrite_edge_list": True, #Must be true to render changes in contact structure
     "simulation_duration": 45,
     "dt": 1,
-    "I0": [0],
+    "I0": [22],
     "seed": 2026,
-    "county": "Keweenaw", 
+    "county": "Manistee", 
     "state": "Michigan",
+    "save_plots": True,
     "save_data_files": True,
-    "make_movie": True
+    "make_movie": True,
+    "display_plots": True
 }
 
 # ----- Process data for model run -----
@@ -100,8 +105,15 @@ model.simulate()
 print("Displaying epidemic curve...")
 model.epi_curve()
 
+print("Displaying cumulative incidence...")
+model.cumulative_incidence_plot()
+model.cumulative_incidence_plot(strata = "age")
+model.cumulative_incidence_plot(strata = "sex")
+
+
 print(f"Drawing network at final day = {model.simulation_end_day}... ")
 model.draw_network(model.simulation_end_day)
+model.draw_network(0)
 
 if runParameters["make_movie"]:
     model.make_movie()

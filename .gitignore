@@ -4,3 +4,5 @@ ref/
 data
 __pycache__
 .pytest_cache
+results/
+*.prof

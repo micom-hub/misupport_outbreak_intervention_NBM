@@ -3,6 +3,7 @@ import zipfile
 import pandas as pd
 import numpy as np
 
+#@profile
 def synthetic_data_process(county="Chippewa", save_files=True):
     print("Processing FRED synthetic population data...")
     """
@@ -137,7 +138,7 @@ def synthetic_data_process(county="Chippewa", save_files=True):
 
     return contacts_pruned #, locations ## Right now not using locations df, could be useful later
 
-
+#@profile
 def build_individual_lookup(contact_df):
     """
     Returns a Dataframe that is indexed from 0-(N-1) to be referred to by the network model to correspond with the NxN matrix
@@ -149,7 +150,7 @@ def build_individual_lookup(contact_df):
 
     return lookup_df
 
-
+#@profile
 def build_edge_list(
     contacts_df: pd.df,
     params: dict,
@@ -224,6 +225,8 @@ def build_edge_list(
                 edge_list.append((i, j, params['sch_weight'], "sch"))
                 edge_list.append((j, i, params["sch_weight"], "sch"))
 
+    #gq sampled contacts
+
     gq_groups = contacts_df.groupby('gq_id').groups
     for gq_id, indices in gq_groups.items():
         if gq_id == 'nan' or gq_id == '':
@@ -236,6 +239,23 @@ def build_edge_list(
             for j in sampled:
                 edge_list.append((i, j, params['gq_weight'], "gq"))
                 edge_list.append((j, i, params["gq_weight"], "gq"))
+
+    #Casual sampled contacts
+    num_cas = params["cas_contacts"]
+    cas_weight = params["cas_weight"]
+
+    #gq individuals do not have casual contacts
+    non_gq_mask = ~contacts_df["gq"].astype(bool)
+    non_gq_indices = contacts_df.index[non_gq_mask].to_numpy()
+
+    for i in non_gq_indices:
+        possible_contacts = non_gq_indices[non_gq_indices != i]
+        k = min(num_cas, len(possible_contacts))
+        cas_contacts = rng.choice(possible_contacts, size = k, replace = False) if k > 0 else []
+        for j in cas_contacts:
+            edge_list.append((i, j, cas_weight, "cas"))
+            edge_list.append((j, i, cas_weight, "cas"))
+
 
     #Combine and deduplicate edges
     edges_df = pd.DataFrame(edge_list, columns = ['source', 'target', 'weight', 'contact_type'])
