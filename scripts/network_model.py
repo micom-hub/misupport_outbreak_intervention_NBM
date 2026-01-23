@@ -230,7 +230,7 @@ class NetworkModel:
 
         #Per-run trajectories
         self.states_over_time = [] 
-        self.new_exposures = [[]]
+        self.new_exposures = []
         self.new_infections = []
 
         initial_infectious = self.params["I0"]
@@ -243,31 +243,14 @@ class NetworkModel:
         R =  []
 
         self.states_over_time.append([S,E,I,R])
+        self.new_exposures.append([])
         self.new_infections.append(initial_infectious)
 
         #Reset run flags
         self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
         self.model_has_run = False
-        
-        
-
-    #Seed initial Infection
-        initial_infectious = self.params["I0"]
-        self.state[initial_infectious] = 2
-        
-        self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)
-        
-        #Initial States Variables
-        S = list(set(range(self.N)) - set(initial_infectious))
-        E = []
-        I = initial_infectious  # noqa: E741
-        R = []
-        self.states_over_time.append([S,E,I,R])
-
-        self.new_exposures = [[]] #track which individuals became exposed at which timestep, which really correlates to pre-infectious in this model
-
-        self.new_infections = [initial_infectious] #track which individuals became infectious at which timestep 
+       
         
     def name_to_ind(self, g: ig.Graph, names):
         """Convert individual's names to igraph vertex indices
@@ -643,6 +626,66 @@ class NetworkModel:
             plt.show()
         plt.close()
 
+    def cumulative_incidence_spaghetti(self, suffix: str = None):
+        """
+        Plots cumulative incidence trajectory for every run. Runs with stochastic-dieout are red, others blue.
+
+        Args:
+            suffix (str): An optional suffix for the figure filepath
+        Returns:
+            Nothing
+        """
+
+        pop_size = self.N
+        n_runs = self.n_runs
+
+        #TODO make alpha inversely proportional to n_runs
+        alpha = 0.5
+
+        max_timesteps = max(len(run_exposures) for run_exposures in self.all_new_exposures)
+        plt.figure(figsize = (10, 6))
+
+        #Calculate individual curves
+        all_curves = []
+        for run in range(n_runs):
+            exposures = self.all_new_exposures[run]
+            ever_exposed = np.zeros(pop_size, dtype = bool)
+            cumulative = []
+            for t in range(len(exposures)):
+                newly_exposed = np.array(exposures[t], dtype = int)
+                ever_exposed[newly_exposed] = True
+                cumulative.append(ever_exposed.sum() / pop_size)
+            if len(cumulative) < max_timesteps:
+                cumulative += [cumulative[-1]] * (max_timesteps - len(cumulative))
+            all_curves.append(cumulative)
+
+        #plot spaghetti curves
+        for run, curve in enumerate(all_curves):
+            color = "red" if self.all_stochastic_dieout[run] else "#3333ff"
+            plt.plot(range(max_timesteps), curve, 
+            color = color, alpha = alpha, lw = 1)
+
+        #plot mean curve
+        mean_curve = np.mean(all_curves, axis = 0)
+        plt.plot(range(max_timesteps), mean_curve, 
+        color = "black", lw = 2, label = "Mean Trajectory")
+
+        plt.xlabel("Time step (day)")
+        plt.ylabel("Cumulative Incidence (fraction of population)")
+        plt.title(f"Cumulative Incidence Spaghetti Plot\n{self.n_runs} runs, red = die-out")
+        plt.grid(True, axis = "y", alpha = 0.5)
+        plt.legend()
+        plt.tight_layout()
+        plotpath = os.path.join(self.results_folder, "cumulative_incidence_spaghetti")
+        if suffix:
+            plotpath = plotpath + suffix
+        if self.params["save_plots"]:
+            plt.savefig(f"{plotpath}.png")
+        if self.params["display_plots"]:
+            plt.show()
+        plt.close()
+        
+                
 
 
     #@profile
@@ -869,6 +912,7 @@ if __name__ == "__main__":
             suffix = f"run_{run+1}", strata = "age")
         testModel.cumulative_incidence_plot(run_number= run, 
             suffix = f"run_{run+1}", strata = "sex")
+    testModel.cumulative_incidence_spaghetti()
             
 
 

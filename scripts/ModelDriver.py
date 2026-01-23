@@ -38,6 +38,7 @@ runParameters: ModelParameters = {
     "cas_weight": .1,
 
 #Simulation settings
+    "n_runs": 5,
     "run_name": "driver_run",
     "overwrite_edge_list": True, #Must be true to render changes in contact structure
     "simulation_duration": 45,
@@ -105,11 +106,13 @@ model.simulate()
 
 print("Building plots...")
 for run in range(model.n_runs):
-        model.epi_curve(run_number= run, suffix = f"run_{run+1}")
-        model.cumulative_incidence_plot(run_number= run, 
-            suffix = f"run_{run+1}", strata = "age")
-        model.cumulative_incidence_plot(run_number= run, 
-            suffix = f"run_{run+1}", strata = "sex")
+    model.epi_curve(run_number= run, suffix = f"run_{run+1}")
+    model.cumulative_incidence_plot(run_number= run, 
+        suffix = f"run_{run+1}", strata = "age")
+    model.cumulative_incidence_plot(run_number= run, 
+        suffix = f"run_{run+1}", strata = "sex")
+model.cumulative_incidence_spaghetti()
+
 
 
 
