@@ -132,6 +132,7 @@ class NetworkModel:
     #Name: an individual's number (index of contact_df/individual_lookup))
     #Ind: the index of the individual's vertex in the model
 
+    #@profile
     def compute_network_structures(self):
         """
         Compute expensive network structures that are preserved across runs:
@@ -179,6 +180,10 @@ class NetworkModel:
 
         #Create individual lookup table
         self.individual_lookup = build_individual_lookup(self.contacts_df)
+
+        #Initialize individual vectors for quicker lookup
+        self.ages = self.individual_lookup["age"].to_numpy()
+        self.sexes = self.individual_lookup["sex"].to_numpy()
 
         #Create neighbor_map and fast_neighbor_map
         self.neighbor_map = self.build_neighbor_map()
@@ -378,7 +383,7 @@ class NetworkModel:
         
             vax_src = self.is_vaccinated[src]
             vax_tgt = self.is_vaccinated[sus_neighbors]
-            ages_targets = self.individual_lookup.loc[sus_neighbors, "age"].to_numpy()
+            ages_targets = self.ages[sus_neighbors]
 
             vax_efficacy = self.params['vax_efficacy']
 
@@ -685,10 +690,6 @@ class NetworkModel:
             plt.show()
         plt.close()
         
-                
-
-
-    #@profile
     def draw_network(self, t: int, run_number = 0, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
         """Visualizes the active subnetwork at a time t, that consists of all "active nodes" (E, I, or R) and all of their susceptible neighbors
 
@@ -780,7 +781,7 @@ class NetworkModel:
 
         return
 
-    def make_movie(self, dt: int = 1, run_number = 0, filename: str = "network_outbreak.mp4", fps: int = 3) -> None:
+    def make_movie(self, dt: int = 1, run_number = 0, filename: str = "network_outbreak.mp4", fps: int = 3) -> NtestModel.one:
         """_summary_
 
         Args:
@@ -889,11 +890,6 @@ class NetworkModel:
 
         return
 
-
-       
-
-
-    
 
 #Test run on a really small population
 if __name__ == "__main__":

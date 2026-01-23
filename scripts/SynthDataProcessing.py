@@ -267,6 +267,7 @@ def build_edge_list(
     #Build dataframe
     edges_df = pd.DataFrame(edge_list, columns = ['source', 'target', 'weight', 'contact_type'])
 
+
     max_weights = edges_df.groupby(['source','target'])['weight'].max().reset_index()
 
     edges_max = pd.merge(edges_df, max_weights, on = ['source','target','weight'])
@@ -274,9 +275,11 @@ def build_edge_list(
     #if two contact weights are equal, set to aggregate
     edges_df = edges_max.groupby(['source','target']).agg({
         'weight':'first',
-        'contact_type': lambda x: '+'.join(sorted(set(x)))
-    }).reset_index()
+        'contact_type': 'unique'}).reset_index()
 
+    print(edges_df.columns)
+
+    edges_df['contact_type'] = edges_df['contact_type'].apply(lambda ct: '+'.join(sorted(ct)))
 
     
 

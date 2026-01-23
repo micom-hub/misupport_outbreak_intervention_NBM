@@ -2,9 +2,16 @@ import os
 import pandas as pd
 import json
 
+
 from scripts.FredFetch import downloadPopData
 from scripts.SynthDataProcessing import synthetic_data_process
 from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401
+
+#suppressing plot outputs
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+plt.show = lambda *args, **kwargs: None #monkeypatch it
 
 ############################################
 # Run Settings: Alter runParameters values #
@@ -45,7 +52,7 @@ runParameters: ModelParameters = {
     "dt": 1,
     "I0": [22],
     "seed": 2026,
-    "county": "Manistee", 
+    "county": "Alcona", 
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
