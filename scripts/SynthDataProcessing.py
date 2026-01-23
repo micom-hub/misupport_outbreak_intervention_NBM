@@ -270,8 +270,6 @@ def build_edge_list(
                 pair_mask[ib, ia] = True
 
     # ----- Numba-accelerated sampler -----
-    from numba import njit
-
     @njit
     def sample_casual_numba(pair_mask, num_cas):
         Nloc = pair_mask.shape[0]

@@ -57,14 +57,14 @@ class ModelParameters(TypedDict):
 
 
 DefaultModelParams: ModelParameters = {
-    "base_transmission_prob": 0.8,
+    "base_transmission_prob": 0.3,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
     "incubation_period_vax": 10.5,
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
-    "vax_efficacy": 0,
+    "vax_efficacy": .997,
     "vax_uptake": 0.85, 
     "susceptibility_multiplier_under_five": 2.0,
 
@@ -78,7 +78,7 @@ DefaultModelParams: ModelParameters = {
     "gq_weight": .3,
     "cas_weight": .1,
 
-    "n_runs": 10,
+    "n_runs": 100,
     "run_name" : "test_run",
     "overwrite_edge_list": True,
     "simulation_duration": 45,
@@ -244,7 +244,7 @@ class NetworkModel:
 
         S = list(set(range(self.N)) - set(initial_infectious))
         E = []
-        I = initial_infectious
+        I = initial_infectious  # noqa: E741
         R =  []
 
         self.states_over_time.append([S,E,I,R])
@@ -254,7 +254,6 @@ class NetworkModel:
         #Reset run flags
         self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
-        self.model_has_run = False
        
         
     def name_to_ind(self, g: ig.Graph, names):
@@ -467,12 +466,89 @@ class NetworkModel:
                     self.stochastic_dieout = True
                     break
                 t += 1
-            self.model_has_run = True
 
             self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
             self.all_new_exposures[run] = [ne.copy() if hasattr(ne, "copy") else list(ne) for ne in self.new_exposures]
             self.all_stochastic_dieout[run] = self.stochastic_dieout
             self.all_end_days[run] = self.simulation_end_day
+
+    def epi_summary(self) -> pd.DataFrame:
+        """
+        Computes summary statistics for. each run on the model
+
+        Returns a pandas DataFrame with a row for each run, and columns:
+        - Total_infections
+        - epidemic_duration
+        - peak_infections
+        - peak_prevalence
+        - time_of_peak_infection
+        - percent_unvax_infected
+        - percent_vax_infected
+        - stochastic_dieout
+        """
+        N = self.N
+        try: vax_status = self.is_vaccinated
+        except AttributeError:
+            raise ValueError("Model states not initialized; run at least one simulation before computing summary statistics")
+        
+        summary = []
+        for run in range(self.n_runs):
+            exposures = self.all_new_exposures[run]
+            states_over_time = self.all_states_over_time[run]
+            stochastic_dieout = bool(self.all_stochastic_dieout[run])
+            epidemic_timne = self.all_end_days[run]
+
+            #Determine unique infections
+            ever_exposed = np.zeros(N, dtype = bool)
+            for exp in exposures:
+                ever_exposed[np.array(exp, dtype = int)] = True
+            total_infections = int(ever_exposed.sum())
+
+            #Peak infections and timing
+            infectious_counts = [len(state[2]) for state in states_over_time]
+            if infectious_counts:
+                peak_infectious = int(max(infectious_counts))
+                time_of_peak = int(np.argmax(infectious_counts))
+            else:
+                peak_infectious = 0
+                time_of_peak = None
+
+            peak_prevalence = peak_infectious / N
+
+            #Vaccination-stratified infection rates
+            n_unvax = int((~vax_status).sum())
+            n_vax = int(vax_status.sum())
+
+            pct_unvax_infected = (ever_exposed[~vax_status].sum() / n_unvax) if n_unvax else np.nan
+            pct_unvax_infected = (ever_exposed[vax_status].sum() / n_vax) if n_vax else np.nan
+
+            summary.append({
+                "run_number": run,
+                "total_infections": total_infections,
+                "epidemic_duration": epidemic_timne,
+                "peak_infections": peak_infectious,
+                "peak_prevalence": peak_prevalence,
+                "time_of_peak_infection": time_of_peak,
+                "pct_unvax_infected": pct_unvax_infected,
+                "pct_vax_infected": pct_unvax_infected,
+                "stochastic_dieout": stochastic_dieout
+            })
+        return pd.DataFrame(summary)
+
+            
+
+
+        
+
+            
+            
+
+
+
+
+
+
+
 
     def epi_curve(self, run_number = 0, suffix: str = None):
         """
@@ -781,7 +857,7 @@ class NetworkModel:
 
         return
 
-    def make_movie(self, dt: int = 1, run_number = 0, filename: str = "network_outbreak.mp4", fps: int = 3) -> NtestModel.one:
+    def make_movie(self, dt: int = 1, run_number = 0, filename: str = "network_outbreak.mp4", fps: int = 3):
         """_summary_
 
         Args:
@@ -838,7 +914,7 @@ class NetworkModel:
         """
 
         #Get neighbors of affected nodes from g_full
-        S, E, I, R = self.all_states_over_time[run_number][t]
+        S, E, I, R = self.all_states_over_time[run_number][t]  # noqa: E741
         affected_inds = set(E) | set(I) | set(R)
 
         neighbors_set = set()
@@ -902,13 +978,15 @@ if __name__ == "__main__":
     testModel.simulate()
 
     print("Plotting outcomes...")
-    for run in range(testModel.n_runs):
-        testModel.epi_curve(run_number= run, suffix = f"run_{run+1}")
-        testModel.cumulative_incidence_plot(run_number= run, 
-            suffix = f"run_{run+1}", strata = "age")
-        testModel.cumulative_incidence_plot(run_number= run, 
-            suffix = f"run_{run+1}", strata = "sex")
+    if testModel.n_runs < 10:
+        for run in range(testModel.n_runs):
+            testModel.epi_curve(run_number= run, suffix = f"run_{run+1}")
+            testModel.cumulative_incidence_plot(run_number= run, 
+                suffix = f"run_{run+1}", strata = "age")
+            testModel.cumulative_incidence_plot(run_number= run, 
+                suffix = f"run_{run+1}", strata = "sex")
     testModel.cumulative_incidence_spaghetti()
+    results = testModel.epi_summary()
             
 
 
