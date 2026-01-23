@@ -2,7 +2,6 @@ import os
 import pandas as pd
 import json
 
-
 from scripts.FredFetch import downloadPopData
 from scripts.SynthDataProcessing import synthetic_data_process
 from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401

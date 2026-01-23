@@ -2,6 +2,7 @@ import os
 import zipfile
 import pandas as pd
 import numpy as np
+from numba import njit
 
 #@profile
 def synthetic_data_process(county="Chippewa", save_files=True):
@@ -241,28 +242,73 @@ def build_edge_list(
             for j in sampled:
                 edge_list.append((min(i, j), max(i,j), gq_weight, "gq"))
 
+    #Numba magic to speed up the edge_list calculation
     #Casual sampled contacts
     num_cas = params["cas_contacts"]
     cas_weight = params["cas_weight"]
 
-    #gq individuals do not have casual contacts
-    non_gq_mask = ~contacts_df["gq"].astype(bool)
-    non_gq_indices = contacts_df.index[non_gq_mask].to_numpy()
+    # precompute non-gq indices and mapping 
+    non_gq_mask = ~contacts_df["gq"].astype(bool).to_numpy()
+    non_gq_indices = contacts_df.index[non_gq_mask].to_numpy()   
 
-    #ensure casual contacts are outside household, workplace, or school
-    existing_pairs = set((min(i, j), max(i, j)) for i, j, _, ct in edge_list if ct in {"hh","wp","sch"})
+    N = len(non_gq_indices)
 
+    # map from original index -> compact 0..N-1 index
+    M_total = contacts_df.shape[0]
+    idx_map = np.full(M_total, -1, dtype=np.int32)
+    for pos in range(N):
+        idx_map[non_gq_indices[pos]] = pos
 
+    # Build dense boolean pair_mask for forbidden (hh/wp/sch) pairs among non-gq
+    pair_mask = np.zeros((N, N), dtype=np.bool_)
+    for a, b, _, ct in edge_list:
+        if ct in {"hh", "wp", "sch"}:
+            ia = idx_map[a]
+            ib = idx_map[b]
+            if ia != -1 and ib != -1:
+                pair_mask[ia, ib] = True
+                pair_mask[ib, ia] = True
 
-    for i in non_gq_indices:
-        potential_js = [j for j in non_gq_indices if j != i and (min(i, j), max(i, j)) not in existing_pairs]
-        k = min(num_cas, len(potential_js))
-        cas_contacts = rng.choice(potential_js, size = k, replace = False) if k > 0 else []
-        for j in cas_contacts:
-            #append undirected edges
-            edge_list.append((min(i, j), max(i,j), cas_weight, "cas"))
-            existing_pairs.add((min(i,j),max(i,j)))
+    # ----- Numba-accelerated sampler -----
+    from numba import njit
 
+    @njit
+    def sample_casual_numba(pair_mask, num_cas):
+        Nloc = pair_mask.shape[0]
+        assigned = np.zeros((Nloc, Nloc), dtype=np.bool_)   # symmetric flags for chosen casual edges
+        temp = np.empty(Nloc, dtype=np.int32)  # reuse candidate buffer
+        for i in range(Nloc):
+            cnt = 0
+            # gather candidate j's
+            for j in range(Nloc):
+                if j != i and (not pair_mask[i, j]) and (not assigned[i, j]):
+                    temp[cnt] = j
+                    cnt += 1
+            if cnt == 0:
+                continue
+            k = num_cas if num_cas < cnt else cnt
+            # Partial Fisher-Yates to select k unique without replacement
+            for t in range(k):
+                # pick r in [t, cnt-1]
+                r = np.random.randint(t, cnt)
+                # swap
+                tv = temp[t]
+                temp[t] = temp[r]
+                temp[r] = tv
+                jj = temp[t]
+                assigned[i, jj] = True
+                assigned[jj, i] = True
+        return assigned
+
+    assigned = sample_casual_numba(pair_mask, num_cas)
+
+    # Add edges back to edge_list by mapping compact indices -> original indices
+    for ii in range(N):
+        for jj in range(ii + 1, N):
+            if assigned[ii, jj]:
+                a = non_gq_indices[ii]
+                b = non_gq_indices[jj]
+                edge_list.append((int(min(a, b)), int(max(a, b)), cas_weight, "cas"))
 
     #Build dataframe
     edges_df = pd.DataFrame(edge_list, columns = ['source', 'target', 'weight', 'contact_type'])
@@ -276,8 +322,6 @@ def build_edge_list(
     edges_df = edges_max.groupby(['source','target']).agg({
         'weight':'first',
         'contact_type': 'unique'}).reset_index()
-
-    print(edges_df.columns)
 
     edges_df['contact_type'] = edges_df['contact_type'].apply(lambda ct: '+'.join(sorted(ct)))
 
