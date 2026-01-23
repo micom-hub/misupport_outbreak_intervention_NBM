@@ -1,9 +1,18 @@
 import os
 import pandas as pd
+import json
+import time
+start_time = time.perf_counter()
 
 from scripts.FredFetch import downloadPopData
 from scripts.SynthDataProcessing import synthetic_data_process
 from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401
+
+#suppressing plot outputs
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+plt.show = lambda *args, **kwargs: None #monkeypatch it
 
 ############################################
 # Run Settings: Alter runParameters values #
@@ -11,7 +20,7 @@ from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkM
 
 runParameters: ModelParameters = {
 #Epidemiological Parameters
-    "base_transmission_prob": 0.8,
+    "base_transmission_prob": 0.3,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -19,7 +28,7 @@ runParameters: ModelParameters = {
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
     "vax_efficacy": 0.997,
-    "vax_uptake": 0.25,
+    "vax_uptake": 0.7,
     "susceptibility_multiplier_under_five": 2.0,
 
 
@@ -37,13 +46,14 @@ runParameters: ModelParameters = {
     "cas_weight": .1,
 
 #Simulation settings
+    "n_runs": 50,
     "run_name": "driver_run",
     "overwrite_edge_list": True, #Must be true to render changes in contact structure
     "simulation_duration": 45,
     "dt": 1,
     "I0": [22],
     "seed": 2026,
-    "county": "Manistee", 
+    "county": "Alcona", 
     "state": "Michigan",
     "save_plots": True,
     "save_data_files": True,
@@ -102,22 +112,29 @@ model = NetworkModel(contacts_df = contacts_df, params = runParameters)
 print("Running model...")
 model.simulate()
 
-print("Displaying epidemic curve...")
-model.epi_curve()
+print("Building plots...")
+if model.n_runs < 6:
+    for run in range(model.n_runs):
+        model.epi_curve(run_number= run, suffix = f"run_{run+1}")
+        model.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "age")
+        model.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "sex")
+model.cumulative_incidence_spaghetti()
+model.results = model.epi_summary()
 
-print("Displaying cumulative incidence...")
-model.cumulative_incidence_plot()
-model.cumulative_incidence_plot(strata = "age")
-model.cumulative_incidence_plot(strata = "sex")
-
-#Network visualization extremely slow
-#print(f"Drawing network at final day = {model.simulation_end_day}... ")
-#model.draw_network(model.simulation_end_day)
-#model.draw_network(0)
 
 
 
 if runParameters["make_movie"]:
     model.make_movie()
 
+#Save parameters to json file and save graphml file
+if runParameters["save_data_files"]:
+    model.make_graphml_file(t = model.simulation_end_day)
+    with open(model.results_folder + "/run_parameters.json", "w") as f:
+        json.dump(runParameters, f, indent = 4)
 
+
+end_time = time.perf_counter()
+print(f" Driver runtime: {end_time - start_time} seconds")

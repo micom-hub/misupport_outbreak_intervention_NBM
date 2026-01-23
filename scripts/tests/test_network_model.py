@@ -39,186 +39,152 @@ def net_model(sample_contacts_df):
     })
     return NetworkModel(contacts_df=sample_contacts_df, params=params)
 
-##################
-# Tests
-##################
-
-#### Helper Functions
-
-def test_name_to_ind_single_and_batch(net_model):
-    g = net_model.epi_g
-    node_names = np.array(g.vs["name"])
-    test_name = node_names[0]
-    node_ind = net_model.name_to_ind(g, test_name)
-    assert g.vs[node_ind]["name"] == test_name
-
-    some_names = node_names[:3]
-    node_inds = net_model.name_to_ind(g, some_names)
-    assert all(g.vs[ind]["name"] == name for ind, name in zip(node_inds, some_names))
-
-    arr_names = node_names[:3]
-    inds_arr = net_model.name_to_ind(g, arr_names)
-    assert (np.array([g.vs[i]["name"] for i in inds_arr]) == arr_names).all()
-
-def test_ind_to_name_single_and_batch(net_model):
-    g = net_model.epi_g
-    node_names = np.array(g.vs["name"])
-    node_inds = np.arange(len(node_names))
-
-    test_ind = node_inds[0]
-    assert net_model.ind_to_name(g, test_ind) == g.vs[test_ind]["name"]
-
-    some_inds = node_inds[:3]
-    names_list = net_model.ind_to_name(g, some_inds)
-    for ind, name_returned in zip(some_inds, names_list):
-        assert name_returned == g.vs[ind]["name"]
-
-    inds_arr = node_inds[:3]
-    names_arr = net_model.ind_to_name(g, inds_arr)
-    assert (np.array([g.vs[i]["name"] for i in inds_arr]) == names_arr).all()
-
-#### Input/Output Consistency
-
-def test_build_edge_list_and_lookup(sample_contacts_df):
-    params = DefaultModelParams.copy()
-    edge_list = build_edge_list(
-        contacts_df=sample_contacts_df, params=params, rng=np.random.default_rng(params["seed"]), save=False, county="TestCounty"
-    )
-    assert "source" in edge_list.columns
-    assert "target" in edge_list.columns
-    assert "weight" in edge_list.columns
-    assert "contact_type" in edge_list.columns
-    lookup = build_individual_lookup(sample_contacts_df)
-    assert set(["age", "race", "sex"]).issubset(lookup.columns)
-    assert lookup.shape[0] == sample_contacts_df.shape[0]
-
-def test_model_initialization(net_model):
-    assert net_model.N == net_model.contacts_df.shape[0]
-    assert hasattr(net_model, "edge_list")
-    assert hasattr(net_model, "individual_lookup")
-    assert net_model.epi_g.vs["name"] is not None
-
-#### Graph Methods
-
-def test_initialize_graph_creates_expected_nodes(net_model):
-    g = net_model.epi_g
-    assert 1 in g.vs["name"]
-    assert all(isinstance(n, numbers.Integral) for n in g.vs["name"])
-
-def test_add_to_graph_expands_network(net_model):
-    g1 = net_model.epi_g
-    g2 = net_model.add_to_graph(g1, [2])
-    assert 3 in g2.vs["name"] or 2 in g2.vs["name"]
-    assert len(g2.vs["name"]) >= len(g1.vs["name"])
-
-def test_graph_edge_attributes(net_model):
-    g = net_model.epi_g
-    if g.ecount() > 0:
-        for e in g.es:
-            assert isinstance(e["weight"], float)
-            assert e["contact_type"] in ("hh", "wp", "sch", "gq", "cas")
-
-#### State Tracking and Transitions
+def test_network_structures(net_model):
+    model = net_model
+    assert model.N == len(model.contacts_df)
+    assert isinstance(model.edge_list, pd.DataFrame)
+    assert model.adj_matrix.shape == (model.N, model.N)
+    assert isinstance(model.individual_lookup, pd.DataFrame)
+    assert model.individual_lookup.shape[0] == model.N
+    assert isinstance(model.neighbor_map, dict)
+    for i, v in model.neighbor_map.items():
+        assert isinstance(v, list)
 
 def test_state_initialization(net_model):
-    assert net_model.state[net_model.params["I0"]] == 2
-    susceptible = set(range(net_model.N)) - set(net_model.params["I0"])
-    assert (net_model.state[list(susceptible)] == 0).all()
+    net_model.initialize_states()
+    model = net_model
+    assert isinstance(model.state, np.ndarray)
+    assert len(model.state) == model.N
+    assert model.state[model.params["I0"]] == 2
+    susceptible = set(range(model.N)) - set(model.params["I0"])
+    assert (model.state[list(susceptible)] == 0).all()
 
 def test_assign_periods(net_model):
+    model = net_model
+    model.initialize_states()
     inds = np.array([0,1,2])
-    inc_periods = net_model.assign_incubation_period(inds)
-    inf_periods = net_model.assign_infectious_period(inds)
+    inc_periods = model.assign_incubation_period(inds)
+    inf_periods = model.assign_infectious_period(inds)
     assert inc_periods.shape == (3,) and (inc_periods > 0).all()
     assert inf_periods.shape == (3,) and (inf_periods > 0).all()
 
-def test_step_advances_epidemic(net_model):
-    initial_I = np.sum(net_model.state == 2)
-    net_model.step()
-    # May still be just 1 infectious, but should not crash
-    assert np.sum(net_model.state == 2) >= 0
 
-def test_states_over_time_consistency(net_model):
-    net_model.simulate()
-    # Should fill up states_over_time for every step
-    assert len(net_model.states_over_time) >= 1
-    for S, E, I, R in net_model.states_over_time:
-        all_states = set(S + E + I + R)
-        # Each node in contacts_df should be in exactly one state
-        assert all(i in all_states for i in range(net_model.N))
+def test_graph_attribute_assignment(net_model):
+    model = net_model
+    g = model.g_full
+    names = np.array(g.vs["name"])
+    ages = model.contacts_df.iloc[names]["age"].to_numpy()
+    model.assign_node_attribute("age", ages, names, g)
+    for idx, expected_age in zip(names, ages):
+        ind = model.name_to_ind(g, idx)
+        # igraph stores numeric attributes correctly
+        assert g.vs[ind]["age"] == expected_age
 
-#### Visualization
+def test_single_run_and_trajectories(net_model):
+    model = net_model
+    model.simulate()
+    for run in range(model.n_runs):
+        all_states = model.all_states_over_time[run]
+        exposures = model.all_new_exposures[run]
+        assert isinstance(all_states, list)
+        assert isinstance(exposures, list)
+        assert abs(len(exposures) == len(all_states)) 
+        for timestep, (S,E,I,R) in enumerate(all_states):
+            all_ids = set(S+E+I+R)
+            assert all(i in all_ids for i in range(model.N))
+            assert len(exposures) == len(all_states)
+    # At least initial infection happens
+    for run in range(model.n_runs):
+        exposures = model.all_new_exposures[run]
+        assert len(exposures) > 0
+        assert len(exposures[0]) >= 0
+
+def test_stochastic_dieout_flagged(net_model):
+    model = net_model
+    model.simulate()
+    # At least one run will have dieout or not
+    assert any(isinstance(flag, (np.bool_, bool)) for flag in model.all_stochastic_dieout)
+
+def test_end_days_consistent(net_model):
+    model = net_model
+    model.simulate()
+    # End day never exceeds Tmax
+    for d in model.all_end_days:
+        assert d <= model.Tmax
 
 def test_epi_curve_runs(net_model, monkeypatch):
-    net_model.simulate()
+    model = net_model
+    model.simulate()
     import matplotlib.pyplot as plt
     monkeypatch.setattr(plt, "show", lambda: None)
-    net_model.epi_curve()
+    for run in range(model.n_runs):
+        model.epi_curve(run_number=run)
+
+def test_cumulative_incidence_plot_runs(net_model, monkeypatch):
+    model = net_model
+    model.simulate()
+    import matplotlib.pyplot as plt
+    monkeypatch.setattr(plt, "show", lambda: None)
+    for run in range(model.n_runs):
+        model.cumulative_incidence_plot(run_number=run, strata=None)
+        model.cumulative_incidence_plot(run_number=run, strata="age")
+        model.cumulative_incidence_plot(run_number=run, strata="sex")
+
+def test_cumulative_incidence_spaghetti_runs(net_model, monkeypatch):
+    model = net_model
+    model.simulate()
+    import matplotlib.pyplot as plt
+    monkeypatch.setattr(plt, "show", lambda: None)
+    model.cumulative_incidence_spaghetti()
 
 def test_draw_network_runs(net_model, monkeypatch):
-    net_model.simulate()
+    model = net_model
+    model.simulate()
     import matplotlib.pyplot as plt
     monkeypatch.setattr(plt, "show", lambda: None)
-    final_timestep = getattr(net_model, "simulation_end_day", None) or (len(net_model.states_over_time) - 1)
-    net_model.draw_network(final_timestep)
+    for run in range(model.n_runs):
+        t = len(model.all_states_over_time[run]) // 2
+        model.draw_network(t=t, run_number=run)
 
 def test_make_movie_runs(net_model, monkeypatch, tmp_path):
-    net_model.simulate()
-    import matplotlib.pyplot as plt
-    import matplotlib.animation as animation
-
+    model = net_model
+    model.simulate()
+    import matplotlib.pyplot as plt, matplotlib.animation as animation
     monkeypatch.setattr(plt, "show", lambda: None)
-    # Mock out ani.save to avoid actually writing files
     monkeypatch.setattr(animation.Animation, "save", lambda self, filename, writer, fps: None)
+    model.results_folder = tmp_path
+    model.params["save_data_files"] = True
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        net_model.make_movie(filename=str(tmp_path / "testmovie.mp4"))
+        model.make_movie(run_number=0, filename=str(tmp_path / "testmovie.mp4"), fps=1)
 
 def test_make_graphml_file_runs(net_model, tmp_path):
-    net_model.simulate()
-    # Should not crash and should create proper networkx graph object
-    net_model.make_graphml_file(t=0, suffix="_test")
-    assert hasattr(net_model, "nx_g")
-    assert isinstance(net_model.nx_g, nx.Graph)
-    # Should have nodes corresponding to E/I/R + neighbors
-    # Find original set of affected nodes at t=0
-    S, E, I, R = net_model.states_over_time[0]
+    model = net_model
+    model.simulate()
+    model.results_folder = tmp_path
+    last_t = len(model.all_states_over_time[0]) - 1
+    model.make_graphml_file(t=last_t, run_number=0)
+    assert hasattr(model, "nx_g")
+    assert isinstance(model.nx_g, nx.Graph)
+    S, E, I, R = model.all_states_over_time[0][last_t]
     expected_nodes = set(E + I + R)
-    graph_nodes = set(net_model.nx_g.nodes)
+    graph_nodes = set(model.nx_g.nodes)
+    # Test that all relevant nodes are included after conversion
     assert expected_nodes.issubset(graph_nodes)
 
-#### Population Lookup and Attribute Creation
-
-def test_lookup_demographics(net_model):
+def test_population_lookup(net_model):
     lookup = net_model.individual_lookup
-    for i in range(net_model.N):
-        assert "age" in lookup.columns
-        assert "race" in lookup.columns
-        assert "sex" in lookup.columns
+    assert {"age","race","sex"}.issubset(set(lookup.columns))
+    assert len(lookup)==net_model.N
 
-def test_assign_node_attribute_works(net_model, sample_contacts_df):
-    g = net_model.epi_g
-    node_names = np.array(g.vs["name"])
-    ages = net_model.contacts_df.iloc[node_names]["age"].to_numpy()
-    net_model.assign_node_attribute("age", ages, node_names, g)
-    for idx, expected_age in zip(node_names, ages):
-        node_ind = next(i for i, name in enumerate(g.vs["name"]) if name == idx)
-        actual_age = g.vs[node_ind]["age"]
-        assert actual_age == expected_age
-
-#### Integration Tests
-
-def test_full_run_success(net_model, monkeypatch):
+def test_full_batch_run_monkeypatched_visualizations(net_model, monkeypatch):
     import matplotlib.pyplot as plt
     monkeypatch.setattr(plt, "show", lambda: None)
-    net_model.simulate()
-    net_model.epi_curve()
-    final_timestep = getattr(net_model, "simulation_end_day", None) or (len(net_model.states_over_time) - 1)
-    net_model.draw_network(final_timestep)
-    net_model.make_movie(filename="movie.mp4")
-    net_model.make_graphml_file(t=final_timestep, suffix="_integration")
-    assert net_model.model_has_run
-    assert hasattr(net_model, "states_over_time")
-    assert len(net_model.states_over_time) > 0
-    assert hasattr(net_model, "nx_g")
-    assert isinstance(net_model.nx_g, nx.Graph)
+    model = net_model
+    model.simulate()
+    model.cumulative_incidence_spaghetti()
+    for run in range(model.n_runs):
+        model.epi_curve(run_number=run)
+        model.cumulative_incidence_plot(run_number=run, strata=None)
+        t = len(model.all_states_over_time[run]) // 2
+        model.draw_network(t=t, run_number=run)
