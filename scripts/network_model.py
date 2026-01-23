@@ -78,7 +78,7 @@ DefaultModelParams: ModelParameters = {
     "gq_weight": .3,
     "cas_weight": .1,
 
-    "n_runs": 2,
+    "n_runs": 10,
     "run_name" : "test_run",
     "overwrite_edge_list": True,
     "simulation_duration": 45,
@@ -107,11 +107,17 @@ class NetworkModel:
         self.Tmax = self.params["simulation_duration"] #how long it could run
         self.rng = np.random.default_rng(self.params["seed"])
         self.county = self.params["county"]
+        self.n_runs = self.params["n_runs"]
 
         #One-time computation of network structures
         self.compute_network_structures()
 
-        self.existing_edge_set= set() # track existing edges        
+        #Set up storage for full run
+        self.all_states_over_time = [None]*self.n_runs
+        self.all_new_exposures = [None]*self.n_runs
+
+        self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
+        self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
 
 
 #Set-up results folder
@@ -263,9 +269,6 @@ class NetworkModel:
 
         self.new_infections = [initial_infectious] #track which individuals became infectious at which timestep 
         
-
-
-
     def name_to_ind(self, g: ig.Graph, names):
         """Convert individual's names to igraph vertex indices
 
@@ -302,7 +305,6 @@ class NetworkModel:
         else:
             raise TypeError("inds must be int, list, or numpy array.")
             
-
     #@profile
     def build_neighbor_map(self):
         """
@@ -320,127 +322,6 @@ class NetworkModel:
             neighbor_map[tgt].append((src, w, ct))
         return neighbor_map
 
-    #@profile
-    def initialize_graph(self, indices):
-        """
-        Initialize an igraph with the provided index/indices and all their neighbors, with weighted edges
-        """
-            # Make sure all indices are ints and unique
-        indices = [int(i) for i in (indices if isinstance(indices, (list, np.ndarray)) else [indices])]
-        indices = np.unique(np.array(indices, dtype = int))
-        node_set = set(indices)
-
-        # Get all required nodes
-        for ind in indices:
-            neighbors = self.neighbor_map.get(ind, [])
-            node_set.update([int(neighbor) for neighbor, _, _ in neighbors])
-        node_list = sorted(node_set)
-        node_name_to_index = {name:ind for ind, name in enumerate(node_list)}
-        N_nodes = len(node_list)
-
-
-
-        # Gather all edges
-        edge_data = []
-
-        for ind in node_list:
-            for neighbor, weight, ct in self.neighbor_map.get(ind, []):
-                neighbor = int(neighbor)
-                if neighbor in node_set and ind != neighbor:
-                    ind1, ind2 = node_name_to_index[ind], node_name_to_index[neighbor]
-                    #avoid duplicated edges by only adding this direction
-                    if ind1 < ind2:
-                        edge_data.append((ind1, ind2, weight, ct)) 
-        #double check for no duplicate edges
-        edge_data = list(set(edge_data))
-
-        #convert to np arrays for efficiency and gather edge data
-        edge_array = np.array([(e[0],e[1]) for e in edge_data], dtype = int)
-        weight_array = np.array([e[2] for e in edge_data], dtype = float)
-        type_array = np.array([e[3] for e in edge_data], dtype = object)
-
-
-        g = ig.Graph()
-        g.add_vertices(N_nodes)
-        g.vs["name"] = node_list
-
-        if edge_array.size > 0:
-            g.add_edges(edge_array.tolist())
-            g.es["weight"] = weight_array.tolist()
-            g.es["contact_type"] = type_array.tolist()
-        
-        #assign node attributes with df subsetting
-        lookup_sub = self.individual_lookup.loc[node_list]
-        g.vs["age"] = lookup_sub["age"].to_numpy()
-        g.vs["sex"] = lookup_sub["sex"].to_numpy()
-
-
-        #track edges
-        self.existing_edge_set_init = set(tuple(sorted((node_list[e[0]], node_list[e[1]]))) for e in edge_array)
-
-        return g
-    #@profile
-    def add_to_graph(self, g: ig.Graph, indices):
-        """
-        Quickly add all neighbors of indices to igraph g without duplicates, ensuring all node names are ints, assigns demographic attributes to each new node when added
-        """
-        # Always treat indices as list of ints
-        if isinstance(indices, int):
-            indices = [indices]
-        indices = [int(i) for i in np.asarray(indices)]
-        indices = np.unique(np.asarray(indices, dtype = int))
-        existing_names = set(self.ind_to_name(g, range(g.vcount())))
-
-        # Gather current edges as tuples of int
-        new_nodes = set()
-        edge_data = []
-
-        #gather new nodes and edges
-        for ind in indices:
-            neighbors_dict = self.fast_neighbor_map.get(ind, {})
-            for neighbor, (weight, ct) in neighbors_dict.items():
-                neighbor = int(neighbor)
-                #only add a node if it isn't present
-                if neighbor not in existing_names:
-                    new_nodes.add(neighbor)
-                #don't duplicate edges or add loops
-                if ind != neighbor:
-                    node1, node2 = min(ind, neighbor), max(ind, neighbor)
-                    if (node1, node2) not in self.existing_edge_set:
-                        edge_data.append((node1, node2, weight, ct))
-
-        #add new nodes to graph in batch
-        if new_nodes:
-            g.add_vertices(len(new_nodes))
-            newly_added = sorted(new_nodes)
-            g.vs[-len(new_nodes):]["name"] = newly_added
-
-            #assign node attributes
-            lookup_sub = self.individual_lookup.loc[newly_added]
-            g.vs[-len(new_nodes):]["age"] = lookup_sub["age"].to_numpy()
-            g.vs[-len(new_nodes):]["sex"] = lookup_sub["sex"].to_numpy()
-
-            existing_names.update(newly_added)
-
-
-
-        #deduplicate and add new edges to graph in batch 
-        name_to_node_ind = {int(v["name"]): v.index for v in g.vs}
-        edge_tuples = set((e[0], e[1]) for e in edge_data)
-
-        #prepare arrays for igraph
-        edges_array = np.array([(name_to_node_ind[i], name_to_node_ind[j]) for i, j in edge_tuples], dtype = int)
-        weights_array = np.array([next(e[2] for e in edge_data if (e[0], e[1]) == (i, j)) for i, j in edge_tuples], dtype=float)
-        types_array = np.array([next(e[3] for e in edge_data if (e[0], e[1]) == (i, j)) for i, j in edge_tuples], dtype=object)
-
-        if len(edges_array) > 0:
-            g.add_edges(edges_array.tolist())
-            g.es[-len(edges_array):]["weight"] = weights_array.tolist()
-            g.es[-len(edges_array):]["contact_type"] = types_array.tolist()
-
-            self.existing_edge_set.update(edge_tuples)
-    
-        return g
 
     
     def assign_node_attribute(self, attr_name: str, vals: np.ndarray, indices: np.ndarray, g: ig.Graph) -> ig.Graph:
@@ -584,21 +465,38 @@ class NetworkModel:
 
     #@profile
     def simulate(self):
-        t = 0
-        while t < self.Tmax:
-            self.step()
-            S, E, I, R = self.states_over_time[-1]  # noqa: E741
-            if not E and not I:
-                self.simulation_end_day = t + 1 #as it did run another step 
-                self.stochastic_dieout = True
-                break
-            t += 1
-        self.model_has_run = True
 
-    def epi_curve(self, suffix: str = None):
+        for run in range(self.n_runs):
+            print(f"Running model run {run + 1} of {self.n_runs}...")
+            self.initialize_states()
 
-        #Produce an epi-curve of the number of individuals infected at each timestep
-        counts = [len(exposed) for exposed in self.new_exposures]
+            t = 0
+            while t < self.Tmax:
+                self.step()
+                S, E, I, R = self.states_over_time[-1]  # noqa: E741
+                if not E and not I:
+                    self.simulation_end_day = t + 1 #as it did run another step 
+                    self.stochastic_dieout = True
+                    break
+                t += 1
+            self.model_has_run = True
+
+            self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
+            self.all_new_exposures[run] = [ne.copy() if hasattr(ne, "copy") else list(ne) for ne in self.new_exposures]
+            self.all_stochastic_dieout[run] = self.stochastic_dieout
+            self.all_end_days[run] = self.simulation_end_day
+
+    def epi_curve(self, run_number = 0, suffix: str = None):
+        """
+        Build an epi curve for a given run of the model
+
+        Args:
+            run_number (int): If model run multiple times, specify which curve to build
+            suffix (str): An optional suffix to add to the plot name
+        """
+
+        exposures = self.all_new_exposures[run_number]
+        counts = [len(exposed) for exposed in exposures]
         counts[0] = len(self.params["I0"]) #add initial infections
         plt.figure(figsize=((8,4)))
         plt.bar(range(len(counts)), counts, color = 'orange', label = "Infections Over Time")
@@ -620,18 +518,19 @@ class NetworkModel:
 
         return
 
-    def cumulative_incidence_plot(self, strata:str = None, time: int = None, suffix: str = None) -> None:
+    def cumulative_incidence_plot(self, run_number = 0, strata:str = None, time: int = None, suffix: str = None) -> None:
         """
         Plots cumulative incidence over time, optionally stratified
 
         Args:
-            time (int, optional): time range for plot, 0-t, defaults to full timespan
-            strata (str, optional)  stratification factor for plot
+            time (int): time range for plot, 0-t, defaults to full timespan
+            run_number (int): If model run multiple times, specify which to viz
+            strata (str )  stratification factor for plot
 
         Creates a matplotlib plot
         """
         pop_size = self.N
-        exposures = self.new_exposures
+        exposures = self.all_new_exposures[run_number]
         if len(exposures) > 0 and len(exposures[0]) == 0:
             exposures[0] = list(self.params["I0"])
 
@@ -747,11 +646,12 @@ class NetworkModel:
 
 
     #@profile
-    def draw_network(self, t: int, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
+    def draw_network(self, t: int, run_number = 0, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
         """Visualizes the active subnetwork at a time t, that consists of all "active nodes" (E, I, or R) and all of their susceptible neighbors
 
         Args:
             t (int): timestep to plot
+            run_number: run to visualize, if multiple model runs
             ax (matplotlib axis, optional): axis for plotting
             clear (bool): whether to clear axis
             saveFile (bool): save to file
@@ -759,7 +659,7 @@ class NetworkModel:
         """
 
         #get indices of E, I, R
-        S, E, I, R = self.states_over_time[t] # noqa: E741
+        S, E, I, R = self.all_states_over_time[run_number][t] # noqa: E741
         affected_inds = set(E) | set(I) | set(R) 
 
         #get direct neighbors of affected nodes
@@ -837,10 +737,11 @@ class NetworkModel:
 
         return
 
-    def make_movie(self, dt: int = 1, filename: str = "network_outbreak.mp4", fps: int = 3) -> None:
+    def make_movie(self, dt: int = 1, run_number = 0, filename: str = "network_outbreak.mp4", fps: int = 3) -> None:
         """_summary_
 
         Args:
+            run_number: which run to create a movie for if multiple model runs
             dt (int, optional): Time interval between network visualizations Defaults to 1.
             filename (str, optional): Name to save to Defaults to "network_outbreak.mp4".
             fps (int, optional): Defaults to 3.
@@ -854,7 +755,7 @@ class NetworkModel:
         fig, ax = plt.subplots(figsize = (8,8))
 
         #get timesteps
-        timesteps = list(range(0, len(self.states_over_time), dt))
+        timesteps = list(range(0, len(self.all_states_over_time[run_number]), dt))
         if (len(self.states_over_time)-1) not in timesteps:
             timesteps.append(len(self.states_over_time)-1) #always show last step
         
@@ -882,18 +783,18 @@ class NetworkModel:
 
         return
 
-    def make_graphml_file(self, t: int, suffix: str = None):
+    def make_graphml_file(self, t: int, run_number:int = 0, suffix: str = None):
         """ Visualize the network at a given timestep using grephi
 
         Args:
             t (int): a timestep of the network to visualize
-
+            run_number(int): a run number to produce the graph for
         Returns:
             Saves a .graphml of the network to open externally
         """
 
         #Get neighbors of affected nodes from g_full
-        S, E, I, R = self.states_over_time[t]
+        S, E, I, R = self.all_states_over_time[run_number][t]
         affected_inds = set(E) | set(I) | set(R)
 
         neighbors_set = set()
@@ -961,18 +862,18 @@ if __name__ == "__main__":
     print("Running Model on Keweenaw County...")
     testModel.simulate()
 
-    print("Displaying epidemic curve...")
-    testModel.epi_curve()
+    print("Plotting outcomes...")
+    for run in range(testModel.n_runs):
+        testModel.epi_curve(run_number= run, suffix = f"run_{run+1}")
+        testModel.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "age")
+        testModel.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "sex")
+            
 
-    final_timestep = testModel.simulation_end_day
-
-    # print(f"Drawing Network at timestep {final_timestep}...")
-    # testModel.draw_network(final_timestep, saveFile = testModel.params["save_plots"])
 
 
 
-    print("Displaying cumulative incidence...")
-    testModel.cumulative_incidence_plot()
     
 
 

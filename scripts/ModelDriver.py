@@ -99,23 +99,17 @@ else:
 
 print("Initializing model...")
 model = NetworkModel(contacts_df = contacts_df, params = runParameters)
-model.initialize_states()
 
 print("Running model...")
 model.simulate()
 
-print("Displaying epidemic curve...")
-model.epi_curve()
-
-print("Displaying cumulative incidence...")
-model.cumulative_incidence_plot()
-model.cumulative_incidence_plot(strata = "age")
-model.cumulative_incidence_plot(strata = "sex")
-
-#Network visualization extremely slow
-#print(f"Drawing network at final day = {model.simulation_end_day}... ")
-#model.draw_network(model.simulation_end_day)
-#model.draw_network(0)
+print("Building plots...")
+for run in range(model.n_runs):
+        model.epi_curve(run_number= run, suffix = f"run_{run+1}")
+        model.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "age")
+        model.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "sex")
 
 
 
