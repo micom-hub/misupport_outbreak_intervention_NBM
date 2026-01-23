@@ -487,7 +487,8 @@ class NetworkModel:
         - stochastic_dieout
         """
         N = self.N
-        try: vax_status = self.is_vaccinated
+        try: 
+            vax_status = self.is_vaccinated
         except AttributeError:
             raise ValueError("Model states not initialized; run at least one simulation before computing summary statistics")
         
