@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 import json
+import time
+start_time = time.perf_counter()
 
 from scripts.FredFetch import downloadPopData
 from scripts.SynthDataProcessing import synthetic_data_process
@@ -18,7 +20,7 @@ plt.show = lambda *args, **kwargs: None #monkeypatch it
 
 runParameters: ModelParameters = {
 #Epidemiological Parameters
-    "base_transmission_prob": 0.8,
+    "base_transmission_prob": 0.3,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -26,7 +28,7 @@ runParameters: ModelParameters = {
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
     "vax_efficacy": 0.997,
-    "vax_uptake": 0.25,
+    "vax_uptake": 0.7,
     "susceptibility_multiplier_under_five": 2.0,
 
 
@@ -44,7 +46,7 @@ runParameters: ModelParameters = {
     "cas_weight": .1,
 
 #Simulation settings
-    "n_runs": 5,
+    "n_runs": 50,
     "run_name": "driver_run",
     "overwrite_edge_list": True, #Must be true to render changes in contact structure
     "simulation_duration": 45,
@@ -111,13 +113,15 @@ print("Running model...")
 model.simulate()
 
 print("Building plots...")
-for run in range(model.n_runs):
-    model.epi_curve(run_number= run, suffix = f"run_{run+1}")
-    model.cumulative_incidence_plot(run_number= run, 
-        suffix = f"run_{run+1}", strata = "age")
-    model.cumulative_incidence_plot(run_number= run, 
-        suffix = f"run_{run+1}", strata = "sex")
+if model.n_runs < 6:
+    for run in range(model.n_runs):
+        model.epi_curve(run_number= run, suffix = f"run_{run+1}")
+        model.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "age")
+        model.cumulative_incidence_plot(run_number= run, 
+            suffix = f"run_{run+1}", strata = "sex")
 model.cumulative_incidence_spaghetti()
+model.results = model.epi_summary()
 
 
 
@@ -132,3 +136,5 @@ if runParameters["save_data_files"]:
         json.dump(runParameters, f, indent = 4)
 
 
+end_time = time.perf_counter()
+print(f" Driver runtime: {end_time - start_time} seconds")
