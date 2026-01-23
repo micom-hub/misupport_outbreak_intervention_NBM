@@ -5,7 +5,7 @@ import igraph as ig
 import networkx as nx
 from scipy.sparse import csr_matrix
 from scipy.stats import truncnorm
-from typing import TypedDict, List
+from typing import TypedDict, List, Dict, Any
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import matplotlib.animation as animation
@@ -52,6 +52,7 @@ class ModelParameters(TypedDict):
     seed: int
     county: str #county to run on
     state: str #state to run on
+    record_exposure_events: bool
     save_plots: bool
     save_data_files: bool
     make_movie: bool
@@ -61,7 +62,7 @@ class ModelParameters(TypedDict):
 
 DefaultModelParams: ModelParameters = {
     #Epdiemic Parameters
-    "base_transmission_prob": 0.3,
+    "base_transmission_prob": 1,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -96,6 +97,7 @@ DefaultModelParams: ModelParameters = {
     "seed": 2026,
     "county": "Keweenaw",
     "state": "Michigan",
+    "record_exposure_events": True, #Necessary for LHD Dynamics
     "save_plots": True,
     "save_data_files": True,
     "make_movie": False,
@@ -119,12 +121,14 @@ class NetworkModel:
         self.n_runs = self.params["n_runs"]
 
         #One-time computation of network structures
-        self.compute_network_structures()
+        self._compute_network_structures()
 
         #Set up storage for full run
         self.all_states_over_time = [None]*self.n_runs
         self.all_new_exposures = [None]*self.n_runs
-        self.exposure_event_log = [None] * self.n_runs
+        self.exposure_event_log = []
+        for _ in range(self.n_runs):
+            self.exposure_event_log.append([])
 
         self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
         self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
@@ -143,7 +147,7 @@ class NetworkModel:
     #Ind: the index of the individual's vertex in the model
 
     #@profile
-    def compute_network_structures(self):
+    def _compute_network_structures(self):
         """
         Compute expensive network structures that are preserved across runs:
         - edge list
@@ -207,7 +211,7 @@ class NetworkModel:
 
 
         #Create neighbor_map and fast_neighbor_map
-        self.neighbor_map = self.build_neighbor_map()
+        self.neighbor_map = self._build_neighbor_map()
 
         self.fast_neighbor_map = {} #preprocess dict of dicts to speed up later
         for src, neighbor_list in self.neighbor_map.items():
@@ -217,8 +221,10 @@ class NetworkModel:
 
         #Create adjacency sparses by contact type 
         #lookup indptr, indices, weights = csr_by_type['ct']
-        self.csr_by_type = self.build_type_csr()
-
+        self.csr_by_type = self._build_type_csr()
+        self.contact_types = sorted(self.csr_by_type.keys()) #stable ct order
+        self.ct_to_id = {ct: i for i, ct in enumerate(self.contact_types)}
+        self.id_to_ct = {i: ct for ct, i in self.ct_to_id.items()}
 
         #Create full node list
         self.full_node_list = sorted(
@@ -246,7 +252,7 @@ class NetworkModel:
         self.layout_name_to_ind = {name:i for i, name in enumerate(self.layout_node_names)}
         self.g_full = g_full.copy()
 
-    def initialize_states(self):
+    def _initialize_states(self):
         """
         Set up new SEIR arrays and seed initial infectious individuals
         """
@@ -319,7 +325,7 @@ class NetworkModel:
             raise TypeError("inds must be int, list, or numpy array.")
             
     #@profile
-    def build_neighbor_map(self):
+    def _build_neighbor_map(self):
         """
         Build a mapping from node to list of (neighbor, weight) (make neighbor queries O(1))
         """
@@ -339,7 +345,7 @@ class NetworkModel:
 
         return neighbor_map
 
-    def build_type_csr(self):
+    def _build_type_csr(self):
         """
         Build an csr sparses by contact type that map a source node to a list of neighbors by type
         """
@@ -405,12 +411,6 @@ class NetworkModel:
 
         return csr_by_type
 
-
-
-
-
-
-
     
     def assign_node_attribute(self, attr_name: str, vals: np.ndarray, indices: np.ndarray, g: ig.Graph) -> ig.Graph:
         """Assigns a node attribute to specified nodes in an igraph Graph object
@@ -461,9 +461,13 @@ class NetworkModel:
         return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inf)
 
     #@profile
-    def determine_new_exposures(self):
+    def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
         """
-    Uses the current epi_g, self.neighbor_map, and self.individual_lookup to determine who is newly exposed in a given step
+    Determine who becomes newly exposed (pre-infectious) this timestep.
+    If recorder is provided, it will track exposure events for each (src, ct)
+    storing: exposure metadata
+
+    Returns: np.ndarray of newly exposed node indices
         """
 
 
@@ -474,55 +478,78 @@ class NetworkModel:
         if len(infectious_indices) == 0:
             return np.array([], dtype = int)
 
-        exposure_events_this_timestep = []
+        #gather factors affecting transmission probability
+        base_prob = self.params['base_transmission_prob']
+        vax_efficacy = self.params['vax_efficacy']
+        susc_mult_under5 = self.params['susceptibility_multiplier_under_five']
+        rel_inf_vax = self.params['relative_infectiousness_vax']
 
+        #local aliases
+        csr_by_type = self.csr_by_type
+        is_vax = self.is_vaccinated
+        ages = self.ages
+        rng = self.rng
 
-        
-        #find susceptible neighbors
+        #iterate over exposure events (src,ct) to determine transmission probabilities
         for src in infectious_indices:
-            neighbors = self.adj_matrix[src].indices
-            weights = self.adj_matrix[src].data
+            for ct, (indptr, indices, weights) in csr_by_type.items():
+                start = indptr[src]
+                end = indptr[src+1]
+                if end <= start:
+                    continue
+                #determine susceptible neighbors
+                neighbors = indices[start:end]
+                w = weights[start:end]
+                sus_mask = (self.state[neighbors] == 0)
+                if not sus_mask.any():
+                    continue
+                sus_neighbors = neighbors[sus_mask]
+                sus_w = w[sus_mask].astype(np.float32)
 
-            sus_mask = (self.state[neighbors] == 0)
-            sus_neighbors = neighbors[sus_mask]
-            sus_weights = weights[sus_mask]
-        
-        #use individual heterogeneity to determine infection probs
-            vax_src = self.is_vaccinated[src]
-            vax_tgt = self.is_vaccinated[sus_neighbors]
-            ages_targets = self.ages[sus_neighbors]
+                #contact weighted
+                prob = base_prob * sus_w
 
-            vax_efficacy = self.params['vax_efficacy']
+                #vaccination weighted
+                if is_vax[src]:
+                    prob = prob * rel_inf_vax
+                
+                vax_tgt = is_vax[sus_neighbors]
+                if vax_efficacy != 0:
+                    prob = prob * ((1.0 - vax_efficacy)** vax_tgt)
 
-            prob = self.params['base_transmission_prob'] * sus_weights
-            if vax_src:
-                prob *= self.params['relative_infectiousness_vax']
-            prob *= ((1- vax_efficacy)**vax_tgt)
-
-            #example implementation of heterogeneous susceptibility
-            under_five = ages_targets <= 5
-            prob[under_five] *= self.params['susceptibility_multiplier_under_five']
-
-            prob = np.clip(prob, 0.0, 1.0)
-
-            draws = self.rng.random(prob.shape)
-            infected = sus_neighbors[draws < prob]
-            newly_exposed[infected] = True
-
-        result = np.where(newly_exposed)[0]
+                #age weighted
+                under5 = (ages[sus_neighbors] <= 5)
+                if susc_mult_under5 != 1.9:
+                    prob[under5] = prob[under5] * susc_mult_under5
+                
+                prob = np.clip(prob, 0.0, 1.0)
 
 
+                #Determine who becomes infected
+                draws = rng.random(prob.shape)
+                infected_mask = (draws < prob)
+                if infected_mask.any():
+                    infected_nodes = sus_neighbors[infected_mask]
+                    newly_exposed[infected_nodes] = True
+                
+                #Record event data
+                if recorder is not None:
+                    type_id = self.ct_to_id[ct]
+                    #pass array and infected mask 
+                    recorder.append_event(self.current_time, int(src), int(type_id), sus_neighbors, infected_mask)
+
+            result = np.where(newly_exposed)[0].astype(np.int32)
         return result
 
     #@profile
-    def step(self):
+    def step(self, recorder: ExposureEventRecorder = None):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
         """
 
         #S -> E
         self.exposure_events = [] #record exposure events
-        newly_exposed = self.determine_new_exposures()
+        newly_exposed = self.determine_new_exposures(recorder = recorder)
 
         if newly_exposed.size > 0:
             self.state[newly_exposed] = 1
@@ -548,6 +575,8 @@ class NetworkModel:
             self.state[to_recovered] = 3
             self.time_in_state[to_recovered] = 0
 
+        #TODO R -> S with waning immunity
+
 
         #Save timestep data
         S = list(np.where(self.state == 0)[0])
@@ -564,17 +593,28 @@ class NetworkModel:
 
         for run in range(self.n_runs):
             print(f"Running model run {run + 1} of {self.n_runs}...")
-            self.initialize_states()
+            self._initialize_states()
 
             t = 0
             while t < self.Tmax:
-                self.step()
+                t += 1 #day 0 is recorded in initialization
+                self.current_time = t
+                if self.params.get("record_exposure_events"):
+                    recorder = ExposureEventRecorder(init_event_cap = 256, init_node_cap = 1024)
+                else:
+                    recorder = None
+
+                self.step(recorder)
+
+                if recorder is not None:
+                    self.exposure_event_log[run].append(recorder)
+
                 S, E, I, R = self.states_over_time[-1]  # noqa: E741
                 if not E and not I:
-                    self.simulation_end_day = t + 1 #as it did run another step 
+                    self.simulation_end_day = t 
                     self.stochastic_dieout = True
                     break
-                t += 1
+                
 
             self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
             self.all_new_exposures[run] = [ne.copy() if hasattr(ne, "copy") else list(ne) for ne in self.new_exposures]
@@ -644,21 +684,6 @@ class NetworkModel:
                 "stochastic_dieout": stochastic_dieout
             })
         return pd.DataFrame(summary)
-
-            
-
-
-        
-
-            
-            
-
-
-
-
-
-
-
 
     def epi_curve(self, run_number = 0, suffix: str = None):
         """
@@ -1077,13 +1102,153 @@ class NetworkModel:
         return
 
 
+class ExposureEventRecorder:
+    """
+    Object to record exposure events for a single timestep or across timesteps if reset. Stores:
+    - exposure event metadata arrays(time, source, type_id, start, length)
+    - nodes (concatenated node ids)
+    - infections (concatenated bool that align with nodes)
+    Methods:
+    - append_event(time, source, type_id, nodes_arr, infected_mask)
+    - reset() to reuse the recorder
+    - snapshot_compact(copy = True) -> dict of numpy arrays (sliced to used lengths)
+    - to_dataframe(id_to_ct) -> pandas DF with nodes and infected as arrays
+    """
+    def __init__(self, init_event_cap = 1024, init_node_cap = 4096):
+        self.event_cap = int(init_event_cap) 
+        self.node_cap = int(init_node_cap)
+        self._alloc_arrays()
+        self.reset()
+
+    def _alloc_arrays(self):
+        self.event_time = np.empty(self.event_cap, dtype = np.int32)
+        self.event_source = np.empty(self.event_cap, dtype = np.int32)
+        self.event_type = np.empty(self.event_cap, dtype = np.int16)
+        self.event_nodes_start = np.empty(self.event_cap, dtype = np.int64)
+        self.event_nodes_len = np.empty(self.event_cap, dtype = np.int32)
+        self.nodes = np.empty(self.node_cap, dtype = np.int32)
+        self.infections = np.empty(self.node_cap, dtype = np.bool_)
+
+    def reset(self):
+        self.n_events = 0
+        self.n_nodes = 0
+
+    def _grow_events(self, min_extra = 1):
+        if self.n_events + min_extra <= self.event_cap:
+            return
+        newcap = max(self.event_cap * 2, self.n_events + min_extra)
+        def grow(arr):
+            new = np.empty(newcap, dtype = arr.dtype)
+            new[: self.n_events] = arr[:self.n_events]
+            return new
+        
+        self.event_time = grow(self.event_time)
+        self.event_source = grow(self.event_source)
+        self.event_type = grow(self.event_type)
+        self.event_nodes_start = grow(self.event_nodes_start)
+        self.event_nodes_len = grow(self.event_nodes_len)
+        self.event_cap = newcap
+
+    def _grow_nodes(self, min_extra = 1):
+        if self.n_nodes + min_extra <= self.node_cap:
+            return
+        newcap = max(self.node_cap * 2, self.n_nodes + min_extra)
+        new_nodes = np.empty(newcap, dtype = np.int32)
+        new_nodes[: self.n_nodes] = self.nodes[: self.n_nodes]
+        new_inf = np.empty(newcap, dtype = np.bool_)
+        new_inf[: self.n_nodes] = self.infections[: self.n_nodes]
+        self.nodes = new_nodes
+        self.infections = new_inf
+        self.node_cap = newcap
+
+    def append_event(self, time: int, source: int, type_id: int, nodes_arr: np.ndarray, infected_mask: np.ndarray):
+        nodes_arr = np.asarray(nodes_arr, dtype = np.int32)
+        infected_mask = np.asarray(infected_mask, dtype = np.bool_)
+        L = nodes_arr.shape[0]
+
+        self._grow_events(1)
+        if L:
+            self._grow_nodes(L)
+            start = self.n_nodes
+            self.nodes[start:start + L] = nodes_arr
+            self.infections[start:start+L] = infected_mask
+        else:
+            start = self.n_nodes
+        
+        #gather metadata
+        i = self.n_events
+        self.event_time[i] = np.int32(time)
+        self.event_source[i] = np.int32(source)
+        self.event_type[i] = np.int16(type_id)
+        self.event_nodes_start[i] = np.int64(start)
+        self.event_nodes_len[i] = np.int32(L)
+
+        self.n_nodes += L
+        self.n_events += 1
+
+    def snapshot_compact(self, copy:bool = True) -> Dict[str, np.ndarray]:
+        """
+        Returns a dict of np.arrays sliced to used lengths
+
+        Args:
+            copy (bool): If true, arrays are copied and saved even if recorder is reused
+        """
+        event = slice(0, self.n_events)
+        node = slice(0, self.n_nodes)
+        if copy:
+            return{
+                'event_time': self.event_time[event].copy(),
+                'event_source': self.event_source[event].copy(),
+                'event_type': self.event_type[event].copy(),
+                'event_nodes_start': self.event_nodes_start[event].copy(),
+                'event_nodes_len': self.event_nodes_len[event].copy(),
+                'nodes': self.nodes[node].copy(),
+                'infections': self.infections[node].copy(),
+            }
+        else:
+            return {
+                'event_time': self.event_time[event],
+                'event_source': self.event_source[event],
+                'event_type': self.event_type[event],
+                'event_nodes_start': self.event_nodes_start[event],
+                'event_nodes_len': self.event_nodes_len[event],
+                'nodes': self.nodes[node],
+                'infections': self.infections[node],
+            }
+
+    def to_dataframe(self, id_to_ct: Dict[int, str]) -> pd.DataFrame:
+        """
+        Convert compact snapshot to a pandas dataframe. Computationally expensive
+
+        Args:
+            id_to_ct (Dict[int, str]): index to contact type mapping
+
+        """
+        rows = []
+        for i in range(self.n_events):
+            s = int(self.event_nodes_start[i])
+            L = int(self.event_nodes_len[i])
+            nodes = self.nodes[s:s+L].copy()
+            infs = self.infections[s:s+L].copy()
+            n_infected = sum(infs)
+            rows.append((
+                int(self.event_time[i]),
+                int(self.event_source[i]),
+                id_to_ct[int(self.event_type[i])],
+                nodes,
+                infs,
+                L,
+                n_infected
+               
+            ))
+        df = pd.DataFrame(rows, columns = ['time','source','contact_type','nodes','infected', 'n_exposed', 'n_infected'])
+        return(df)
+
 #Test run on a really small population
 if __name__ == "__main__":
     Keweenaw_contacts = pd.read_parquet("./data/Keweenaw/contacts.parquet")
 
     testModel = NetworkModel(contacts_df = Keweenaw_contacts)
-
-    testModel.initialize_states()
     print("Running Model on Keweenaw County...")
     testModel.simulate()
 
