@@ -4,6 +4,7 @@ import pandas as pd
 import igraph as ig
 import networkx as nx
 from scipy.sparse import csr_matrix
+from scipy.stats import truncnorm
 from typing import TypedDict, List
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
@@ -27,7 +28,6 @@ class ModelParameters(TypedDict):
     susceptibility_multiplier_under_five: float #increase in susceptibility if age <= 5
 
     # Population Params
-    vax_uptake: float
     hh_contacts: int
     wp_contacts: int
     sch_contacts: int
@@ -38,6 +38,9 @@ class ModelParameters(TypedDict):
     sch_weight: float
     gq_weight: float
     cas_weight: float
+
+    #LHD Params
+    mean_compliance: float 
 
     # Simulation Settings
     n_runs: int
@@ -57,6 +60,7 @@ class ModelParameters(TypedDict):
 
 
 DefaultModelParams: ModelParameters = {
+    #Epdiemic Parameters
     "base_transmission_prob": 0.3,
     "incubation_period": 10.5,
     "infectious_period": 5,
@@ -68,6 +72,7 @@ DefaultModelParams: ModelParameters = {
     "vax_uptake": 0.85, 
     "susceptibility_multiplier_under_five": 2.0,
 
+    #Contact Parameters
     "wp_contacts": 10,
     "sch_contacts": 10,
     "gq_contacts": 10,
@@ -78,9 +83,13 @@ DefaultModelParams: ModelParameters = {
     "gq_weight": .3,
     "cas_weight": .1,
 
-    "n_runs": 100,
+    #LHD Params
+    "mean_compliance": 0.5, #0-1
+
+    #Simulation Settings
+    "n_runs": 1,
     "run_name" : "test_run",
-    "overwrite_edge_list": True,
+    "overwrite_edge_list": False,
     "simulation_duration": 45,
     "dt": 1,
     "I0": [906],
@@ -90,7 +99,7 @@ DefaultModelParams: ModelParameters = {
     "save_plots": True,
     "save_data_files": True,
     "make_movie": False,
-    "display_plots": True
+    "display_plots": False
 
 }
 
@@ -115,6 +124,7 @@ class NetworkModel:
         #Set up storage for full run
         self.all_states_over_time = [None]*self.n_runs
         self.all_new_exposures = [None]*self.n_runs
+        self.exposure_event_log = [None] * self.n_runs
 
         self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
         self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
@@ -185,14 +195,30 @@ class NetworkModel:
         self.ages = self.individual_lookup["age"].to_numpy()
         self.sexes = self.individual_lookup["sex"].to_numpy()
 
+        #Set individual compliances array
+        avg_compliance = np.clip(self.params["mean_compliance"], 0, 1) #0-1
+        sd = 0.15 #sd for bounded normal distribution
+        #calculate truncnorm params
+        a = (0 - avg_compliance) / sd
+        b = (1 - avg_compliance) / sd
+        self.compliances = truncnorm.rvs(a,b,
+        loc = avg_compliance, scale = sd,
+        size = self.N)
+
+
         #Create neighbor_map and fast_neighbor_map
         self.neighbor_map = self.build_neighbor_map()
 
         self.fast_neighbor_map = {} #preprocess dict of dicts to speed up later
-        for src, nbr_list in self.neighbor_map.items():
+        for src, neighbor_list in self.neighbor_map.items():
             self.fast_neighbor_map[src] = {
-                tgt: (weight, ct) for tgt, weight, ct in nbr_list
+                tgt: (weight, ct) for tgt, weight, ct in neighbor_list
                 }
+
+        #Create adjacency sparses by contact type 
+        #lookup indptr, indices, weights = csr_by_type['ct']
+        self.csr_by_type = self.build_type_csr()
+
 
         #Create full node list
         self.full_node_list = sorted(
@@ -297,6 +323,7 @@ class NetworkModel:
         """
         Build a mapping from node to list of (neighbor, weight) (make neighbor queries O(1))
         """
+        #build a mapping of src: (tgt, weight, ct)
         neighbor_map = {}
         for row in self.edge_list.itertuples(index = False):
             src, tgt, w, ct = row.source, row.target, row.weight, row.contact_type
@@ -307,7 +334,81 @@ class NetworkModel:
             if tgt not in neighbor_map:
                 neighbor_map[tgt] = []
             neighbor_map[tgt].append((src, w, ct))
+
+
+
         return neighbor_map
+
+    def build_type_csr(self):
+        """
+        Build an csr sparses by contact type that map a source node to a list of neighbors by type
+        """
+
+        neighbor_map = self.neighbor_map
+        N = self.N
+        total_edges = int(2*self.edge_list.shape[0])
+
+    #collect global arrays
+
+        src_array = np.empty(total_edges, dtype = np.int32)
+        tgt_array = np.empty(total_edges, dtype = np.int32)
+        wt_array = np.empty(total_edges, dtype = np.float32)
+
+        ct_to_id = {}
+        id_to_ct = []
+        ct_array = np.empty(total_edges, dtype = np.int16)
+
+        pos = 0
+        for src, neighbors in neighbor_map.items():
+            for tgt, wt, ct in neighbors:
+                src_array[pos] = src
+                tgt_array[pos] = tgt
+                wt_array[pos] = wt
+                if ct not in ct_to_id:
+                    ct_to_id[ct] = len(id_to_ct)
+                    id_to_ct.append(ct)
+                ct_array[pos] = ct_to_id[ct]
+                pos += 1
+
+    #sort edges by (ct, src) so they are contiguous and sources are grouped
+
+        order = np.lexsort((src_array, ct_array)) #primary key ct, secondary src
+        src_s = src_array[order]
+        tgt_s = tgt_array[order]
+        wt_s = wt_array[order]
+        ct_s = ct_array[order]
+
+    #split by type and build a csr for each type
+        csr_by_type = {}
+        unique_cts, ct_starts = np.unique(ct_s, return_index = True)
+        ct_starts = list(ct_starts) + [len(ct_s)]
+        for k, ct_id in enumerate(unique_cts):
+            start = ct_starts[k]
+            end = ct_starts[k+1]
+            srcs_ct = src_s[start:end]
+            tgts_ct = tgt_s[start:end]
+            wts_ct = wt_s[start:end]
+
+            if srcs_ct.size == 0:
+                indptr = np.zeros(N+1, dtype = np.int64)
+                indices = np.empty(0, dtype = np.int32)
+                weights = np.empty(0, dtype = np.float32)
+            else:
+                counts = np.bincount(srcs_ct, minlength = N)
+                indptr = np.empty(N+1, dtype = np.int64)
+                indptr[0] = 0
+                np.cumsum(counts, out = indptr[1:])
+                indices = tgts_ct.astype(np.int32, copy = True)
+                weights = wts_ct.astype(np.float32, copy = True)
+
+            csr_by_type[id_to_ct[int(ct_id)]] = (indptr, indices, weights)
+
+        return csr_by_type
+
+
+
+
+
 
 
     
@@ -364,14 +465,20 @@ class NetworkModel:
         """
     Uses the current epi_g, self.neighbor_map, and self.individual_lookup to determine who is newly exposed in a given step
         """
+
+
         N = self.N
         newly_exposed = np.zeros(N, dtype = bool)
-
         infectious_indices = np.where(self.state == 2)[0]
+
         if len(infectious_indices) == 0:
             return np.array([], dtype = int)
-        
 
+        exposure_events_this_timestep = []
+
+
+        
+        #find susceptible neighbors
         for src in infectious_indices:
             neighbors = self.adj_matrix[src].indices
             weights = self.adj_matrix[src].data
@@ -380,6 +487,7 @@ class NetworkModel:
             sus_neighbors = neighbors[sus_mask]
             sus_weights = weights[sus_mask]
         
+        #use individual heterogeneity to determine infection probs
             vax_src = self.is_vaccinated[src]
             vax_tgt = self.is_vaccinated[sus_neighbors]
             ages_targets = self.ages[sus_neighbors]
@@ -413,6 +521,7 @@ class NetworkModel:
         """
 
         #S -> E
+        self.exposure_events = [] #record exposure events
         newly_exposed = self.determine_new_exposures()
 
         if newly_exposed.size > 0:
@@ -988,10 +1097,6 @@ if __name__ == "__main__":
                 suffix = f"run_{run+1}", strata = "sex")
     testModel.cumulative_incidence_spaghetti()
     results = testModel.epi_summary()
-            
-
-
-
 
     
 

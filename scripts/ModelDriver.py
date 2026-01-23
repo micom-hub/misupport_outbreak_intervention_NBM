@@ -32,7 +32,7 @@ runParameters: ModelParameters = {
     "susceptibility_multiplier_under_five": 2.0,
 
 
-#Number of contacts assigned to each individual from each location
+#Number of contacts assigned to each individual by type
     "wp_contacts": 10,
     "sch_contacts": 10,
     "gq_contacts": 20,
