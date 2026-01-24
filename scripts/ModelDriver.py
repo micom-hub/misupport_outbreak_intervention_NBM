@@ -1,17 +1,23 @@
-import os
-import pandas as pd
-import json
-import time
-start_time = time.perf_counter()
-
 from scripts.FredFetch import downloadPopData
 from scripts.SynthDataProcessing import synthetic_data_process
 from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401
 
-#suppressing plot outputs
+import os
+import pandas as pd
+import json
+import time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+
+
+start_time = time.perf_counter()
+
+
+
+#suppressing plot outputs
+
 plt.show = lambda *args, **kwargs: None #monkeypatch it
 
 ############################################

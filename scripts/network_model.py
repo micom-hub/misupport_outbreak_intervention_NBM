@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import numpy as np
 import pandas as pd
@@ -6,6 +7,8 @@ import networkx as nx
 from scipy.sparse import csr_matrix
 from scipy.stats import truncnorm
 from typing import TypedDict, List, Dict, Any
+from collections import defaultdict
+
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import matplotlib.animation as animation
@@ -41,13 +44,18 @@ class ModelParameters(TypedDict):
 
     #LHD Params
     mean_compliance: float 
+    lhd_employees: int
+    lhd_discovery_prob: float
+    lhd_workday_hrs: int
+    lhd_default_int_reduction: float
+    lhd_default_call_duration: float
+    lhd_default_int_duration: int
 
     # Simulation Settings
     n_runs: int
     run_name: str #prefix for model run
     overwrite_edge_list: bool #Try to reload previously generated edge list for this run to save time
     simulation_duration: int  # days
-    dt: float  # steps per day
     I0: List[int]
     seed: int
     county: str #county to run on
@@ -57,6 +65,7 @@ class ModelParameters(TypedDict):
     save_data_files: bool
     make_movie: bool
     display_plots: bool
+
 
 
 
@@ -85,14 +94,19 @@ DefaultModelParams: ModelParameters = {
     "cas_weight": .1,
 
     #LHD Params
-    "mean_compliance": 0.5, #0-1
+    "mean_compliance": 1,
+    "lhd_employees": 10,
+    "lhd_workday_hrs": 8,
+    "lhd_discovery_prob": .25,
+    "lhd_default_call_duration": 0.1,#in hours
+    "lhd_default_int_reduction": 0.8,
+    "lhd_default_int_duration": 10, #in days
 
     #Simulation Settings
-    "n_runs": 1,
+    "n_runs": 5,
     "run_name" : "test_run",
     "overwrite_edge_list": False,
     "simulation_duration": 45,
-    "dt": 1,
     "I0": [906],
     "seed": 2026,
     "county": "Keweenaw",
@@ -105,6 +119,7 @@ DefaultModelParams: ModelParameters = {
 
 }
 
+#-----Outbreak Model-------
 class NetworkModel:
     #@profile
     def __init__(self, contacts_df, params = DefaultModelParams):
@@ -132,6 +147,15 @@ class NetworkModel:
 
         self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
         self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
+
+
+        #Instantiate recorder and Local Health Department
+        self.recorder_template = ExposureEventRecorder(init_event_cap = 1024, init_node_cap = 4096)
+
+        self.lhd = LocalHealthDepartment(model = self, rng = self.rng, discovery_prob = self.params["lhd_discovery_prob"], employees = self.params["lhd_employees"], workday_hrs = self.params["lhd_workday_hrs"], algorithm = None)
+
+        self.lhd.algorithm = EqualPriority()
+
 
 
 #Set-up results folder
@@ -226,6 +250,9 @@ class NetworkModel:
         self.ct_to_id = {ct: i for i, ct in enumerate(self.contact_types)}
         self.id_to_ct = {i: ct for ct, i in self.ct_to_id.items()}
 
+
+
+
         #Create full node list
         self.full_node_list = sorted(
             set(self.edge_list['source']).union(
@@ -286,6 +313,10 @@ class NetworkModel:
         #Reset run flags
         self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
+
+        #Reset LHD intervention Multipliers
+        self.in_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
+        self.out_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
        
         
     def name_to_ind(self, g: ig.Graph, names):
@@ -375,6 +406,13 @@ class NetworkModel:
                     id_to_ct.append(ct)
                 ct_array[pos] = ct_to_id[ct]
                 pos += 1
+
+        #slice to actual length
+        if pos < total_edges:
+            src_array = src_array[:pos]
+            tgt_array = tgt_array[:pos]
+            wt_array = wt_array[:pos]
+            ct_array = ct_array[:pos]
 
     #sort edges by (ct, src) so they are contiguous and sources are grouped
 
@@ -506,8 +544,13 @@ class NetworkModel:
                 sus_neighbors = neighbors[sus_mask]
                 sus_w = w[sus_mask].astype(np.float32)
 
-                #contact weighted
-                prob = base_prob * sus_w
+                #gather intervention multipliers 
+                out_mult = self.out_multiplier[ct][src]
+                in_mult = self.in_multiplier[ct][sus_neighbors]
+
+                #calculate effective weight and transmission prob
+                effective_w = sus_w * out_mult * in_mult
+                prob = base_prob * effective_w
 
                 #vaccination weighted
                 if is_vax[src]:
@@ -519,7 +562,7 @@ class NetworkModel:
 
                 #age weighted
                 under5 = (ages[sus_neighbors] <= 5)
-                if susc_mult_under5 != 1.9:
+                if susc_mult_under5 != 1.0:
                     prob[under5] = prob[under5] * susc_mult_under5
                 
                 prob = np.clip(prob, 0.0, 1.0)
@@ -538,7 +581,8 @@ class NetworkModel:
                     #pass array and infected mask 
                     recorder.append_event(self.current_time, int(src), int(type_id), sus_neighbors, infected_mask)
 
-            result = np.where(newly_exposed)[0].astype(np.int32)
+        
+        result = np.where(newly_exposed)[0].astype(np.int32)
         return result
 
     #@profile
@@ -599,15 +643,36 @@ class NetworkModel:
             while t < self.Tmax:
                 t += 1 #day 0 is recorded in initialization
                 self.current_time = t
+
                 if self.params.get("record_exposure_events"):
-                    recorder = ExposureEventRecorder(init_event_cap = 256, init_node_cap = 1024)
+                    recorder = self.recorder_template
+                    recorder.reset()
                 else:
                     recorder = None
 
+                #advance SEIR and record
                 self.step(recorder)
 
+                #either log an exposure event or make a false empty one
                 if recorder is not None:
-                    self.exposure_event_log[run].append(recorder)
+                    snapshot = recorder.snapshot_compact(copy = True) 
+                    self.exposure_event_log[run].append(snapshot)
+                else:
+                    snapshot = {
+                        'event_time': np.empty(0, dtype = np.int32),
+                        'event_source': np.empty(0, dtype = np.int32),
+                        'event_type': np.empty(0, dtype = np.int16),
+                        'event_nodes_start': np.empty(0, dtype = np.int64),
+                        'event_nodes_len': np.empty(0, dtype = np.int32),
+                        'nodes': np.empty(0, dtype = np.int32),
+                        'infections': np.empty(0, dtype = bool)
+                    }
+
+                #Run LHD step once
+                self.lhd.step(self.current_time, snapshot)
+
+                
+
 
                 S, E, I, R = self.states_over_time[-1]  # noqa: E741
                 if not E and not I:
@@ -1102,6 +1167,7 @@ class NetworkModel:
         return
 
 
+#------ Exposure Event Tracking --------
 class ExposureEventRecorder:
     """
     Object to record exposure events for a single timestep or across timesteps if reset. Stores:
@@ -1164,6 +1230,9 @@ class ExposureEventRecorder:
     def append_event(self, time: int, source: int, type_id: int, nodes_arr: np.ndarray, infected_mask: np.ndarray):
         nodes_arr = np.asarray(nodes_arr, dtype = np.int32)
         infected_mask = np.asarray(infected_mask, dtype = np.bool_)
+        if not nodes_arr.shape[0] == infected_mask.shape[0]:
+            raise ValueError("Recorder event has mismatched arrays")
+
         L = nodes_arr.shape[0]
 
         self._grow_events(1)
@@ -1243,6 +1312,363 @@ class ExposureEventRecorder:
             ))
         df = pd.DataFrame(rows, columns = ['time','source','contact_type','nodes','infected', 'n_exposed', 'n_infected'])
         return(df)
+
+
+#------LHD Stuff --------
+class Action:
+    """
+    Generic action to be performed by the local health department 
+    """
+    def __init__(self, kind: str, nodes: np.ndarray, contact_types: List[str],
+    reduction: float, duration: int, reason: str = None, meta: dict = None):
+        self.kind = kind
+        self.nodes = np.asarray(nodes, dtype = np.int32)
+        self.contact_types = list(contact_types)
+        self.reduction = float(reduction)
+        self.duration = int(duration)
+        self.reason = reason
+        self.meta = meta or {}
+
+class AlgorithmBase:
+    """
+    An interface for designing calling algorithms for the local health department.
+    
+Algorithms have one method, generate_candidates, which takes:
+    a snapshot of exposure events
+    a NetworkModel object 
+    the indices of discovered events
+    
+    and returns arrays:
+         nodes
+         relative priority prioritization
+         contact type
+         projected call duration (call cost)
+    """
+    def generate_candidates(self, recorder_snapshot: Dict[str, np.ndarray], model, discovered_event_ind) -> Dict[str, Any]:
+        """
+
+        Args:
+            Snapshot of exposure events in an outbreak
+        Returns:
+            Dict[str, Any]: Dict with keys:
+                'nodes' : np.ndarray of node ids
+                'priority' np.ndarray of float priorities aligned w/ nodes
+                'contact_types': array of ct (per candidate or single)
+                other metadata
+        """
+        raise NotImplementedError
+
+class LocalHealthDepartment:
+    def __init__(
+        self, model: NetworkModel, rng = None, 
+    discovery_prob: float = None,  
+    employees: int = None, workday_hrs: float = None,
+    algorithm: AlgorithmBase = None
+    ):
+    #LHD settings
+        self.model = model
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.params["lhd_discovery_prob"]
+
+    #Determine Capacity
+        self.employees = employees if employees is not None else self.model.params["lhd_employees"]
+        self.hours_per_employee = float(workday_hrs) if workday_hrs is not None else self.model.params["lhd_workday_hrs"]
+        self.daily_personhours = float(self.employees * self.hours_per_employee)
+
+    #LHD Actions and Algorithm assignment
+        self.algorithm = algorithm
+        self.expiry = {}
+        self.action_log = []
+
+        self.min_factor = 1e-6 #to prevent div 0 errors
+        self.min_candidate_cost = 1e-4
+
+    #Default action params
+        self.default_int_reduction = model.params.get("lhd_default_int_reduction", 0.8)
+        self.default_int_duration = model.params.get("lhd_default_int_duration", 7)
+        self.default_call_cost = model.params.get("lhd_default_call_duration", 0.083)
+
+    def discover_exposures(self, recorder_snapshot):
+        """
+        Given recorder snapshot dict, select which events the LHD discovers
+        Random based on LHD discovery probability
+        """
+        n_events = recorder_snapshot['event_time'].shape[0]
+        if n_events == 0:
+            return np.empty(0, dtype = int)
+        
+        #bernoulli sample each event
+        mask = self.rng.random(n_events) < self.discovery_prob
+        return np.where(mask)[0]
+
+    def gather_candidates(self, recorder_snapshot, discovered_event_ind):
+        """
+        Uses an algorithm to generate candidates and processes results. 
+        Deduplicates by node, keeping highest priority call (if you had to call someone due to multiple exp)
+        On ties in priority, prefers lower cost
+        
+        Returns: (unique_nodes, max_prios, sel_cts, sel_costs)
+        #Give this a memory from past events
+        """
+        #if empty-return
+        empty_nodes = np.empty(0, dtype = np.int32)
+        empty_prios = np.empty(0, dtype = np.float32)
+        empty_cts = np.empty(0, dtype = object)
+        empty_costs = np.empty(0, dtype = np.float32)
+
+        if len(discovered_event_ind) == 0:
+            return empty_nodes, empty_prios, empty_cts, empty_costs
+
+        #Pick algorithm to use and generate candidates
+        algo = getattr(self, "algorithm", None)
+        if algo is None:
+            return empty_nodes, empty_prios, empty_cts, empty_costs
+        
+        out = algo.generate_candidates(recorder_snapshot, self.model, discovered_event_ind)
+
+        #Initialize arrays with correct types
+        nodes = np.asarray(out.get("nodes", empty_nodes), dtype = np.int32)
+        prios = np.asarray(out.get("priority", np.ones(nodes.shape[0], dtype = np.float32)), dtype = np.float32)
+
+        #contact types array, normalized to length of nodes 
+        # (if algo only prioritizes one contact type)
+        cts = out.get("contact_types", None)
+        if cts is None:
+            default_ct = self.model.contact_types[0] if getattr(self.model, "contact_types", ) else ""
+            sel_cts_arr = np.array([default_ct]*nodes.shape[0], dtype = object)
+        elif isinstance(cts, (str, bytes)):
+            sel_cts_arr = np.array([cts] * nodes.shape[0], dtype = object)
+        else:
+            sel_cts_arr = np.asarray(cts)
+            if sel_cts_arr.shape[0] != nodes.shape[0]:
+                if sel_cts_arr.size == 1: #if algo returns np.array of one ct
+                    sel_cts_arr = np.repeat(sel_cts_arr[0], nodes.shape[0]).astype(object)
+                else:
+                    raise ValueError("contact_types length from algo must match nodes length or be a single value")
+
+        #Do the same for costs
+        costs = out.get("costs", None)
+        if costs is None:
+            default_cost = self.default_call_cost
+            sel_costs_arr = np.full(nodes.shape[0], default_cost, dtype = np.float32) 
+        else:
+            sel_costs_arr = np.asarray(costs, dtype = np.float32)
+            if sel_costs_arr.shape[0] != nodes.shape[0]:
+                if sel_costs_arr.size == 1: #if algo returns np.array of one ct
+                    sel_costs_arr = np.repeat(sel_costs_arr[0], nodes.shape[0]).astype(np.float32)
+                else:
+                    raise ValueError("costs length from algo must match nodes length or be a single value")
+
+        if nodes.size == 0:
+            return empty_nodes, empty_prios, empty_cts, empty_costs
+
+
+        #deduplicate by node, choosing highest priority occurrence and tie-breaking with lower cost
+        unique_nodes, inverse = np.unique(nodes, return_inverse = True)
+        max_prios = np.full(unique_nodes.shape[0], -np.inf, dtype = np.float32)
+        chosen_cts = np.empty(unique_nodes.shape[0], dtype = object)
+        chosen_costs = np.full(unique_nodes.shape[0], np.inf, dtype = np.float32)
+
+        #scan across occurrences, taking max priority
+        for occ_ind in range(nodes.shape[0]):
+            u = inverse[occ_ind] 
+            p = prios[occ_ind]
+            c = float(sel_costs_arr[occ_ind])
+
+            if p > max_prios[u]:
+                max_prios[u] = p
+                chosen_cts[u] = sel_cts_arr[occ_ind]
+                chosen_costs[u] = c
+            elif p == max_prios[u]: 
+                #tie break with lowest cost
+                if c < chosen_costs[u]:
+                    chosen_cts[u] = sel_cts_arr[occ_ind]
+                    chosen_costs[u] = c
+
+        #floor on call costs
+        chosen_costs = np.maximum(chosen_costs, self.min_candidate_cost).astype(np.float32)
+
+
+        return unique_nodes, max_prios, chosen_cts, chosen_costs
+
+
+    def apply_interventions(self, nodes: np.ndarray, contact_types: List[str], reduction: float, duration: int):
+        """
+        Apply a multiplicative reduction to nodes incoming/outgoing contact weight, then schedule this reduction to expire
+        """
+
+        if nodes.size == 0:
+            return
+        t_now = self.model.current_time
+        expiration_time = t_now + duration
+
+        #compute per-node factor where factor = 1 - reduction*compliance
+        #TODO consider whether compliance should scale multiplicatively or determine in a binary if it happens at all
+        compliances = self.model.compliances[nodes]
+        factor = 1.0 - (reduction * compliances)
+        #clip to avoid zeros
+        clipped_factor = np.clip(factor, self.min_factor, 1.0).astype(np.float32)
+
+        for ct in contact_types:
+            #multiply outgoing and incoming multipliers 
+            #currently assume LHD reduces both directions
+            self.model.out_multiplier[ct][nodes] *= clipped_factor
+            self.model.in_multiplier[ct][nodes] *= clipped_factor
+
+            #schedule reversal, storing node/factor to divide later
+            self.expiry.setdefault(expiration_time, []).append((nodes.copy(), ct, clipped_factor.copy()))
+
+
+        #log actions taken
+        self.action_log.append({
+            'time': t_now, 'nodes_count': int(nodes.size),
+            'contact_types': contact_types, 'reduction': reduction, 
+            'duration': duration
+        })
+
+    def process_expirations(self, current_time):
+        """
+        Reverts multipliers for interventions expiring at current time
+        """
+        entries = self.expiry.pop(current_time, [])
+        for nodes, ct, factor in entries:
+            #divide for vectorized undo,
+            safe_factor = np.maximum(factor, self.min_factor) #if zeroed before, don't div by zero now
+            self.model.out_multiplier[ct][nodes] /= safe_factor
+            self.model.in_multiplier[ct][nodes] /= safe_factor
+
+    def step(self, current_time: int, recorder_snapshot: Dict[str, np.ndarray]):
+        """
+        One step for the LHD where it discovers events, builds candidates, selects calls, and applies interventions
+        """
+
+        #1 Expire old interventions
+        self.process_expirations(current_time)
+
+        #2 discover new events
+        discovered_ind = self.discover_exposures(recorder_snapshot)
+
+        #3 gather candidates through algorithms
+        nodes, prios, cts, costs = self.gather_candidates(recorder_snapshot, discovered_ind)
+        if nodes.size == 0:
+            return
+
+        #Greedy call prioritization (prio / cost)
+        hours_available = self.daily_personhours 
+        costs = np.maximum(costs, self.min_candidate_cost)
+
+        value_per_hour = prios/costs
+        order = np.argsort(-value_per_hour)
+
+        #allocate calls until hours are exhausted
+        hours_spent = 0.0
+        selected_indices = []
+        for ind in order:
+            c = float(costs[ind])
+            if hours_spent + c <= hours_available:
+                hours_spent += c
+                selected_indices.append(ind)
+            else:
+                continue
+
+        selected_nodes = nodes[selected_indices]
+        selected_cts = cts[selected_indices]
+        selected_costs = costs[selected_indices]
+
+        #group by contact type and apply interventions
+        grouped = defaultdict(list)
+        for n, ct in zip(selected_nodes, selected_cts):
+            grouped[ct].append(int(n))
+        
+        #apply interventions and schedule to expire
+        for ct, node_list in grouped.items():
+            self.apply_interventions(np.asarray(node_list, dtype = np.int32),
+            [ct], 
+            reduction = self.default_int_reduction,
+            duration = self.default_int_duration)
+
+        #log action and resource consumption
+        self.action_log.append({
+            'time':int(current_time),
+            'hours_available': hours_available,
+            'hours_used': float(np.sum(selected_costs)),
+            'n_called': int(len(selected_nodes))
+        })
+
+
+    
+        
+#Possible LHD strategies:
+class EqualPriority(AlgorithmBase):
+    def generate_candidates(self, recorder_snapshot, model, discovered_event_ind):
+        #if no discovered events, no candidates
+        if len(discovered_event_ind) == 0:
+            return {
+                    'nodes':np.empty(0, dtype = np.int32), 
+                    'priority':np.empty(0, dtype = np.float32),
+                    'contact_types': np.empty(0, dtype = object),
+                    'costs': np.empty(0, dtype = np.float32)
+                }
+
+        #Initialize lists to return
+        nodes_list, prios_list, cts_list, cost_list = [], [], [], []
+        default_cost = model.params.get('lhd_default_call_duration', 0.083)
+
+        #gather data for each contact from each event, assigning priorities, ct, and call durations
+        for event in discovered_event_ind:
+            s = int(recorder_snapshot['event_nodes_start'][event])
+            L = int(recorder_snapshot['event_nodes_len'][event])
+            #Skip if no nodes exposed in this event
+            if L == 0: 
+                continue
+
+            
+            nodes = recorder_snapshot['nodes'][s:s+L]
+            nodes_list.append(nodes)
+            prios_list.append(np.ones(nodes.shape[0], dtype = np.float32))
+            ct_name = model.id_to_ct[int(recorder_snapshot['event_type'][event])]
+            cts_list.append(np.array([ct_name]*nodes.shape[0], dtype = object))
+            cost_list.append(np.full(nodes.shape[0], default_cost, dtype = np.float32))
+
+        if not nodes_list:
+            return {
+                'nodes':np.empty(0, dtype = np.int32), 
+                'priority':np.empty(0, dtype = np.float32),
+                'contact_types': np.empty(0, dtype = object),
+                'costs': np.empty(0, dtype = np.float32)
+            }
+
+        #aggregate lists across events and return
+        return {
+            'nodes': np.concatenate(nodes_list),
+            'priority': np.concatenate(prios_list),
+            'contact_types': np.concatenate(cts_list),
+            'costs': np.concatenate(cost_list)
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        
+
+
+
+
+
+
+
+
 
 #Test run on a really small population
 if __name__ == "__main__":
