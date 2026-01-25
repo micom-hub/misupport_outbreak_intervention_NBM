@@ -1,3 +1,15 @@
+"""
+network_model.py
+
+Contains:
+- NetworkModel, which runs a outbreak simulation on a network structure
+- ExposureEventRecorder, which tracks exposure events
+- ActionToken, a data tracking class for actions taken
+- ActionBase, and all sub-class actions to be performed by LHD
+- AlgorithmBase, and all sub-class algorithms that LHD uses to decide who to act upon
+- LocalHealthDepartment - an actor that intervenes on the network
+"""
+
 from __future__ import annotations
 import os
 import numpy as np
@@ -17,7 +29,7 @@ from matplotlib.patches import Patch
 import matplotlib.animation as animation
 
 
-from scripts.SynthDataProcessing import build_edge_list, build_individual_lookup
+from scripts.synth_data_processing import build_edge_list, build_individual_lookup
 
 class ModelParameters(TypedDict):
     # Epi Params
@@ -68,9 +80,6 @@ class ModelParameters(TypedDict):
     save_data_files: bool
     make_movie: bool
     display_plots: bool
-
-
-
 
 DefaultModelParams: ModelParameters = {
     #Epdiemic Parameters
@@ -125,18 +134,45 @@ DefaultModelParams: ModelParameters = {
 #-----Outbreak Model-------
 class NetworkModel:
     #@profile
-    def __init__(self, contacts_df, params = DefaultModelParams):
+    def __init__(
+        self, 
+    contacts_df, 
+    params: ModelParameters = DefaultModelParams,
+    *,
+    rng = None,
+    seed: Optional[int] = None,
+    results_folder: Optional[str] = None,
+    lhd_register_defaults: bool = True,
+    lhd_algorithm_map: Optional[Dict[str, object]] = None,
+    lhd_action_factory_map: Optional[Dict[str, Callable[..., Any]]] = None):
         """
         Unpack parameters, set-up storage variables, and initialize model
+
+        kwargs:
+        - rng: optional np.random.Generator for randomness
+        - seed: optional int seed if rng is None
+        - results_folder: optional path to store outputs overriding run_name default
+        - lhd_register_defaults: if True, LHD calls random exposed individuals
+        - lhd_algorithm_map / lhd_action_factory_map: maps to pass LHD 
         """
         #Unpack params and model settings
-        self.params = params
+        self.params = dict(params)
         self.contacts_df = contacts_df
-        self.N = self.contacts_df.shape[0]
-        self.Tmax = self.params["simulation_duration"] #how long it could run
-        self.rng = np.random.default_rng(self.params["seed"])
-        self.county = self.params["county"]
-        self.n_runs = self.params["n_runs"]
+        self.N = int(self.contacts_df.shape[0])
+        self.Tmax = int(self.params.get("simulation_duration", 100))
+
+        #choose RNG: explicit rng > seed arg > params['seed] 
+        if rng is not None:
+            self.rng = rng
+        elif seed is not None:
+            self.rng = np.random.default_rng(int(seed))
+        else:
+            seed_from_params = self.params["seed"]
+            self.rng = np.random.default_rng(int(seed_from_params))
+
+        #run metadata:
+        self.county = self.params.get("county", "")
+        self.n_runs = int(self.params.get("n_runs", 1))
 
         #One-time computation of network structures
         self._compute_network_structures()
@@ -144,10 +180,7 @@ class NetworkModel:
         #Set up storage for full run
         self.all_states_over_time = [None]*self.n_runs
         self.all_new_exposures = [None]*self.n_runs
-        self.exposure_event_log = []
-        for _ in range(self.n_runs):
-            self.exposure_event_log.append([])
-
+        self.exposure_event_log = [[] for _ in range(self.n_runs)]
         self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
         self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
 
@@ -155,19 +188,23 @@ class NetworkModel:
         #Instantiate recorder and Local Health Department
         self.recorder_template = ExposureEventRecorder(init_event_cap = 1024, init_node_cap = 4096)
 
-        self.lhd = LocalHealthDepartment(model = self, rng = self.rng, discovery_prob = self.params["lhd_discovery_prob"], employees = self.params["lhd_employees"], workday_hrs = self.params["lhd_workday_hrs"])
+        #model caller sets lhd mappings 
+        self.lhd = LocalHealthDepartment(
+            model = self,
+            rng = self.rng,
+            discovery_prob = self.params.get("lhd_discovery_prob"),
+            employees = self.params.get("lhd_employees"),
+            workday_hrs = self.params.get("lhd_workday_hrs"),
+            register_defaults = lhd_register_defaults,
+            algorithm_map = lhd_algorithm_map,
+            action_factory_map = lhd_action_factory_map
+        )
 
-        self.lhd.algorithm = EqualPriority()
-
-
-
-#Set-up results folder
+        #set-up result folder if not overriden by driver
         
-        self.results_folder = os.path.join(os.getcwd(), 
-            "results", self.params["run_name"])
+        self.results_folder = results_folder if results_folder is not None else os.path.join(os.getcwd(), "results", self.params.get("run_name", "run"))
         if self.params["save_data_files"]:
-            if not os.path.exists(self.results_folder):
-                os.mkdir(self.results_folder)
+                os.makedirs(self.results_folder, exist_ok = True)
 
     #Helper functions to convert between
     #Name: an individual's number (index of contact_df/individual_lookup))
@@ -235,7 +272,7 @@ class NetworkModel:
         b = (1 - avg_compliance) / sd
         self.compliances = truncnorm.rvs(a,b,
         loc = avg_compliance, scale = sd,
-        size = self.N)
+        size = self.N, random_state = self.rng)
 
         
 
@@ -701,7 +738,7 @@ class NetworkModel:
             self.all_stochastic_dieout[run] = self.stochastic_dieout
             self.all_end_days[run] = self.simulation_end_day
 
-    def epi_summary(self) -> pd.DataFrame:
+    def epi_outcomes(self) -> pd.DataFrame:
         """
         Computes summary statistics for. each run on the model
 
@@ -726,7 +763,7 @@ class NetworkModel:
             exposures = self.all_new_exposures[run]
             states_over_time = self.all_states_over_time[run]
             stochastic_dieout = bool(self.all_stochastic_dieout[run])
-            epidemic_timne = self.all_end_days[run]
+            epidemic_time = self.all_end_days[run]
 
             #Determine unique infections
             ever_exposed = np.zeros(N, dtype = bool)
@@ -750,17 +787,17 @@ class NetworkModel:
             n_vax = int(vax_status.sum())
 
             pct_unvax_infected = (ever_exposed[~vax_status].sum() / n_unvax) if n_unvax else np.nan
-            pct_unvax_infected = (ever_exposed[vax_status].sum() / n_vax) if n_vax else np.nan
+            pct_vax_infected = (ever_exposed[vax_status].sum() / n_vax) if n_vax else np.nan
 
             summary.append({
                 "run_number": run,
                 "total_infections": total_infections,
-                "epidemic_duration": epidemic_timne,
+                "epidemic_duration": epidemic_time,
                 "peak_infections": peak_infectious,
                 "peak_prevalence": peak_prevalence,
                 "time_of_peak_infection": time_of_peak,
                 "pct_unvax_infected": pct_unvax_infected,
-                "pct_vax_infected": pct_unvax_infected,
+                "pct_vax_infected": pct_vax_infected,
                 "stochastic_dieout": stochastic_dieout
             })
         return pd.DataFrame(summary)
@@ -1371,7 +1408,7 @@ class ActionBase:
         self.kind = kind or action_type #more descriptive, sub-type label
         self.reversible = True #subclasses can override
 
-    def apply(self, model: NetworkModel, current_time: int) -> List(ActionToken):
+    def apply(self, model: NetworkModel, current_time: int) -> List[ActionToken]:
         """
         Apply action to the model, return a list of ActionTokens describing state changes
         """
@@ -1640,13 +1677,19 @@ class PrioritizeElders(AlgorithmBase):
 ####### LHD Class - Local Health Department agent that interacts with outbreak
 class LocalHealthDepartment:
     def __init__(
-        self, model: NetworkModel, rng = None, 
-    discovery_prob: float = None,  
-    employees: int = None, workday_hrs: float = None
+        self, 
+        model: NetworkModel, 
+        rng = None, 
+        discovery_prob: float = None,  
+        employees: int = None, 
+        workday_hrs: float = None,
+        register_defaults: bool = True,
+        algorithm_map: Optional[Dict[str, object]] = None,
+        action_factory_map: Optional[Dict[str, Callable[..., ActionBase]]] = None
     ):
     #LHD settings
         self.model = model
-        self.rng = rng if rng is not None else np.random.default_rng()
+        self.rng = rng if rng is not None else getattr(model, "rng", np.random.default_rng())
         self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.params["lhd_discovery_prob"]
 
     #LHD Capacity
@@ -1671,42 +1714,58 @@ class LocalHealthDepartment:
         self.min_factor = 1e-6 #to prevent div 0 errors
         self.min_candidate_cost = 1e-4
 
-
     #Default action params
         self.default_int_reduction = model.params.get("lhd_default_int_reduction", 0.8)
         self.default_int_duration = model.params.get("lhd_default_int_duration", 7)
         self.default_call_cost = model.params.get("lhd_default_call_duration", 0.083)
 
 
-    #For each action to be performed, register an algorithm and action factory
-        self.register_algorithm('call', EqualPriority())
-        self.register_action_factory('call', 
-        lambda nodes, contact_type, prio, cost, params=None:
-        CallIndividualsAction(
-            nodes = nodes,
-        contact_types = [contact_type] if contact_type is not None else
-        ['cas', 'sch', 'wp'],
-        reduction = params.get('reduction', self.default_int_reduction) if params else self.default_int_reduction,
-        duration = int(params.get('duration', self.default_int_duration)) if params else self.default_int_duration,
-        call_cost = float(cost) if cost is not None else self.default_call_cost,
-        min_factor = self.min_factor
-    ))
+        #Register default actions if requested:
+        if register_defaults:
+            self.register_algorithm('call', RandomPriority())
+
+            def default_call_factory(nodes, contact_type, prio, cost, params = None):
+                return CallIndividualsAction(
+                nodes = nodes,
+            contact_types = [contact_type] if contact_type is not None else
+            ['cas', 'sch', 'wp'],
+            reduction = params.get('reduction', self.default_int_reduction) if params else self.default_int_reduction,
+            duration = int(params.get('duration', self.default_int_duration)) if params else self.default_int_duration,
+            call_cost = float(cost) if cost is not None else self.default_call_cost,
+            min_factor = self.min_factor
+        )
+            self.register_action_factory('call', default_call_factory)
+
+        #Register mappings provided by call
+        if algorithm_map:
+            for atype, alg in algorithm_map.items():
+                self.register_algorithm(atype, alg, overwrite = True)
+        if action_factory_map:
+            for atype, factory in action_factory_map.items():
+                self.register_action_factory(atype, factory, overwrite = True)
+            
 
 
     ##registration helpers
     # map algorithms action_type -> algorithm
-    def register_algorithm(self, action_type: str, algorithm: AlgorithmBase) -> None:
+    def register_algorithm(self, action_type: str, algorithm: AlgorithmBase, overwrite: bool = False) -> None:
         """
-        Assign each action with an algorithm that is used to decide who that action should be done to
+        Assign each action with an algorithm that is used to decide who that action should be done to. 
         """
-        if action_type in self.algorithms:
+        if action_type in self.algorithms and not overwrite:
             raise ValueError(f"Algorithm already registered for action '{action_type}'. Only one allowed.")
+        if action_type in self.algorithms and overwrite:
+            warnings.warn(f"Overwriting existing algorithm for action '{action_type}'")
         self.algorithms[action_type] = algorithm
 
     #map action_type -> factory to create action objects
     #expects 
-    def register_action_factory(self, action_type: str, factory: Callable[..., ActionBase]) -> None:
+    def register_action_factory(self, action_type: str, factory: Callable[..., ActionBase], overwrite: bool = False) -> None:
         #factory signature expected: (nodes, contact_type, prio, cost, params) -> ActionBase
+        if action_type in self.action_factories and not overwrite:
+            raise ValueError(f"Action factory already registered for action '{action_type}'. Only one allowed.")
+        if action_type in self.action_factories and overwrite:
+            warnings.warn(f"Overwriting existing action factory for action '{action_type}'")
         self.action_factories[action_type] = factory
 
     def discover_exposures(self, recorder_snapshot):
@@ -1979,7 +2038,7 @@ if __name__ == "__main__":
             testModel.cumulative_incidence_plot(run_number= run, 
                 suffix = f"run_{run+1}", strata = "vaccination")
     testModel.cumulative_incidence_spaghetti()
-    results = testModel.epi_summary()
+    results = testModel.epi_outcomes()
 
     
 
