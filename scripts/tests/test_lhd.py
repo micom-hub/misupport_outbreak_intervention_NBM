@@ -3,22 +3,20 @@
 import numpy as np
 import pandas as pd
 import pytest
-import warnings
 
 from scripts.network_model import (
-    NetworkModel, DefaultModelParams, ExposureEventRecorder,
-    LocalHealthDepartment, CallIndividualsAction, ActionBase, ActionToken
+    NetworkModel, DefaultModelParams, CallIndividualsAction, ActionBase, ActionToken
 )
 
 @pytest.fixture
 def small_model(tmp_path):
     # small sample (reuse same fixture pattern)
     data = [
-        {"age": 60, "sex": "F", "race": "Latino", "hh_id": "C", "wp_id": None, "sch_id": None, "gq_id": None, "gq": False},
-        {"age": 34, "sex": "M", "race": "White", "hh_id": "A", "wp_id": "W1", "sch_id": None, "gq_id": None, "gq": False},
-        {"age": 29, "sex": "F", "race": "Black", "hh_id": "A", "wp_id": "W2", "sch_id": None, "gq_id": None, "gq": False},
-        {"age": 17, "sex": "F", "race": "Asian", "hh_id": "B", "wp_id": "W2", "sch_id": "S1", "gq_id": None, "gq": False},
-        {"age": 15, "sex": "M", "race": "White", "hh_id": "B", "wp_id": None, "sch_id": "S1", "gq_id": None, "gq": False},
+        {"age": 60, "sex": "F", "race": "Latino", "hh_id": 3, "wp_id": None, "sch_id": None, "gq_id": None, "gq": False},
+        {"age": 34, "sex": "M", "race": "White", "hh_id": 1, "wp_id": 21, "sch_id": None, "gq_id": None, "gq": False},
+        {"age": 29, "sex": "F", "race": "Black", "hh_id": 1, "wp_id": 22, "sch_id": None, "gq_id": None, "gq": False},
+        {"age": 17, "sex": "F", "race": "Asian", "hh_id": 2, "wp_id": 22, "sch_id": 31, "gq_id": None, "gq": False},
+        {"age": 15, "sex": "M", "race": "White", "hh_id": 2, "wp_id": None, "sch_id": 31, "gq_id": None, "gq": False},
     ]
     contacts_df = pd.DataFrame(data)
     params = DefaultModelParams.copy()

@@ -631,7 +631,11 @@ class NetworkModel:
 
         if len(to_recovered) > 0:
             self.state[to_recovered] = 3
-            self.time_in_state[to_recovered] = 0
+            self.time_in_state[to_recovered] = -1
+
+        #Advance Recovered
+        recovered = np.where(self.state == 3)[0]
+        self.time_in_state[recovered] += 1
 
         #TODO R -> S with waning immunity
 
@@ -684,9 +688,6 @@ class NetworkModel:
 
                 #Run LHD step once
                 self.lhd.step(self.current_time, snapshot)
-
-                
-
 
                 S, E, I, R = self.states_over_time[-1]  # noqa: E741
                 if not E and not I:

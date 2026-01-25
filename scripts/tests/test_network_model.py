@@ -3,7 +3,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-import warnings
 
 from scripts.network_model import NetworkModel, DefaultModelParams, ExposureEventRecorder
 
@@ -15,10 +14,10 @@ def sample_contacts_df():
     sexes = ["F","M","F","F","M","F","M","F","M","F","M","F"]
     races = ["Latino","White","Black","Asian","White","White","Black","White","Asian","Latino","White","Black"]
     # households: four households
-    hh_ids = ["HH1"]*3 + ["HH2"]*3 + ["HH3"]*3 + ["HH4"]*3
+    hh_ids = [1]*3 + [2]*3 + [3]*3 + [4]*3
     # workplaces: assign some X and Y and NaN
-    wp_ids = ["W1","W2","W1","X", np.nan, np.nan, "W2", "W3", "W1", np.nan, "W3", "W2"]
-    sch_ids = [np.nan, np.nan, np.nan, "S1", "S1", "S1", np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]
+    wp_ids = [11,12,11,14, np.nan, np.nan, 12, 13, 11, np.nan, 13, 12]
+    sch_ids = [np.nan, np.nan, np.nan, 21, 21, 21, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]
     gq_ids = [np.nan]*N
     gq_flags = [False]*N
 
@@ -48,7 +47,7 @@ def net_model(sample_contacts_df, tmp_path):
         "run_name": "test_model_basic",
         "record_exposure_events": True,
         "n_runs": 1,
-        "base_transmission_prob": 1.0,  # deterministic high transmission for tests
+        "base_transmission_prob": 1,  # deterministic high transmission for tests
     })
     model = NetworkModel(contacts_df=sample_contacts_df, params=params)
     model.results_folder = str(tmp_path)
@@ -67,8 +66,8 @@ def test_initialize_states_and_vaccination(net_model):
     m._initialize_states()
     assert hasattr(m, "is_vaccinated")
     assert m.is_vaccinated.shape[0] == m.N
-    for idx in m.params["I0"]:
-        assert m.state[int(idx)] == 2
+    for ind in m.params["I0"]:
+        assert m.state[int(ind)] == 2
 
 def test_recorder_and_determine_new_exposures(net_model):
     m = net_model
