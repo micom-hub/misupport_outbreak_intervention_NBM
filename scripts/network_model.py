@@ -1,10 +1,17 @@
+from __future__ import annotations
 import os
 import numpy as np
 import pandas as pd
 import igraph as ig
 import networkx as nx
 from scipy.sparse import csr_matrix
-from typing import TypedDict, List
+from scipy.stats import truncnorm
+from typing import TypedDict, List, Dict, Any, Optional, Callable
+from collections import defaultdict
+from dataclasses import dataclass
+import uuid
+import warnings
+
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import matplotlib.animation as animation
@@ -27,7 +34,6 @@ class ModelParameters(TypedDict):
     susceptibility_multiplier_under_five: float #increase in susceptibility if age <= 5
 
     # Population Params
-    vax_uptake: float
     hh_contacts: int
     wp_contacts: int
     sch_contacts: int
@@ -39,16 +45,25 @@ class ModelParameters(TypedDict):
     gq_weight: float
     cas_weight: float
 
+    #LHD Params
+    mean_compliance: float 
+    lhd_employees: int
+    lhd_discovery_prob: float
+    lhd_workday_hrs: int
+    lhd_default_int_reduction: float
+    lhd_default_call_duration: float
+    lhd_default_int_duration: int
+
     # Simulation Settings
     n_runs: int
     run_name: str #prefix for model run
     overwrite_edge_list: bool #Try to reload previously generated edge list for this run to save time
     simulation_duration: int  # days
-    dt: float  # steps per day
     I0: List[int]
     seed: int
     county: str #county to run on
     state: str #state to run on
+    record_exposure_events: bool
     save_plots: bool
     save_data_files: bool
     make_movie: bool
@@ -56,8 +71,10 @@ class ModelParameters(TypedDict):
 
 
 
+
 DefaultModelParams: ModelParameters = {
-    "base_transmission_prob": 0.3,
+    #Epdiemic Parameters
+    "base_transmission_prob": .4,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -68,6 +85,7 @@ DefaultModelParams: ModelParameters = {
     "vax_uptake": 0.85, 
     "susceptibility_multiplier_under_five": 2.0,
 
+    #Contact Parameters
     "wp_contacts": 10,
     "sch_contacts": 10,
     "gq_contacts": 10,
@@ -78,22 +96,33 @@ DefaultModelParams: ModelParameters = {
     "gq_weight": .3,
     "cas_weight": .1,
 
-    "n_runs": 100,
+    #LHD Params
+    "mean_compliance": 1,
+    "lhd_employees": 10,
+    "lhd_workday_hrs": 8,
+    "lhd_discovery_prob": .25,
+    "lhd_default_call_duration": 0.1,#in hours
+    "lhd_default_int_reduction": 0.8,
+    "lhd_default_int_duration": 10, #in days
+
+    #Simulation Settings
+    "n_runs": 5,
     "run_name" : "test_run",
-    "overwrite_edge_list": True,
+    "overwrite_edge_list": False,
     "simulation_duration": 45,
-    "dt": 1,
-    "I0": [906],
+    "I0": [906, 450, 34],
     "seed": 2026,
     "county": "Keweenaw",
     "state": "Michigan",
+    "record_exposure_events": True, #Necessary for LHD Dynamics
     "save_plots": True,
     "save_data_files": True,
     "make_movie": False,
-    "display_plots": True
+    "display_plots": False
 
 }
 
+#-----Outbreak Model-------
 class NetworkModel:
     #@profile
     def __init__(self, contacts_df, params = DefaultModelParams):
@@ -110,14 +139,26 @@ class NetworkModel:
         self.n_runs = self.params["n_runs"]
 
         #One-time computation of network structures
-        self.compute_network_structures()
+        self._compute_network_structures()
 
         #Set up storage for full run
         self.all_states_over_time = [None]*self.n_runs
         self.all_new_exposures = [None]*self.n_runs
+        self.exposure_event_log = []
+        for _ in range(self.n_runs):
+            self.exposure_event_log.append([])
 
         self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
         self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
+
+
+        #Instantiate recorder and Local Health Department
+        self.recorder_template = ExposureEventRecorder(init_event_cap = 1024, init_node_cap = 4096)
+
+        self.lhd = LocalHealthDepartment(model = self, rng = self.rng, discovery_prob = self.params["lhd_discovery_prob"], employees = self.params["lhd_employees"], workday_hrs = self.params["lhd_workday_hrs"])
+
+        self.lhd.algorithm = EqualPriority()
+
 
 
 #Set-up results folder
@@ -133,7 +174,7 @@ class NetworkModel:
     #Ind: the index of the individual's vertex in the model
 
     #@profile
-    def compute_network_structures(self):
+    def _compute_network_structures(self):
         """
         Compute expensive network structures that are preserved across runs:
         - edge list
@@ -184,15 +225,38 @@ class NetworkModel:
         #Initialize individual vectors for quicker lookup
         self.ages = self.individual_lookup["age"].to_numpy()
         self.sexes = self.individual_lookup["sex"].to_numpy()
+        self.is_vaccinated = self.rng.random(self.N) < self.params["vax_uptake"]
+
+        #Set individual compliances array
+        avg_compliance = np.clip(self.params["mean_compliance"], 0, 1) #0-1
+        sd = 0.15 #sd for bounded normal distribution
+        #calculate truncnorm params
+        a = (0 - avg_compliance) / sd
+        b = (1 - avg_compliance) / sd
+        self.compliances = truncnorm.rvs(a,b,
+        loc = avg_compliance, scale = sd,
+        size = self.N)
+
+        
 
         #Create neighbor_map and fast_neighbor_map
-        self.neighbor_map = self.build_neighbor_map()
+        self.neighbor_map = self._build_neighbor_map()
 
         self.fast_neighbor_map = {} #preprocess dict of dicts to speed up later
-        for src, nbr_list in self.neighbor_map.items():
+        for src, neighbor_list in self.neighbor_map.items():
             self.fast_neighbor_map[src] = {
-                tgt: (weight, ct) for tgt, weight, ct in nbr_list
+                tgt: (weight, ct) for tgt, weight, ct in neighbor_list
                 }
+
+        #Create adjacency sparses by contact type 
+        #lookup indptr, indices, weights = csr_by_type['ct']
+        self.csr_by_type = self._build_type_csr()
+        self.contact_types = sorted(self.csr_by_type.keys()) #stable ct order
+        self.ct_to_id = {ct: i for i, ct in enumerate(self.contact_types)}
+        self.id_to_ct = {i: ct for ct, i in self.ct_to_id.items()}
+
+
+
 
         #Create full node list
         self.full_node_list = sorted(
@@ -220,10 +284,19 @@ class NetworkModel:
         self.layout_name_to_ind = {name:i for i, name in enumerate(self.layout_node_names)}
         self.g_full = g_full.copy()
 
-    def initialize_states(self):
+        #Initialize multipliers for LHD interaction
+        self.in_multiplier = {
+            ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types
+            }  
+        self.out_multiplier = {
+            ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types
+            }  
+
+    def _initialize_states(self):
         """
         Set up new SEIR arrays and seed initial infectious individuals
         """
+        self.current_time = 0
        #Set vaccinations
         self.is_vaccinated = self.rng.random(self.N) < self.params["vax_uptake"]
 
@@ -254,6 +327,10 @@ class NetworkModel:
         #Reset run flags
         self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
+
+        #Reset LHD intervention Multipliers
+        self.in_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
+        self.out_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
        
         
     def name_to_ind(self, g: ig.Graph, names):
@@ -293,10 +370,11 @@ class NetworkModel:
             raise TypeError("inds must be int, list, or numpy array.")
             
     #@profile
-    def build_neighbor_map(self):
+    def _build_neighbor_map(self):
         """
         Build a mapping from node to list of (neighbor, weight) (make neighbor queries O(1))
         """
+        #build a mapping of src: (tgt, weight, ct)
         neighbor_map = {}
         for row in self.edge_list.itertuples(index = False):
             src, tgt, w, ct = row.source, row.target, row.weight, row.contact_type
@@ -307,8 +385,83 @@ class NetworkModel:
             if tgt not in neighbor_map:
                 neighbor_map[tgt] = []
             neighbor_map[tgt].append((src, w, ct))
+
+
+
         return neighbor_map
 
+    def _build_type_csr(self):
+        """
+        Build an csr sparses by contact type that map a source node to a list of neighbors by type
+        """
+
+        neighbor_map = self.neighbor_map
+        N = self.N
+        total_edges = int(2*self.edge_list.shape[0])
+
+    #collect global arrays
+
+        src_array = np.empty(total_edges, dtype = np.int32)
+        tgt_array = np.empty(total_edges, dtype = np.int32)
+        wt_array = np.empty(total_edges, dtype = np.float32)
+
+        ct_to_id = {}
+        id_to_ct = []
+        ct_array = np.empty(total_edges, dtype = np.int16)
+
+        pos = 0
+        for src, neighbors in neighbor_map.items():
+            for tgt, wt, ct in neighbors:
+                src_array[pos] = src
+                tgt_array[pos] = tgt
+                wt_array[pos] = wt
+                if ct not in ct_to_id:
+                    ct_to_id[ct] = len(id_to_ct)
+                    id_to_ct.append(ct)
+                ct_array[pos] = ct_to_id[ct]
+                pos += 1
+
+        #slice to actual length
+        if pos < total_edges:
+            src_array = src_array[:pos]
+            tgt_array = tgt_array[:pos]
+            wt_array = wt_array[:pos]
+            ct_array = ct_array[:pos]
+
+    #sort edges by (ct, src) so they are contiguous and sources are grouped
+
+        order = np.lexsort((src_array, ct_array)) #primary key ct, secondary src
+        src_s = src_array[order]
+        tgt_s = tgt_array[order]
+        wt_s = wt_array[order]
+        ct_s = ct_array[order]
+
+    #split by type and build a csr for each type
+        csr_by_type = {}
+        unique_cts, ct_starts = np.unique(ct_s, return_index = True)
+        ct_starts = list(ct_starts) + [len(ct_s)]
+        for k, ct_id in enumerate(unique_cts):
+            start = ct_starts[k]
+            end = ct_starts[k+1]
+            srcs_ct = src_s[start:end]
+            tgts_ct = tgt_s[start:end]
+            wts_ct = wt_s[start:end]
+
+            if srcs_ct.size == 0:
+                indptr = np.zeros(N+1, dtype = np.int64)
+                indices = np.empty(0, dtype = np.int32)
+                weights = np.empty(0, dtype = np.float32)
+            else:
+                counts = np.bincount(srcs_ct, minlength = N)
+                indptr = np.empty(N+1, dtype = np.int64)
+                indptr[0] = 0
+                np.cumsum(counts, out = indptr[1:])
+                indices = tgts_ct.astype(np.int32, copy = True)
+                weights = wts_ct.astype(np.float32, copy = True)
+
+            csr_by_type[id_to_ct[int(ct_id)]] = (indptr, indices, weights)
+
+        return csr_by_type
 
     
     def assign_node_attribute(self, attr_name: str, vals: np.ndarray, indices: np.ndarray, g: ig.Graph) -> ig.Graph:
@@ -360,60 +513,101 @@ class NetworkModel:
         return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inf)
 
     #@profile
-    def determine_new_exposures(self):
+    def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
         """
-    Uses the current epi_g, self.neighbor_map, and self.individual_lookup to determine who is newly exposed in a given step
+    Determine who becomes newly exposed (pre-infectious) this timestep.
+    If recorder is provided, it will track exposure events for each (src, ct)
+    storing: exposure metadata
+
+    Returns: np.ndarray of newly exposed node indices
         """
+
+
         N = self.N
         newly_exposed = np.zeros(N, dtype = bool)
-
         infectious_indices = np.where(self.state == 2)[0]
+
         if len(infectious_indices) == 0:
             return np.array([], dtype = int)
-        
 
+        #gather factors affecting transmission probability
+        base_prob = self.params['base_transmission_prob']
+        vax_efficacy = self.params['vax_efficacy']
+        susc_mult_under5 = self.params['susceptibility_multiplier_under_five']
+        rel_inf_vax = self.params['relative_infectiousness_vax']
+
+        #local aliases
+        csr_by_type = self.csr_by_type
+        is_vax = self.is_vaccinated
+        ages = self.ages
+        rng = self.rng
+
+        #iterate over exposure events (src,ct) to determine transmission probabilities
         for src in infectious_indices:
-            neighbors = self.adj_matrix[src].indices
-            weights = self.adj_matrix[src].data
+            for ct, (indptr, indices, weights) in csr_by_type.items():
+                start = indptr[src]
+                end = indptr[src+1]
+                if end <= start:
+                    continue
+                #determine susceptible neighbors
+                neighbors = indices[start:end]
+                w = weights[start:end]
+                sus_mask = (self.state[neighbors] == 0)
+                if not sus_mask.any():
+                    continue
+                sus_neighbors = neighbors[sus_mask]
+                sus_w = w[sus_mask].astype(np.float32)
 
-            sus_mask = (self.state[neighbors] == 0)
-            sus_neighbors = neighbors[sus_mask]
-            sus_weights = weights[sus_mask]
+                #gather intervention multipliers 
+                out_mult = self.out_multiplier[ct][src]
+                in_mult = self.in_multiplier[ct][sus_neighbors]
+
+                #calculate effective weight and transmission prob
+                effective_w = sus_w * out_mult * in_mult
+                prob = base_prob * effective_w
+
+                #vaccination weighted
+                if is_vax[src]:
+                    prob = prob * rel_inf_vax
+                
+                vax_tgt = is_vax[sus_neighbors]
+                if vax_efficacy != 0:
+                    prob = prob * ((1.0 - vax_efficacy)** vax_tgt)
+
+                #age weighted
+                under5 = (ages[sus_neighbors] <= 5)
+                if susc_mult_under5 != 1.0:
+                    prob[under5] = prob[under5] * susc_mult_under5
+                
+                prob = np.clip(prob, 0.0, 1.0)
+
+
+                #Determine who becomes infected
+                draws = rng.random(prob.shape)
+                infected_mask = (draws < prob)
+                if infected_mask.any():
+                    infected_nodes = sus_neighbors[infected_mask]
+                    newly_exposed[infected_nodes] = True
+                
+                #Record event data
+                if recorder is not None:
+                    type_id = self.ct_to_id[ct]
+                    #pass array and infected mask 
+                    recorder.append_event(self.current_time, int(src), int(type_id), sus_neighbors, infected_mask)
+
         
-            vax_src = self.is_vaccinated[src]
-            vax_tgt = self.is_vaccinated[sus_neighbors]
-            ages_targets = self.ages[sus_neighbors]
-
-            vax_efficacy = self.params['vax_efficacy']
-
-            prob = self.params['base_transmission_prob'] * sus_weights
-            if vax_src:
-                prob *= self.params['relative_infectiousness_vax']
-            prob *= ((1- vax_efficacy)**vax_tgt)
-
-            #example implementation of heterogeneous susceptibility
-            under_five = ages_targets <= 5
-            prob[under_five] *= self.params['susceptibility_multiplier_under_five']
-
-            prob = np.clip(prob, 0.0, 1.0)
-
-            draws = self.rng.random(prob.shape)
-            infected = sus_neighbors[draws < prob]
-            newly_exposed[infected] = True
-
-        result = np.where(newly_exposed)[0]
-
-
+        result = np.where(newly_exposed)[0].astype(np.int32)
         return result
 
     #@profile
-    def step(self):
+    def step(self, recorder: ExposureEventRecorder = None):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
         """
 
         #S -> E
-        newly_exposed = self.determine_new_exposures()
+        self.exposure_events = [] #record exposure events
+        newly_exposed = self.determine_new_exposures(recorder = recorder)
 
         if newly_exposed.size > 0:
             self.state[newly_exposed] = 1
@@ -437,7 +631,13 @@ class NetworkModel:
 
         if len(to_recovered) > 0:
             self.state[to_recovered] = 3
-            self.time_in_state[to_recovered] = 0
+            self.time_in_state[to_recovered] = -1
+
+        #Advance Recovered
+        recovered = np.where(self.state == 3)[0]
+        self.time_in_state[recovered] += 1
+
+        #TODO R -> S with waning immunity
 
 
         #Save timestep data
@@ -455,17 +655,46 @@ class NetworkModel:
 
         for run in range(self.n_runs):
             print(f"Running model run {run + 1} of {self.n_runs}...")
-            self.initialize_states()
+            self._initialize_states()
 
             t = 0
             while t < self.Tmax:
-                self.step()
+                t += 1 #day 0 is recorded in initialization
+                self.current_time = t
+
+                if self.params.get("record_exposure_events"):
+                    recorder = self.recorder_template
+                    recorder.reset()
+                else:
+                    recorder = None
+
+                #advance SEIR and record
+                self.step(recorder)
+
+                #either log an exposure event or make a false empty one
+                if recorder is not None:
+                    snapshot = recorder.snapshot_compact(copy = True) 
+                    self.exposure_event_log[run].append(snapshot)
+                else:
+                    snapshot = {
+                        'event_time': np.empty(0, dtype = np.int32),
+                        'event_source': np.empty(0, dtype = np.int32),
+                        'event_type': np.empty(0, dtype = np.int16),
+                        'event_nodes_start': np.empty(0, dtype = np.int64),
+                        'event_nodes_len': np.empty(0, dtype = np.int32),
+                        'nodes': np.empty(0, dtype = np.int32),
+                        'infections': np.empty(0, dtype = bool)
+                    }
+
+                #Run LHD step once
+                self.lhd.step(self.current_time, snapshot)
+
                 S, E, I, R = self.states_over_time[-1]  # noqa: E741
                 if not E and not I:
-                    self.simulation_end_day = t + 1 #as it did run another step 
+                    self.simulation_end_day = t 
                     self.stochastic_dieout = True
                     break
-                t += 1
+                
 
             self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
             self.all_new_exposures[run] = [ne.copy() if hasattr(ne, "copy") else list(ne) for ne in self.new_exposures]
@@ -536,21 +765,6 @@ class NetworkModel:
             })
         return pd.DataFrame(summary)
 
-            
-
-
-        
-
-            
-            
-
-
-
-
-
-
-
-
     def epi_curve(self, run_number = 0, suffix: str = None):
         """
         Build an epi curve for a given run of the model
@@ -586,6 +800,7 @@ class NetworkModel:
     def cumulative_incidence_plot(self, run_number = 0, strata:str = None, time: int = None, suffix: str = None) -> None:
         """
         Plots cumulative incidence over time, optionally stratified
+        Currently supports stratification by age, sex, vaccination status
 
         Args:
             time (int): time range for plot, 0-t, defaults to full timespan
@@ -594,6 +809,7 @@ class NetworkModel:
 
         Creates a matplotlib plot
         """
+
         pop_size = self.N
         exposures = self.all_new_exposures[run_number]
         if len(exposures) > 0 and len(exposures[0]) == 0:
@@ -610,6 +826,7 @@ class NetworkModel:
             strata = strata.lower()
 
 
+
         #Track cumulatively infections
         ever_exposed = np.zeros(pop_size, dtype = bool)
         overall_cumulative = []
@@ -620,10 +837,11 @@ class NetworkModel:
         #Stratification Logic
         strata_labels, strata_members, strata_colors, strata_cumulative = None, None, None, None
 
-        if strata in ("age", "sex"):
-            strata_attr = self.individual_lookup[strata]
+        if strata in ("age", "sex", "vaccination"):
+            
 
             if strata == "age":
+                strata_attr = self.individual_lookup[strata]
                 #Age bins directly input here, change as needed
                 bins = [0, 6, 19, 35, 65, 200]
                 labels = ["0-5", "6-18", "19-34", "35-64", "65+"]
@@ -638,11 +856,22 @@ class NetworkModel:
     ]
 
             elif strata == "sex":
+                strata_attr = self.individual_lookup[strata]
                 strata_vals = strata_attr
                 labels = sorted(strata_attr.unique())
                 strata_labels = labels
                 label_to_color = {lab: ("red" if lab == "F" else "blue") for lab in labels}
                 strata_colors = [label_to_color[lab] for lab in labels]
+
+            elif strata == "vaccination":
+                if not hasattr(self, "is_vaccinated"):
+                    raise ValueError("vaccination stratification requested but vaccination status not initialized")
+
+                strata_attr = self.is_vaccinated
+                strata_labels = ["Vaccinated", "Unvaccinated"]
+                strata_vals = np.where(strata_attr, "Vaccinated", "Unvaccinated")
+                strata_colors = ["#377eb8", "#e41a1c"] #Blue vax, red unvax
+
 
 
         elif strata and (strata not in self.individual_lookup.columns):
@@ -968,13 +1197,774 @@ class NetworkModel:
         return
 
 
-#Test run on a really small population
+#------ Exposure Event Tracking --------
+class ExposureEventRecorder:
+    """
+    Object to record exposure events for a single timestep or across timesteps if reset. Stores:
+    - exposure event metadata arrays(time, source, type_id, start, length)
+    - nodes (concatenated node ids)
+    - infections (concatenated bool that align with nodes)
+    Methods:
+    - append_event(time, source, type_id, nodes_arr, infected_mask)
+    - reset() to reuse the recorder
+    - snapshot_compact(copy = True) -> dict of numpy arrays (sliced to used lengths)
+    - to_dataframe(id_to_ct) -> pandas DF with nodes and infected as arrays
+    """
+    def __init__(self, init_event_cap = 1024, init_node_cap = 4096):
+        self.event_cap = int(init_event_cap) 
+        self.node_cap = int(init_node_cap)
+        self._alloc_arrays()
+        self.reset()
+
+    def _alloc_arrays(self):
+        self.event_time = np.empty(self.event_cap, dtype = np.int32)
+        self.event_source = np.empty(self.event_cap, dtype = np.int32)
+        self.event_type = np.empty(self.event_cap, dtype = np.int16)
+        self.event_nodes_start = np.empty(self.event_cap, dtype = np.int64)
+        self.event_nodes_len = np.empty(self.event_cap, dtype = np.int32)
+        self.nodes = np.empty(self.node_cap, dtype = np.int32)
+        self.infections = np.empty(self.node_cap, dtype = np.bool_)
+
+    def reset(self):
+        self.n_events = 0
+        self.n_nodes = 0
+
+    def _grow_events(self, min_extra = 1):
+        if self.n_events + min_extra <= self.event_cap:
+            return
+        newcap = max(self.event_cap * 2, self.n_events + min_extra)
+        def grow(arr):
+            new = np.empty(newcap, dtype = arr.dtype)
+            new[: self.n_events] = arr[:self.n_events]
+            return new
+        
+        self.event_time = grow(self.event_time)
+        self.event_source = grow(self.event_source)
+        self.event_type = grow(self.event_type)
+        self.event_nodes_start = grow(self.event_nodes_start)
+        self.event_nodes_len = grow(self.event_nodes_len)
+        self.event_cap = newcap
+
+    def _grow_nodes(self, min_extra = 1):
+        if self.n_nodes + min_extra <= self.node_cap:
+            return
+        newcap = max(self.node_cap * 2, self.n_nodes + min_extra)
+        new_nodes = np.empty(newcap, dtype = np.int32)
+        new_nodes[: self.n_nodes] = self.nodes[: self.n_nodes]
+        new_inf = np.empty(newcap, dtype = np.bool_)
+        new_inf[: self.n_nodes] = self.infections[: self.n_nodes]
+        self.nodes = new_nodes
+        self.infections = new_inf
+        self.node_cap = newcap
+
+    def append_event(self, time: int, source: int, type_id: int, nodes_arr: np.ndarray, infected_mask: np.ndarray):
+        nodes_arr = np.asarray(nodes_arr, dtype = np.int32)
+        infected_mask = np.asarray(infected_mask, dtype = np.bool_)
+        if not nodes_arr.shape[0] == infected_mask.shape[0]:
+            raise ValueError("Recorder event has mismatched arrays")
+
+        L = nodes_arr.shape[0]
+
+        self._grow_events(1)
+        if L:
+            self._grow_nodes(L)
+            start = self.n_nodes
+            self.nodes[start:start + L] = nodes_arr
+            self.infections[start:start+L] = infected_mask
+        else:
+            start = self.n_nodes
+        
+        #gather metadata
+        i = self.n_events
+        self.event_time[i] = np.int32(time)
+        self.event_source[i] = np.int32(source)
+        self.event_type[i] = np.int16(type_id)
+        self.event_nodes_start[i] = np.int64(start)
+        self.event_nodes_len[i] = np.int32(L)
+
+        self.n_nodes += L
+        self.n_events += 1
+
+    def snapshot_compact(self, copy:bool = True) -> Dict[str, np.ndarray]:
+        """
+        Returns a dict of np.arrays sliced to used lengths
+
+        Args:
+            copy (bool): If true, arrays are copied and saved even if recorder is reused
+        """
+        event = slice(0, self.n_events)
+        node = slice(0, self.n_nodes)
+        if copy:
+            return{
+                'event_time': self.event_time[event].copy(),
+                'event_source': self.event_source[event].copy(),
+                'event_type': self.event_type[event].copy(),
+                'event_nodes_start': self.event_nodes_start[event].copy(),
+                'event_nodes_len': self.event_nodes_len[event].copy(),
+                'nodes': self.nodes[node].copy(),
+                'infections': self.infections[node].copy(),
+            }
+        else:
+            return {
+                'event_time': self.event_time[event],
+                'event_source': self.event_source[event],
+                'event_type': self.event_type[event],
+                'event_nodes_start': self.event_nodes_start[event],
+                'event_nodes_len': self.event_nodes_len[event],
+                'nodes': self.nodes[node],
+                'infections': self.infections[node],
+            }
+
+    def to_dataframe(self, id_to_ct: Dict[int, str]) -> pd.DataFrame:
+        """
+        Convert compact snapshot to a pandas dataframe. Computationally expensive
+
+        Args:
+            id_to_ct (Dict[int, str]): index to contact type mapping
+
+        """
+        rows = []
+        for i in range(self.n_events):
+            s = int(self.event_nodes_start[i])
+            L = int(self.event_nodes_len[i])
+            nodes = self.nodes[s:s+L].copy()
+            infs = self.infections[s:s+L].copy()
+            n_infected = sum(infs)
+            rows.append((
+                int(self.event_time[i]),
+                int(self.event_source[i]),
+                id_to_ct[int(self.event_type[i])],
+                nodes,
+                infs,
+                L,
+                n_infected
+               
+            ))
+        df = pd.DataFrame(rows, columns = ['time','source','contact_type','nodes','infected', 'n_exposed', 'n_infected'])
+        return(df)
+
+
+#------LHD Stuff --------
+
+
+####### Actions - LHD Interacting with the model
+
+#Token produced by action.apply and stored in expiry schedule
+@dataclass
+class ActionToken:
+    action_id: str
+    action_type: str #e.g. "calling", "quarantining", etc.
+    contact_type: Optional[str] #e.g. 'cas', 'hh' or None
+    nodes: np.ndarray #integer array of nodes affected by action
+    factor: Optional[np.ndarray] #factor applied to contact reductions or None
+    reversible: bool = True #if action can be undone
+    meta: Optional[Dict[str, Any]] = None #any relevant metadata
+
+class ActionBase:
+    """
+    Abstract action. Subclasses implement apply() to alter the model, returning ActionToken(s)
+    """
+    def __init__(self, action_type: str, duration:int = 0, kind: Optional[str] = None):
+        self.id = uuid.uuid4().hex
+        self.action_type = action_type
+        self.duration = int(duration)
+        self.kind = kind or action_type #more descriptive, sub-type label
+        self.reversible = True #subclasses can override
+
+    def apply(self, model: NetworkModel, current_time: int) -> List(ActionToken):
+        """
+        Apply action to the model, return a list of ActionTokens describing state changes
+        """
+        raise NotImplementedError
+
+    def revert_token(self, model: NetworkModel, token: ActionToken) -> None:
+        """
+        Reverts a previously-applied token for a reversible action
+        """
+
+#Possible Actions
+class CallIndividualsAction(ActionBase):
+    """
+    Calls individuals to inform them of their exposure, applying a multiplicative reduction to their contact weight for school, workplace, and casual contacts
+
+    nodes: list of model node indices
+    contact_types: list or iterable of contact types ('cas', 'sch', etc.)
+    reduction: fraction (0-1) representing reduction (to be mult by compliance)
+    duration: days individual asked to reduce contacts
+    call_cost: hours spent per call
+    min_factor: minimum allowed reduction (just to avoid divzero errors)
+    """
+    def __init__(self, nodes: np.ndarray, contact_types: List[str], reduction: float, duration: int, call_cost: float, min_factor: float = 1e-6):
+        super().__init__(action_type = "call", duration = duration, kind = "call_individuals")
+        self.nodes = np.asarray(nodes, dtype = np.int32)
+        self.contact_types = list(contact_types)
+        self.reduction = float(reduction)
+        self.call_cost = float(call_cost)
+        self.min_factor = float(min_factor)
+        self.reversible = True
+
+    def apply(self, model: NetworkModel, current_time: int) -> List[ActionToken]:
+        #per-node factor, scaled by compliance
+        comps = model.compliances[self.nodes] 
+        raw = 1.0 - (self.reduction * comps)
+        factor = np.clip(raw, self.min_factor, 1.0).astype(np.float32)
+
+        tokens: List[ActionToken] = []
+        for ct in self.contact_types:
+            #apply reductions
+            model.out_multiplier[ct][self.nodes] *= factor
+            model.in_multiplier[ct][self.nodes] *= factor
+
+            token = ActionToken(
+                action_id = self.id,
+                action_type = self.action_type,
+                contact_type = ct,
+                nodes = self.nodes.copy(),
+                factor = factor.copy(),
+                reversible = True,
+                meta = {'call_cost': self.call_cost}
+            )
+            tokens.append(token)
+        
+        return tokens
+
+    def revert_token(self, model: NetworkModel, token: ActionToken) -> None:
+        #undo the multiplicative factor by dividing out 
+        if token.factor is None:
+            return
+        f = token.factor
+        #safeguard against zeros
+        f_safe = np.maximum(f, self.min_factor)
+        model.out_multiplier[token.contact_type][token.nodes] /= f_safe
+        model.in_multiplier[token.contact_type][token.nodes] /= f_safe
+
+
+
+
+####### Algorithms - LHD taking info from the outbreak and making decisions
+class AlgorithmBase:
+    """
+    An interface for designing calling algorithms for the local health department.
+    
+Algorithms have one method, generate_candidates, which takes:
+    recorder_snapshot: 
+    a NetworkModel object 
+    the indices of discovered events
+    
+    and returns arrays:
+         nodes
+         relative priority prioritization
+         contact type
+         projected call duration (call cost)
+    """
+    def generate_candidates(self, recorder_snapshot: Dict[str, np.ndarray], model, discovered_event_ind) -> Dict[str, Any]:
+        """
+
+        Args:
+            Snapshot of exposure events in an outbreak
+        Returns:
+            Dict[str, Any]: Dict with keys:
+                'nodes' : np.ndarray of node ids
+                'priority' np.ndarray of float priorities aligned w/ nodes
+                'contact_types': array of ct (per candidate or single)
+                other metadata
+        """
+        raise NotImplementedError
+
+## Possible Algorithms
+class EqualPriority(AlgorithmBase):
+    """
+    Returns each susceptible individual as equal priority candidates 
+    """
+    def generate_candidates(self, recorder_snapshot:Dict[str, np.ndarray], model, discovered_event_ind) -> Dict[str, Any]:
+        #if no events discovered, return nobody
+        if len(discovered_event_ind) == 0:
+            return {
+                'nodes': np.empty(0, dtype = np.int32),
+                'priority': np.empty(0, dtype = np.float32),
+                'contact_types': np.empty(0, dtype = object),
+                'costs': np.empty(0, dtype = np.float32),
+                'params': []
+            }
+
+        nodes_list = []
+        prios_list = []
+        cts_list = []
+        costs_list = []
+
+        default_cost = float(model.params.get('lhd_default_call_duration', 0.083))
+        for event in discovered_event_ind:
+            s = int(recorder_snapshot['event_nodes_start'][event])
+            L = int(recorder_snapshot["event_nodes_len"][event])
+            if L == 0:
+                continue
+
+            nodes = np.asarray(recorder_snapshot['nodes'][s:s+L], dtype = np.int32)
+            nodes_list.append(nodes)
+            prios_list.append(np.ones(nodes.shape[0], dtype = np.float32))
+            ct_name = model.id_to_ct[int(recorder_snapshot['event_type'][event])] if 'event_type' in recorder_snapshot else None
+            cts_list.append(np.array([ct_name]*nodes.shape[0], dtype = object))
+            costs_list.append(np.full(nodes.shape[0], default_cost, dtype = np.float32))
+
+        if not nodes_list:
+            return {
+                'nodes': np.empty(0, dtype = np.int32),
+                'priority': np.empty(0, dtype = np.float32),
+                'contact_types': np.empty(0, dtype = object),
+                'costs': np.empty(0, dtype = np.float32),
+                'params': []
+            }
+        return { 
+            'nodes': np.concatenate(nodes_list),
+            'priority': np.concatenate(prios_list),
+            'contact_types': np.concatenate(cts_list),
+            'costs': np.concatenate(costs_list),
+            'params': None
+        }
+
+class RandomPriority(AlgorithmBase):
+    """
+    Assigns each exposed candidate a random priority in [0-1)
+    """
+    def generate_candidates(self, recorder_snapshot: Dict[str, np.ndarray], model, discovered_event_ind) -> Dict[str, Any]:
+        #if no events discovered, return nobody
+        if len(discovered_event_ind) == 0:
+            return {
+                'nodes': np.empty(0, dtype = np.int32),
+                'priority': np.empty(0, dtype = np.float32),
+                'contact_types': np.empty(0, dtype = object),
+                'costs': np.empty(0, dtype = np.float32),
+                'params': []
+            }
+
+        nodes_list = []
+        prios_list = []
+        cts_list = []
+        costs_list = []
+        default_cost = float(model.params.get('lhd_default_call_duration', 0.083))
+        for event in discovered_event_ind:
+            s = int(recorder_snapshot['event_nodes_start'][event])
+            L = int(recorder_snapshot["event_nodes_len"][event])
+            if L == 0:
+                continue
+
+            nodes = np.asarray(recorder_snapshot['nodes'][s:s+L], dtype = np.int32)
+            nodes_list.append(nodes)
+
+            #random priority using model.rng
+            prios_list.append(model.rng.random(size = nodes.shape[0]).astype(np.float32))
+            ct_name = model.id_to_ct[int(recorder_snapshot['event_type'][event])] if 'event_type' in recorder_snapshot else None
+            cts_list.append(np.array([ct_name] * nodes.shape[0], dtype = object))
+            costs_list.append(np.full(nodes.shape[0], default_cost, dtype = np.float32))
+
+        if not nodes_list:
+            return {
+                'nodes': np.empty(0, dtype = np.int32),
+                'priority': np.empty(0, dtype = np.float32),
+                'contact_types': np.empty(0, dtype = object),
+                'costs': np.empty(0, dtype = np.float32),
+                'params': []
+            }
+
+        return { 
+            'nodes': np.concatenate(nodes_list),
+            'priority': np.concatenate(prios_list),
+            'contact_types': np.concatenate(cts_list),
+            'costs': np.concatenate(costs_list),
+            'params': None
+            }
+
+class PrioritizeElders(AlgorithmBase):
+    """
+    Priority boost for exposed nodes aged 65+. Priority = base + boost
+    Assume elders take longer to speak with on the phone 
+    """
+    def __init__(self, base_priority: float = 1.0, elder_boost: float = 4.0, elder_cost: float = 0.1 ):
+        self.base_priority = float(base_priority)
+        self.elder_boost = float(elder_boost)
+        self.elder_cost = float(elder_cost)
+
+    def generate_candidates(self, recorder_snapshot: Dict[str, np.ndarray], model, discovered_event_ind) -> Dict[str, Any]:
+        #if no events discovered, return nobody
+        if len(discovered_event_ind) == 0:
+            return {
+                'nodes': np.empty(0, dtype = np.int32),
+                'priority': np.empty(0, dtype = np.float32),
+                'contact_types': np.empty(0, dtype = object),
+                'costs': np.empty(0, dtype = np.float32),
+                'params': []
+            }
+
+        nodes_list = []
+        prios_list = []
+        cts_list = []
+        costs_list = []
+
+        default_cost = float(model.params.get('lhd_default_call_duration', 0.083))
+        for event in discovered_event_ind:
+            s = int(recorder_snapshot['event_nodes_start'][event])
+            L = int(recorder_snapshot["event_nodes_len"][event])
+            if L == 0:
+                continue
+
+            nodes = np.asarray(recorder_snapshot['nodes'][s:s+L], dtype = np.int32)
+            nodes_list.append(nodes)
+
+            ages_targets = model.ages[nodes]
+            pr = np.where(ages_targets >= 65, self.base_priority + self.elder_boost, self.base_priority).astype(np.float32)
+            prios_list.append(pr)
+
+            ct_name = model.id_to_ct[int(recorder_snapshot['event_type'][event])] if 'event_type' in recorder_snapshot else None
+            cts_list.append(np.array([ct_name] * nodes.shape[0], dtype = object))
+
+            costs = np.where(ages_targets >= 65, self.elder_cost, default_cost).astype(np.float32)
+            costs_list.append(costs)
+
+        if not nodes_list:
+            return {
+                'nodes': np.empty(0, dtype = np.int32),
+                'priority': np.empty(0, dtype = np.float32),
+                'contact_types': np.empty(0, dtype = object),
+                'costs': np.empty(0, dtype = np.float32),
+                'params': []
+            }
+
+        return { 
+            'nodes': np.concatenate(nodes_list),
+            'priority': np.concatenate(prios_list),
+            'contact_types': np.concatenate(cts_list),
+            'costs': np.concatenate(costs_list),
+            'params': None
+            }
+
+####### LHD Class - Local Health Department agent that interacts with outbreak
+class LocalHealthDepartment:
+    def __init__(
+        self, model: NetworkModel, rng = None, 
+    discovery_prob: float = None,  
+    employees: int = None, workday_hrs: float = None
+    ):
+    #LHD settings
+        self.model = model
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.params["lhd_discovery_prob"]
+
+    #LHD Capacity
+        self.employees = employees if employees is not None else self.model.params["lhd_employees"]
+        self.hours_per_employee = float(workday_hrs) if workday_hrs is not None else self.model.params["lhd_workday_hrs"]
+        self.daily_personhours = float(self.employees * self.hours_per_employee)
+
+    #Algorithm -> algorithm instance
+        self.algorithms: Dict[str, AlgorithmBase] = {}
+    #action factories: action_type -> callable to return ActionBase
+        self.action_factories: Dict[str, Callable[..., ActionBase]] = {}
+
+
+    #trackers for action objects and token counts
+        self.expiry: Dict[int, List[ActionToken]] = {}
+        self.action_log: List[Dict[str, Any]] = []
+        # action id -> action instance
+        self._active_actions: Dict[str, ActionBase] = {}
+        #action id -> number outstanding tokens
+        self._action_token_counts: Dict[str, int] = {}
+
+        self.min_factor = 1e-6 #to prevent div 0 errors
+        self.min_candidate_cost = 1e-4
+
+
+    #Default action params
+        self.default_int_reduction = model.params.get("lhd_default_int_reduction", 0.8)
+        self.default_int_duration = model.params.get("lhd_default_int_duration", 7)
+        self.default_call_cost = model.params.get("lhd_default_call_duration", 0.083)
+
+
+    #For each action to be performed, register an algorithm and action factory
+        self.register_algorithm('call', EqualPriority())
+        self.register_action_factory('call', 
+        lambda nodes, contact_type, prio, cost, params=None:
+        CallIndividualsAction(
+            nodes = nodes,
+        contact_types = [contact_type] if contact_type is not None else
+        ['cas', 'sch', 'wp'],
+        reduction = params.get('reduction', self.default_int_reduction) if params else self.default_int_reduction,
+        duration = int(params.get('duration', self.default_int_duration)) if params else self.default_int_duration,
+        call_cost = float(cost) if cost is not None else self.default_call_cost,
+        min_factor = self.min_factor
+    ))
+
+
+    ##registration helpers
+    # map algorithms action_type -> algorithm
+    def register_algorithm(self, action_type: str, algorithm: AlgorithmBase) -> None:
+        """
+        Assign each action with an algorithm that is used to decide who that action should be done to
+        """
+        if action_type in self.algorithms:
+            raise ValueError(f"Algorithm already registered for action '{action_type}'. Only one allowed.")
+        self.algorithms[action_type] = algorithm
+
+    #map action_type -> factory to create action objects
+    #expects 
+    def register_action_factory(self, action_type: str, factory: Callable[..., ActionBase]) -> None:
+        #factory signature expected: (nodes, contact_type, prio, cost, params) -> ActionBase
+        self.action_factories[action_type] = factory
+
+    def discover_exposures(self, recorder_snapshot):
+        """
+        Given recorder snapshot dict, select which events the LHD discovers
+        Random based on LHD discovery probability
+        """
+        n_events = recorder_snapshot['event_time'].shape[0]
+        if n_events == 0:
+            return np.empty(0, dtype = int)
+        
+        #bernoulli sample each event
+        mask = self.rng.random(n_events) < self.discovery_prob
+        return np.where(mask)[0]
+
+    def gather_candidates(self, recorder_snapshot, discovered_event_ind):
+        """
+        Returns flattened candidate arrays with parallel arrays:
+        action_types (st array), nodes (int), priority (float), 
+        contact_types (object), costs (float)
+        """
+        
+        #lists to fill
+        action_types_list = []
+        nodes_list = []
+        prios_list = []
+        cts_list = []
+        costs_list = []
+        params_list = []
+
+        #use algorithms to generate action candidates
+        for action_type, algo in self.algorithms.items():
+            out = algo.generate_candidates(recorder_snapshot, self.model, discovered_event_ind) or {}
+            nodes = np.asarray(out.get('nodes', np.empty(0, dtype=np.int32)), dtype=np.int32)
+            prios = np.asarray(out.get('priority', np.ones(nodes.shape[0], dtype=np.float32)), dtype=np.float32)
+
+            #raw cts can be a single str or array of size len(nodes)
+            raw_cts = out.get('contact_types', None)
+            if raw_cts is None:
+                cts = np.array([None] * nodes.shape[0], dtype = object)
+            elif isinstance(raw_cts, (str, bytes)):
+                cts =  np.array([raw_cts] * nodes.shape[0], dtype = object)
+            else:
+                cts = np.asarray(raw_cts, dtype = object)
+                if cts.shape[0] != nodes.shape[0]:
+                    if cts.size == 1:
+                        cts = np.repeat(cts[0], nodes.shape[0]).astype(object)
+                    else:
+                        raise ValueError("contact_types must be scalar or match nodes length")
+            
+            #costs must be a single float or array of size len(nodes)
+            costs = out.get('costs', None)
+            if costs is None:
+                costs = np.array([None] * nodes.shape[0], dtype = np.float32)
+            else:
+                costs = np.asarray(costs, dtype = object)
+                if costs.shape[0] != nodes.shape[0]:
+                    if costs.size == 1:
+                        costs = np.repeat(costs[0], nodes.shape[0]).astype(object)
+                    else:
+                        raise ValueError("costs must be scalar or match nodes length")
+
+            params = out.get('params', None)
+            #for each action type, deduplicate candidates
+            if nodes.size > 0:
+                unique_nodes, inverse = np.unique(nodes, return_inverse = True)
+                best_prios = np.full(unique_nodes.shape[0], -np.inf, dtype = np.float32)
+                best_cts = np.empty(unique_nodes.shape[0], dtype = object)
+                best_costs = np.full(unique_nodes.shape[0], np.inf, dtype = np.float32)
+                best_params = [None] * unique_nodes.shape[0]
+
+                for occ in range(nodes.shape[0]):
+                    uid = inverse[occ]
+                    p = float(prios[occ])
+                    c = float(costs[occ])
+                    #keep highest priority, or lowest cost if tie
+                    if p > best_prios[uid] or (p==best_prios[uid] and c < best_costs[uid]):
+                        best_prios[uid] = p
+                        best_cts[uid] = cts[occ]
+                        best_costs[uid] = c
+                        if params is not None:
+                            #params can be per-occurrance or scalar
+                            try:
+                                best_params[uid] = params[occ]
+                            except Exception:
+                                best_params[uid] = params
+                    
+                #append best occurrences to global lists with action_type label
+                for i, u in enumerate(unique_nodes):
+                    action_types_list.append(action_type)
+                    nodes_list.append(int(u))
+                    prios_list.append(best_prios[i])
+                    cts_list.append(best_cts[i])
+                    costs_list.append(best_costs[i])
+                    params_list.append(best_params[i])
+
+        #if no nodes to gather, return empties
+        if not nodes_list:
+            return(
+                np.empty(0, dtype = object),
+                np.empty(0, dtype = np.int32), 
+                np.empty(0, dtype = np.float32),
+                np.empty(0, dtype = object),
+                np.empty(0, dtype = np.float32), 
+                []
+            )
+
+        #else, gather results and return
+        action_types_arr = np.array(action_types_list, dtype = object)
+        nodes_arr = np.array(nodes_list, dtype = np.int32)
+        prios_arr = np.array(prios_list, dtype = np.float32)
+        contact_types_arr = np.array(cts_list, dtype = object)
+        costs_arr = np.array(costs_list, dtype = np.float32)
+        params_arr = params_list
+
+        return action_types_arr, nodes_arr, prios_arr, contact_types_arr, costs_arr, params_arr
+
+    def schedule_action(self, action: ActionBase, current_time: int, resource_cost: float):
+        """
+        Apply action and schedule tokens for expiry if duration > 0.
+        Registers Action instance for process_expirations to call reversion
+        """
+        #Apply all actions, get a list of actions performed
+        tokens = action.apply(self.model, current_time)
+
+        for t in tokens:
+            if getattr(t, "action_id", None) != action.id:
+                raise ValueError(f"Token.action_id {getattr(t, 'action_id', None)} does not match action.id {action.id}")
+
+        #partition to reversible and nonreversible
+        reversible_tokens = [t for t in tokens if getattr(t, "reversible", True)]
+        nonreversible_tokens = [t for t in tokens if not getattr(t, "reversible", True)]
+
+        #if there are reversible tokens and duration, schedule
+
+
+        #register reversible tokens only, schedule expiry
+        if reversible_tokens and (action.duration and action.duration > 0):
+            expiry_time = int(current_time + action.duration)
+            self.expiry.setdefault(expiry_time, []).extend(reversible_tokens)
+
+            self._active_actions[action.id] = action
+            self._action_token_counts[action.id] = self._action_token_counts.get(action.id, 0) + len(reversible_tokens)
+
+        #if duration > 0, but not reversible, warning as nothing to revert
+        if action.duration and action.duration > 0 and not reversible_tokens:
+            warnings.warn(f"Action {action.id} has duration but produced no reversible tokens, will not be automatically reverted")
+
+        #log metadata
+        self.action_log.append({
+            'time': int(current_time),
+            'action_id': action.id,
+            'action_type': action.action_type,
+            'kind': getattr(action, "kind", action.action_type),
+            'nodes_count': int(getattr(action, "nodes", np.empty(0)).size),
+            'hours_used': float(resource_cost),
+            'duration': int(action.duration),
+            'reversible_tokens': len(reversible_tokens),
+            'nonreversible_tokens': len(nonreversible_tokens)
+        })
+
+    def process_expirations(self, current_time):
+        """
+        Revert ActionTokens scheduled for current_time using action reversion methods, and remove from active actions
+        """
+        tokens_due = self.expiry.pop(int(current_time), [])
+        for token in tokens_due:
+            action = self._active_actions.get(token.action_id)
+            if action is not None:
+                #delegate reversion to action's method
+                try:
+                    action.revert_token(self.model, token)
+                except Exception as exc:
+                    warnings.warn(f"Action.revert_token failed for action {token.action_id}: {exc}")
+
+                #decrement token counters and clean mappings 
+                self._action_token_counts[token.action_id] -= 1
+                if self._action_token_counts[token.action_id] <= 0:
+                    #if no more tokens on this action, remove from active 
+                    del self._action_token_counts[token.action_id]
+                    del self._active_actions[token.action_id]
+            else:
+                warnings.warn(f"No registered action object for token.action_id {token.action_id}")
+
+    def step(self, current_time: int, recorder_snapshot: Dict[str, np.ndarray]):
+        """
+        One step for the LHD where it discovers events, builds candidates, selects calls, and applies interventions
+        """
+
+        #1 expire old interventions
+        self.process_expirations(current_time)
+
+        #2 discover new events
+        discovered_event_ind = self.discover_exposures(recorder_snapshot)
+
+        #3 gather action candidates through algorithms
+        (action_types_arr, nodes_arr, prios_arr, contact_types_arr, costs_arr, params_arr) = self.gather_candidates(recorder_snapshot, discovered_event_ind)
+        if nodes_arr.size == 0:
+            return
+
+        #4 select actions maximizing value/hour (prio / cost)
+        costs_arr = np.maximum(costs_arr, self.min_candidate_cost)
+        value_per_hour = prios_arr/costs_arr
+        order = np.argsort(-value_per_hour)
+
+        #allocate actions by value until hours are exhausted 
+        hours_available = float(self.daily_personhours)
+        hours_spent = 0.0
+        selected_indices = []
+        for ind in order:
+            c = float(costs_arr[ind])
+            if hours_spent + c <= hours_available:
+                hours_spent += c
+                selected_indices.append(ind)
+            else:
+                continue
+
+        #5 group selected actions by action_type, contact_type and schedule
+        grouped = defaultdict(list)
+        grouped_costs = defaultdict(float)
+        grouped_params = defaultdict(list)
+        for ind in selected_indices:
+            atype = action_types_arr[ind]
+            ctype = contact_types_arr[ind]
+            key = (atype, ctype)
+            grouped[key].append(int(nodes_arr[ind]))
+            grouped_costs[key] += float(costs_arr[ind])
+            grouped_params[key].append(params_arr[ind] if params_arr is not None else None)
+
+        #create an action for each group and schedule
+        for (atype, ctype), nodes in grouped.items():
+            factory = self.action_factories.get(atype)
+            if factory is None:
+                #skip if no action factory registered
+                continue
+            #choose params and pass merged dict or None
+            params_list_group = grouped_params[(atype, ctype)]
+            merged_params = None
+            for p in params_list_group:
+                if isinstance(p, dict):
+                    merged_params = merged_params or {}
+                    merged_params.update(p)
+
+            #create action instance 
+            #use sum of costs or average priority for group
+            group_cost = grouped_costs[(atype, ctype)]
+            group_prio = float(np.mean([prios_arr[ind] for ind in selected_indices if action_types_arr[ind] == atype and contact_types_arr[ind] == ctype]))
+            action = factory(np.asarray(nodes, dtype = np.int32), ctype, group_prio, group_cost, merged_params)
+            self.schedule_action(action, current_time, resource_cost = group_cost)
+
+        return
+
+
+#Test run on population N = 2186
 if __name__ == "__main__":
     Keweenaw_contacts = pd.read_parquet("./data/Keweenaw/contacts.parquet")
 
     testModel = NetworkModel(contacts_df = Keweenaw_contacts)
-
-    testModel.initialize_states()
     print("Running Model on Keweenaw County...")
     testModel.simulate()
 
@@ -986,12 +1976,10 @@ if __name__ == "__main__":
                 suffix = f"run_{run+1}", strata = "age")
             testModel.cumulative_incidence_plot(run_number= run, 
                 suffix = f"run_{run+1}", strata = "sex")
+            testModel.cumulative_incidence_plot(run_number= run, 
+                suffix = f"run_{run+1}", strata = "vaccination")
     testModel.cumulative_incidence_spaghetti()
     results = testModel.epi_summary()
-            
-
-
-
 
     
 

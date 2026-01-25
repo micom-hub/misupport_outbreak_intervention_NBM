@@ -1,17 +1,23 @@
-import os
-import pandas as pd
-import json
-import time
-start_time = time.perf_counter()
-
 from scripts.FredFetch import downloadPopData
 from scripts.SynthDataProcessing import synthetic_data_process
 from scripts.network_model import  ModelParameters, DefaultModelParams, NetworkModel  # noqa: F401
 
-#suppressing plot outputs
+import os
+import pandas as pd
+import json
+import time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+
+
+start_time = time.perf_counter()
+
+
+
+#suppressing plot outputs
+
 plt.show = lambda *args, **kwargs: None #monkeypatch it
 
 ############################################
@@ -19,46 +25,53 @@ plt.show = lambda *args, **kwargs: None #monkeypatch it
 ############################################
 
 runParameters: ModelParameters = {
-#Epidemiological Parameters
-    "base_transmission_prob": 0.3,
+#Epdiemic Parameters
+    "base_transmission_prob": .4,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
     "incubation_period_vax": 10.5,
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
-    "vax_efficacy": 0.997,
-    "vax_uptake": 0.7,
+    "vax_efficacy": .997,
+    "vax_uptake": 0.85, 
     "susceptibility_multiplier_under_five": 2.0,
 
-
-#Number of contacts assigned to each individual from each location
+    #Contact Parameters
     "wp_contacts": 10,
     "sch_contacts": 10,
-    "gq_contacts": 20,
-    "cas_contacts": 10,
-
-#Weighting of each contact type
+    "gq_contacts": 10,
+    "cas_contacts": 5,
     "hh_weight": 1,
     "wp_weight": .5,
     "sch_weight": .6,
     "gq_weight": .3,
     "cas_weight": .1,
 
-#Simulation settings
-    "n_runs": 50,
-    "run_name": "driver_run",
-    "overwrite_edge_list": True, #Must be true to render changes in contact structure
+    #LHD Params
+    "mean_compliance": 1,
+    "lhd_employees": 10,
+    "lhd_workday_hrs": 8,
+    "lhd_discovery_prob": .25,
+    "lhd_default_call_duration": 0.1,#in hours
+    "lhd_default_int_reduction": 0.8,
+    "lhd_default_int_duration": 10, #in days
+
+    #Simulation Settings
+    "n_runs": 5,
+    "run_name" : "driver_run",
+    "overwrite_edge_list": False,
     "simulation_duration": 45,
-    "dt": 1,
-    "I0": [22],
+    "I0": [906],
     "seed": 2026,
-    "county": "Alcona", 
+    "county": "Alcona",
     "state": "Michigan",
+    "record_exposure_events": True, #Necessary for LHD Dynamics
     "save_plots": True,
     "save_data_files": True,
     "make_movie": False,
-    "display_plots": True
+    "display_plots": False
+
 }
 
 # ----- Process data for model run -----
