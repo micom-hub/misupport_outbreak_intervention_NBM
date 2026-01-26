@@ -5,7 +5,13 @@ import re
 import warnings
 import numpy as np
 import pandas as pd
-#Create parameter sweeps
+import math
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+
+#Create straightforward parameter sweeps
+#variant for each combination of parameters
 def generate_sweep_variants(
     variants_list: List[Dict[str, Any]],
     sweep_spec: Dict[str, Tuple[float, float, int]],
@@ -249,7 +255,7 @@ def generate_lhs_variants(
     
 
 
-
+#parsing helper
 def _try_parse_value(s: str):
     """Try to interpret string as int, then float, then bool, else return original string."""
     if s is None:
@@ -271,7 +277,7 @@ def _try_parse_value(s: str):
     except Exception:
         return s
 
-
+#get variant parameter values from name
 def _parse_variant_name(variant_name: str, name_sep: str = "__") -> Tuple[str, Dict[str, Any]]:
     """
     Parse variant_name like "Base__param1=1__param2=0.5" into:
@@ -293,6 +299,7 @@ def _parse_variant_name(variant_name: str, name_sep: str = "__") -> Tuple[str, D
     return base, params
 
 
+#Aggregate variant results from sweeps
 def aggregate_variant_results(
     variant_results: List[Dict[str, Any]],
     *,
@@ -424,6 +431,7 @@ def aggregate_variant_results(
 
     return overall_df, combined_summary
 
+#Extract time series data from models
 def disease_over_time(
     variant_results: List[Dict[str, Any]],
     *,
@@ -610,3 +618,312 @@ def disease_over_time(
             return prevalence_long, cumulative_long
         else:
             return prevalence_df, cumulative_df
+
+def plot_epi_series(
+    df_long: pd.DataFrame,
+    type: str = "prevalence",
+    spaghetti: bool = False,
+    frac: bool = True,
+    population: float | None = None,
+    fixed_axis: bool = True,
+    main_title: str | None = None,
+    outbreak_threshold: Optional[float] = None,
+    outbreak_label_fmt: str | None = None,
+    outbreak_show_N_in_title: bool = True,
+    time_col: str = "time",
+    value_col: str | None = None,
+    run_col: str = "run_number",
+    variant_col: str = "variant_name",
+    facet_col: str = "base_variant",
+    collapse_func: str = "mean",
+    ncols: int = 3,
+    spaghetti_color: str = "#00274C",
+    spaghetti_alpha: float = 0.22,
+    mean_line_color: str = "#00274C",
+    mean_line_width: float = 2.2,
+    median_color: str = "#DB130D",
+    median_width: float = 2.8,
+    ci50_color: str = "#00283B",
+    ci90_color: str = "#0584FA",
+    ci95_color: str = "#8CC6FD",
+    band_alpha: float = 0.8,
+    figsize_per_facet: tuple[float, float] = (5.2, 3.6),
+):
+    """
+    Plot prevalence/incidence series from a long-format DataFrame.
+
+    Improvements from prior version:
+    - Correct grid indexing so facets map to subplot positions robustly.
+    - Optional two-row layout when outbreak_threshold is provided: top row = All Runs, bottom row = Outbreak Runs.
+    - Row labels ("All Runs", "Outbreak Runs...") placed in the left margin, closer to plots.
+    - "Number of Runs: N" label placed under each subplot, avoiding overlap with x-axis label.
+    """
+    type = type.lower().strip()
+    if type not in {"prevalence", "incidence"}:
+        raise ValueError('type must be "prevalence" or "incidence"')
+
+    if (not frac) and (population is None):
+        raise ValueError("population (scalar) is required when frac=False")
+
+    # infer value_col when not provided
+    if value_col is None:
+        if type == "prevalence":
+            if "prevalence" not in df_long.columns:
+                raise ValueError('Expected a "prevalence" column for type="prevalence"')
+            value_col = "prevalence"
+        else:
+            if not frac:
+                if "cumulative_incidence" not in df_long.columns and "cumulative_cases" not in df_long.columns:
+                    raise ValueError('frac=False requires either "cumulative_incidence" or "cumulative_cases" column')
+                value_col = "cumulative_incidence" if "cumulative_incidence" in df_long.columns else "cumulative_cases"
+            else:
+                if "incidence" in df_long.columns:
+                    value_col = "incidence"
+                elif "cumulative_incidence" in df_long.columns:
+                    value_col = "cumulative_incidence"
+                else:
+                    raise ValueError('Expected "incidence" or "cumulative_incidence" for type="incidence"')
+
+    # required columns
+    for c in (time_col, value_col, run_col, variant_col):
+        if c not in df_long.columns:
+            raise ValueError(f"Missing required column: {c}")
+
+    # facet list (base variants)
+    facets = pd.Series(df_long[facet_col].dropna().unique()).sort_values().tolist() if facet_col in df_long.columns else [None]
+    n_facets = len(facets)
+
+    # outbreak_threshold handling -> two-row layout if requested
+    create_two_rows = outbreak_threshold is not None
+    if create_two_rows:
+        ncols_eff = n_facets if n_facets > 0 else 1
+        nrows_eff = 2
+    else:
+        ncols_eff = min(ncols, n_facets) if n_facets > 0 else 1
+        nrows_eff = int(np.ceil(n_facets / ncols_eff)) if n_facets > 0 else 1
+
+    # create subplots grid
+    fig, axes = plt.subplots(nrows_eff, ncols_eff,
+                             figsize=(figsize_per_facet[0] * ncols_eff, figsize_per_facet[1] * nrows_eff),
+                             squeeze=False)
+    axes = np.array(axes).reshape(nrows_eff, ncols_eff)
+
+    # axis labels
+    x_label = "Day" if time_col.lower() in {"day", "t", "time"} else time_col
+    is_cum = ("cumulative" in str(value_col).lower())
+    if type == "prevalence":
+        y_label = "Prevalence" if frac else "Infected (count)"
+    else:
+        y_label = "Cumulative cases" if not frac else ("Cumulative incidence" if is_cum else "Incidence (new infections / day)")
+
+    # auto main title
+    if main_title is None:
+        if type == "prevalence":
+            main_title = "Prevalence over time" if frac else "Number infected over time"
+        else:
+            if not frac:
+                main_title = "Cumulative cases over time"
+            else:
+                main_title = "Cumulative incidence over time" if is_cum else "Incidence over time"
+
+    # Pre-compute final cases per (variant, run) if outbreak filter requested
+    final_df = None
+    outbreak_pairs = set()
+    if create_two_rows:
+        if "cumulative_cases" in df_long.columns:
+            final_df = df_long.groupby([variant_col, run_col], as_index=False)["cumulative_cases"].max().rename(columns={"cumulative_cases": "final_cases"})
+        elif "cumulative_incidence" in df_long.columns:
+            if outbreak_threshold > 1 and population is None:
+                raise ValueError("outbreak_threshold > 1 requires passing population to convert fractions to counts")
+            scale = population if outbreak_threshold > 1 else 1.0
+            tmp = df_long.groupby([variant_col, run_col], as_index=False)["cumulative_incidence"].max()
+            tmp["final_cases"] = tmp["cumulative_incidence"] * scale
+            final_df = tmp[[variant_col, run_col, "final_cases"]]
+        else:
+            raise ValueError("outbreak_threshold requires 'cumulative_cases' or 'cumulative_incidence' in df_long")
+
+        outbreak_pairs = set(tuple(x) for x in final_df.loc[final_df["final_cases"] > float(outbreak_threshold), [variant_col, run_col]].to_records(index=False))
+
+    # track N counts and per-row maxima
+    top_counts = []
+    bot_counts = []
+    top_row_max = 0.0
+    bottom_row_max = 0.0
+
+    # helper to plot on an axis and return local_max and total_runs
+    def _plot_for_facet(ax, sub_all_df):
+        """
+        Plot agg on provided axis, return (local_max, total_runs)
+        """
+        sub = sub_all_df[[time_col, value_col, variant_col, run_col]].dropna()
+        sub["_plot_value"] = pd.to_numeric(sub[value_col], errors="coerce")
+        sub = sub.dropna(subset=["_plot_value"])
+        if not frac:
+            sub["_plot_value"] = sub["_plot_value"] * float(population)
+
+        if sub.empty:
+            return 0.0, 0
+
+        agg = sub.groupby([variant_col, run_col, time_col], as_index=False)["_plot_value"].agg(collapse_func).sort_values([variant_col, run_col, time_col])
+
+        if spaghetti:
+            for _, g in agg.groupby([variant_col, run_col], sort=False):
+                ax.plot(g[time_col].to_numpy(), g["_plot_value"].to_numpy(), color=spaghetti_color, alpha=spaghetti_alpha, linewidth=0.7)
+            mean_series = agg.groupby(time_col)["_plot_value"].mean().sort_index()
+            if not mean_series.empty:
+                ax.plot(mean_series.index.to_numpy(), mean_series.to_numpy(), color=mean_line_color, linewidth=mean_line_width)
+            local_max = agg["_plot_value"].max() if not agg.empty else 0.0
+        else:
+            qs = agg.groupby(time_col)["_plot_value"].quantile([0.025, 0.05, 0.25, 0.50, 0.75, 0.95, 0.975]).unstack().sort_index()
+            if not qs.empty:
+                x = qs.index.to_numpy()
+                ax.fill_between(x, qs[0.025], qs[0.975], color=ci95_color, alpha=band_alpha, linewidth=0)
+                ax.fill_between(x, qs[0.05], qs[0.95], color=ci90_color, alpha=band_alpha, linewidth=0)
+                ax.fill_between(x, qs[0.25], qs[0.75], color=ci50_color, alpha=band_alpha, linewidth=0)
+                ax.plot(x, qs[0.50], color=median_color, linewidth=median_width)
+                # safest local max across quantiles
+                local_max = float(np.nanmax(qs.to_numpy()))
+            else:
+                local_max = 0.0
+
+        total_runs = sub_all_df[[variant_col, run_col]].drop_duplicates().shape[0]
+        return float(local_max), int(total_runs)
+
+    # Main plotting loop: map each facet index -> grid position(s)
+    for i, facet in enumerate(facets):
+        if create_two_rows:
+            # top axis at column i
+            row_top, col_top = 0, i
+            row_bot, col_bot = 1, i
+        else:
+            row_top, col_top = divmod(i, ncols_eff)
+            row_bot, col_bot = None, None  # no bottom row
+
+        ax_top = axes[row_top, col_top]
+        if facet is None:
+            sub_all = df_long.copy()
+            facet_title = None
+        else:
+            sub_all = df_long[df_long[facet_col] == facet].copy()
+            facet_title = f"{facet}"
+
+        # Plot top
+        local_max_top, total_runs = _plot_for_facet(ax_top, sub_all)
+        top_counts.append(total_runs)
+        top_row_max = max(top_row_max, local_max_top)
+        ax_top.set_title(facet_title)
+        ax_top.set_xlabel(x_label)
+        ax_top.set_ylabel(y_label)
+        ax_top.grid(True, alpha=0.25)
+        ax_top.set_ylim(bottom=0)
+
+        # Plot bottom if outbreak layout
+        if create_two_rows:
+            ax_bot = axes[row_bot, col_bot]
+            # build sub_bot with outbreak pairs limited to this facet
+            if outbreak_pairs:
+                pairs_df = pd.DataFrame(list(outbreak_pairs), columns=[variant_col, run_col])
+                facet_variants = sub_all[variant_col].drop_duplicates() if not sub_all.empty else pd.Series(dtype=object)
+                valid_pairs = pairs_df[pairs_df[variant_col].isin(facet_variants)]
+                if not valid_pairs.empty:
+                    sub_bot = sub_all.merge(valid_pairs, on=[variant_col, run_col], how="inner")
+                else:
+                    sub_bot = pd.DataFrame(columns=sub_all.columns)
+            else:
+                sub_bot = pd.DataFrame(columns=sub_all.columns)
+
+            local_max_bot, outbreak_count = _plot_for_facet(ax_bot, sub_bot) if not sub_bot.empty else (0.0, 0)
+            bot_counts.append(outbreak_count)
+            bottom_row_max = max(bottom_row_max, local_max_bot)
+            ax_bot.set_xlabel(x_label)
+            ax_bot.set_ylabel(y_label)
+            ax_bot.grid(True, alpha=0.25)
+            ax_bot.set_ylim(bottom=0)
+
+    # Turn off any unused axes (non-two-row case)
+    if not create_two_rows:
+        total_slots = nrows_eff * ncols_eff
+        for slot in range(n_facets, total_slots):
+            r = slot // ncols_eff
+            c = slot % ncols_eff
+            axes[r, c].axis("off")
+
+    # Layout and margins: leave space for left row label and N labels below plots
+    left_margin = 0.11 if create_two_rows else 0.07   # keep smaller left margin than before
+    bottom_margin = 0.12
+    top_rect = 0.90 if not spaghetti else 0.94
+    fig.tight_layout(rect=[left_margin, bottom_margin, 1.0, top_rect])
+
+    # Row-wise fixed axes if requested
+    if create_two_rows and fixed_axis:
+        if top_row_max > 0:
+            ymax_top = top_row_max * 1.05
+            for c in range(ncols_eff):
+                axes[0, c].set_ylim(0, ymax_top)
+        if bottom_row_max > 0:
+            ymax_bot = bottom_row_max * 1.05
+            for c in range(ncols_eff):
+                axes[1, c].set_ylim(0, ymax_bot)
+    elif not create_two_rows and fixed_axis:
+        all_max = 0.0
+        for ax in axes.ravel():
+            lines = ax.get_lines()
+            if lines:
+                for ln in lines:
+                    ydata = ln.get_ydata()
+                    if len(ydata):
+                        all_max = max(all_max, np.nanmax(ydata))
+        if all_max > 0:
+            ymax = all_max * 1.05
+            for ax in axes.ravel():
+                ax.set_ylim(0, ymax)
+
+    # Add left-side row labels and 'Number of Runs' below each subplot.
+    # Place row-labels slightly inside the left_margin (closer to axes than before)
+    left_x = max(0.005, left_margin - 0.025)  # slightly left of left_margin
+    if create_two_rows:
+        # compute vertical centers of top and bottom rows
+        top_centers = [axes[0, c].get_position() for c in range(ncols_eff)]
+        bottom_centers = [axes[1, c].get_position() for c in range(ncols_eff)]
+        top_row_center = float(np.mean([p.y0 + p.height / 2.0 for p in top_centers]))
+        bottom_row_center = float(np.mean([p.y0 + p.height / 2.0 for p in bottom_centers]))
+        fig.text(left_x, top_row_center, "All Runs", va="center", ha="center", rotation="vertical", fontsize=12, fontweight="bold")
+        thr_text = outbreak_label_fmt if outbreak_label_fmt is not None else f"Outbreak Runs: Threshold (Infections > {outbreak_threshold})"
+        fig.text(left_x, bottom_row_center, thr_text, va="center", ha="center", rotation="vertical", fontsize=11)
+
+        # per-subplot N labels below each axis
+        for c in range(ncols_eff):
+            p_top = axes[0, c].get_position()
+            x_center = p_top.x0 + p_top.width / 2.0
+            y_label_pos = p_top.y0 - 0.055
+            fig.text(x_center, y_label_pos, f"Number of Runs: {top_counts[c]}", ha="center", va="top", fontsize=9)
+
+            p_bot = axes[1, c].get_position()
+            x_center2 = p_bot.x0 + p_bot.width / 2.0
+            y_label_pos2 = p_bot.y0 - 0.055
+            fig.text(x_center2, y_label_pos2, f"Number of Runs: {bot_counts[c]}", ha="center", va="top", fontsize=9)
+    else:
+        # single-/multi-row grid: place N under each used axis
+        for i, facet in enumerate(facets):
+            r, c = divmod(i, ncols_eff)
+            p = axes[r, c].get_position()
+            x_center = p.x0 + p.width / 2.0
+            y_label_pos = p.y0 - 0.055
+            sub_all = df_long if facet is None else df_long[df_long[facet_col] == facet].copy()
+            total_runs = sub_all[[variant_col, run_col]].drop_duplicates().shape[0]
+            fig.text(x_center, y_label_pos, f"Number of Runs: {total_runs}", ha="center", va="top", fontsize=9)
+
+    # Legend for fan plots (median + bands)
+    if not spaghetti:
+        handles = [
+            Line2D([0], [0], color=median_color, lw=median_width, label="Median"),
+            Patch(facecolor=ci50_color, alpha=band_alpha, label="50% band"),
+            Patch(facecolor=ci90_color, alpha=band_alpha, label="90% band"),
+            Patch(facecolor=ci95_color, alpha=band_alpha, label="95% band"),
+        ]
+        fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.985), ncol=4, frameon=False)
+
+    # Centered suptitle
+    fig.suptitle(main_title, x=0.5, y=0.995, ha="center", fontsize=14, fontweight="bold")
+
+    return fig, axes
