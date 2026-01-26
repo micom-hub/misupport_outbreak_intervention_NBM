@@ -62,7 +62,7 @@ def prepare_contacts(county: str, state: str, data_dir: str = "data", overwrite_
     #delete zip file
     if os.path.isfile(countyfolder) and countyfolder.lower().endswith(".zip"):
         try:
-            contacts_df = synthetic_data_process()
+            contacts_df = synthetic_data_process(county)
         except Exception as e:
             raise RuntimeError(f"Failed to process synthetic data from zip for {county_name}: {e}")from e
         
@@ -88,6 +88,7 @@ def prepare_contacts(county: str, state: str, data_dir: str = "data", overwrite_
                 raise RuntimeError(f"Could not find contacts.parquet in {countyfolder} and synthetic_data_process failed: {e}") from e
 
     raise RuntimeError(f"Unhandled data entry for county {county_name}: {countyfolder}")
+
 
 def run_single_model(
     contacts_df: pd.DataFrame,
@@ -129,7 +130,7 @@ def run_single_model(
         return model
        
 
-   
+
 def run_variants(
     contacts_df: pd.DataFrame,
     base_params: Dict,
