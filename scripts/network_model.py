@@ -797,8 +797,7 @@ class NetworkModel:
                     continue
                 ever_exposed[np.array(exp, dtype=int)] = True
             total_infections = int(ever_exposed.sum())
-            overall_attack_rate = (total_infections / float(N))
-
+            
             #build at-risk mask, anyone who ever had infectious neighbor
             at_risk = np.zeros(N, dtype = bool)
             neighbor_map = self.neighbor_map
