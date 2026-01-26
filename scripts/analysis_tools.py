@@ -126,7 +126,129 @@ Returns:
 
     return out_variants
 
+
+#create LHS parameter sweeps
 #For a model run with a parameter sweep, reaggregate variants by parameter sweep
+def generate_lhs_variants(
+    variants_list: List[Dict[str, Any]],
+    param_ranges: Dict[str, Tuple[float, float]],
+    n: int,
+    *,
+    name_sep: str = "__",
+    value_formatter: Optional[Callable[[Any], str]] = None,
+    int_keys: Optional[Iterable[str]] = None,
+    seed: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """
+    Generate variant dicts using Latin-Hypercube-style sampling with n x variants replicates
+
+    Args:
+      variants_list: list of base variant dicts (same format as generate_sweep_variants input).
+      param_ranges: dict mapping param_name -> (min_value, max_value).
+      n: number of LHS samples per parameter (same N for all parameters).
+      name_sep: separator used when building generated variant names (default "__").
+      value_formatter: optional callable(value)->str used for name formatting.
+      int_keys: iterable of parameter names that should be cast to int in overrides.
+      seed: optional RNG seed for reproducibility.
+
+    Returns:
+      List[Dict[str, Any]]: flattened list of generated variant dicts (each has updated 'param_overrides' and 'name').
+    """
+ # Type validations
+    if not isinstance(variants_list, list):
+        raise TypeError("variants_list must be a list of variant dicts")
+    if not isinstance(param_ranges, dict):
+        raise TypeError("param_ranges must be a dict mapping param -> (min, max)")
+    n = int(n)
+    if n <= 0:
+        raise ValueError("n must be >= 1")
+
+    if not param_ranges:
+        return copy.deepcopy(variants_list)
+
+# Preserve param order from param_ranges dict
+    sweep_keys = list(param_ranges.keys())
+
+    # Print total variants that will be generated
+    total_out = n * max(1, len(variants_list))
+    print(f"Generating {total_out} variants ({len(variants_list)} base variant(s) x {n} LHS samples each)")
+
+    rng = np.random.default_rng(seed)
+
+
+    #build a jittered strata baseline [0, 1) then permute to param range
+    base = (np.arange(n) + rng.random(n)) / n  # shape (n,)
+
+    value_arrays: Dict[str, np.ndarray] = {}
+    for k in sweep_keys:
+        mn, mx = param_ranges[k]
+        mn = float(mn)
+        mx = float(mx)
+        if mn == mx:
+            vals = np.full(n, mn, dtype=float)
+        else:
+            perm = rng.permutation(n)
+            u = base[perm]
+            vals = mn + u * (mx - mn)
+        value_arrays[k] = vals
+
+    #format names
+    if value_formatter is None:
+        def _fmt_val(x):
+            try:
+                if isinstance(x, (int, np.integer)):
+                    return str(int(x))
+                f = float(x)
+                return f"{f:.6g}"
+            except Exception:
+                return str(x)
+        fmt = _fmt_val
+    else:
+        fmt = value_formatter
+
+    int_keys = set(int_keys) if int_keys is not None else set()
+
+    #use values to produce variants
+    out_variants: List[Dict[str, Any]] = []
+    for base_variant in variants_list:
+        if not isinstance(base_variant, dict):
+            raise TypeError("Each element of variants_list must be a dict")
+        base_copy = copy.deepcopy(base_variant)
+        base_name = str(base_copy.get("name", "variant"))
+        base_param_overrides = copy.deepcopy(base_copy.get("param_overrides", {}) or {})
+
+        for i in range(n):
+            new_variant = copy.deepcopy(base_copy)
+            new_param_overrides = copy.deepcopy(base_param_overrides)
+            sweep_values_for_naming: Dict[str, Any] = {}
+
+            for k in sweep_keys:
+                raw_val = value_arrays[k][i]
+                if k in int_keys:
+                    val = int(round(float(raw_val)))
+                else:
+                    # convert numpy scalars to python types
+                    if isinstance(raw_val, (np.floating, np.float32, np.float64)):
+                        val = float(raw_val)
+                    elif isinstance(raw_val, (np.integer, np.int32, np.int64)):
+                        val = int(raw_val)
+                    else:
+                        val = raw_val
+                new_param_overrides[k] = val
+                sweep_values_for_naming[k] = val
+
+            new_variant["param_overrides"] = new_param_overrides
+
+            # build descriptive name using param order from param_ranges
+            suffix = name_sep.join([f"{k}={fmt(sweep_values_for_naming[k])}" for k in sweep_keys])
+            new_variant["name"] = base_name + name_sep + suffix if suffix else base_name
+
+            out_variants.append(new_variant)
+
+    return out_variants
+    
+
+
 
 def _try_parse_value(s: str):
     """Try to interpret string as int, then float, then bool, else return original string."""

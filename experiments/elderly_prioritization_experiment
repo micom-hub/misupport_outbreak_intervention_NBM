@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt # noqa: F401
 
 from scripts.model_driver import prepare_contacts, run_variants, run_single_model  # noqa: F401
 from scripts.network_model import DefaultModelParams, EqualPriority, RandomPriority, PrioritizeElders, CallIndividualsAction # noqa: F401
-from scripts.analysis_tools import generate_sweep_variants, aggregate_variant_results
+from scripts.analysis_tools import generate_sweep_variants, generate_lhs_variants, aggregate_variant_results
 
 # --------------------------
 #       INTRODUCTION
@@ -119,8 +119,8 @@ VARIANTS = [
     }
 ]
 print("Generating Parameter Sweep Variants")
-sweep_params = {"base_transmission_prob":(0,1,3)}
-VARIANTS = generate_sweep_variants(VARIANTS, sweep_params)
+sweep_params = {"base_transmission_prob":(0,1)}
+VARIANTS = generate_lhs_variants(VARIANTS, sweep_params, n = 2)
 
 
 
@@ -169,3 +169,7 @@ df, summary =  aggregate_variant_results(
 df.to_csv(os.path.join(RUN_DIR, "dataframe.csv"))
 summary.to_csv(os.path.join(RUN_DIR, "aggregated_experiment_results.csv"))
 
+#add outbreak flag, defined as 3+ confirmed cases 
+#major outbreak defined as 15+ cases
+df['outbreak'] = (df['total_infections'] >= 3)
+df['major_outbreak'] = (df['total_infections'] >= 10)

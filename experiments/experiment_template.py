@@ -113,6 +113,9 @@ VARIANTS = [
 ]
 
 #Optionally, construct a parameter sweep
+#generate_lhs_variants() is also available for import
+#for sweep params, give a dict of parameters: {param: (min, max, n_values)}
+#for LHS params, a dict of parameters: {param: (min, max)}, and n argument for func
 sweep_params = {}
 VARIANTS = generate_sweep_variants(VARIANTS, sweep_params)
 
