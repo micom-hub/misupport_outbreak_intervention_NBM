@@ -73,7 +73,7 @@ class ModelParameters(TypedDict):
     run_name: str #prefix for model run
     overwrite_edge_list: bool #Try to reload previously generated edge list for this run to save time
     simulation_duration: int  # days
-    I0: List[int]
+    I0: List[int] #1 random int if none
     seed: int
     county: str #county to run on
     state: str #state to run on
@@ -122,7 +122,7 @@ DefaultModelParams: ModelParameters = {
     "run_name" : "test_run",
     "overwrite_edge_list": True,
     "simulation_duration": 45,
-    "I0": [1000],
+    "I0": [1000], #randomized if None
     "seed": 2026,
     "county": "Keweenaw",
     "state": "Michigan",
@@ -352,7 +352,8 @@ class NetworkModel:
         self.new_exposures = []
         self.new_infections = []
 
-        initial_infectious = self.params["I0"]
+        #pick random I0 if none provided
+        initial_infectious = self.params.get("I0", [self.rng.randint(0,self.N)])
         self.state[initial_infectious] = 2
         self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)
 
