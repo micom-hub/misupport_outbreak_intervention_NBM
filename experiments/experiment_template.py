@@ -25,7 +25,7 @@ from scripts.model_driver import prepare_contacts, run_variants, run_single_mode
 from scripts.network_model import DefaultModelParams, \
 EqualPriority, RandomPriority, PrioritizeElders, \
 CallIndividualsAction  # noqa: F401
-from scripts.analysis_tools import generate_sweep_variants, aggregate_variant_results
+from scripts.analysis_tools import *
 
 # --------------------------
 #       INTRODUCTION

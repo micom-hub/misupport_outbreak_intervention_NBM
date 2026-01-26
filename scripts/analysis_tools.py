@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, Any, Callable, Iterable
+from typing import Dict, List, Optional, Tuple, Any, Callable, Iterable, Union
 import itertools
 import copy
 import re
@@ -410,11 +410,203 @@ def aggregate_variant_results(
 
             combined_summary = grouped.reset_index()
 
+            #Organize overall_df
+            order = [
+            'base_variant', 'variant_name', 'run_number',
+            'time', 'action_id', 'action_type', 'kind',
+            'nodes_count', 'hours_used', 'duration',
+            'reversible_tokens', 'nonreversible_tokens'
+        ]
+
+        cols = [c for c in order if c in overall_df.columns] + [c for c in overall_df.columns if c not in order]
+        overall_df = overall_df[cols]
+
 
     return overall_df, combined_summary
 
+def disease_over_time(
+    variant_results: List[Dict[str, Any]],
+    *,
+    name_sep: str = "__",
+    return_cumulative_incidence: bool = False,
+    return_long: bool = False,
+    day_prefix: str = "day_",
+    pad_with_last: bool = True
+) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
+    """
+    Build prevalence time-series (and optional cumulative-incidence series) per model run. Return in long format or not
 
+    Args:
+        variant_results: list of dicts each containing:
+            - 'variant_name' (str)
+            - 'model' (NetworkModel instance, already simulated)
+        name_sep: separator used in variant names (default "__")
+        return_cumulative_incidence: if True, return a second DataFrame with cumulative incidence
+        return_long: if True, return long (tidy) DataFrame(s) with one row per run per timepoint
+        day_prefix: prefix for timestep columns in wide format (default "day_")
+        pad_with_last: whether to pad shorter series with last observed value (True) or NaN (False)
 
+    Returns:
+        If return_cumulative_incidence is False:
+            - wide (or long if return_long=True) prevalence DataFrame
+        Else:
+            - tuple (prevalence_df, cumulative_incidence_df) in the chosen orientation (wide/long)
+    """
+    rows = []
+    cum_rows = []
+    max_t = 0
+    parsed_param_keys = set()
 
-    
-    
+    # First pass: determine max length and collect param keys
+    for entry in variant_results:
+        vname = entry.get("variant_name") or entry.get("name")
+        model = entry.get("model", None)
+        if model is None:
+            continue
+        base_name, params = _parse_variant_name(vname, name_sep=name_sep)
+        parsed_param_keys.update(params.keys())
+
+        # determine longest saved timeseries length among runs of this model
+        for run in range(model.n_runs):
+            states = model.all_states_over_time[run]
+            if states is None:
+                continue
+            L = len(states)
+            if L > max_t:
+                max_t = L
+
+    # prepare day column names
+    day_cols = [f"{day_prefix}{t}" for t in range(max_t)]
+
+    # Second pass: build per-run records
+    for entry in variant_results:
+        vname = entry.get("variant_name") or entry.get("name")
+        model = entry.get("model", None)
+        if model is None:
+            continue
+
+        base_name, params = _parse_variant_name(vname, name_sep=name_sep)
+
+        for run in range(model.n_runs):
+            # Meta
+            row = {
+                "variant_name": vname,
+                "base_variant": base_name,
+                "run_number": int(run)
+            }
+            # attach parsed sweep params
+            for k in sorted(parsed_param_keys):
+                row[k] = params.get(k, None)
+
+            # compute prevalence series
+            states_over_time = model.all_states_over_time[run]
+            if states_over_time is None or len(states_over_time) == 0:
+                prevalence = np.full(max_t, np.nan)
+            else:
+                N = model.N
+                preval_list = [len(state[2]) / float(N) if N > 0 else np.nan for state in states_over_time]
+                if len(preval_list) < max_t:
+                    if pad_with_last:
+                        last_val = preval_list[-1] if preval_list else np.nan
+                        preval_list = preval_list + [last_val] * (max_t - len(preval_list))
+                    else:
+                        preval_list = preval_list + [np.nan] * (max_t - len(preval_list))
+                else:
+                    preval_list = preval_list[:max_t]
+                prevalence = np.array(preval_list, dtype=float)
+
+            # cumulative incidence if requested
+            if return_cumulative_incidence:
+                exposures = model.all_new_exposures[run]
+                # treat exposures[0] empty as imported seeds
+                if len(exposures) > 0 and (hasattr(exposures[0], "__len__") and len(exposures[0]) == 0):
+                    exposures = list(exposures)
+                    exposures[0] = np.array(model.params.get("I0", []), dtype=int)
+                ever = np.zeros(model.N, dtype=bool)
+                cumul_list = []
+                for t in range(len(exposures)):
+                    new = np.array(exposures[t], dtype=int) if len(exposures[t]) > 0 else np.array([], dtype=int)
+                    if new.size:
+                        ever[new] = True
+                    cumul_list.append(ever.sum() / float(model.N) if model.N > 0 else np.nan)
+                if len(cumul_list) < max_t:
+                    if pad_with_last:
+                        last_c = cumul_list[-1] if cumul_list else 0.0
+                        cumul_list = cumul_list + [last_c] * (max_t - len(cumul_list))
+                    else:
+                        cumul_list = cumul_list + [np.nan] * (max_t - len(cumul_list))
+                else:
+                    cumul_list = cumul_list[:max_t]
+                cumulative = np.array(cumul_list, dtype=float)
+            else:
+                cumulative = None
+
+            # attach day columns (wide)
+            for idx, col in enumerate(day_cols):
+                row[col] = float(prevalence[idx]) if prevalence is not None else np.nan
+
+            rows.append(row)
+
+            if return_cumulative_incidence:
+                crow = {
+                    "variant_name": vname,
+                    "base_variant": base_name,
+                    "run_number": int(run)
+                }
+                for k in sorted(parsed_param_keys):
+                    crow[k] = params.get(k, None)
+                for idx, col in enumerate(day_cols):
+                    crow[col] = float(cumulative[idx]) if cumulative is not None else np.nan
+                cum_rows.append(crow)
+
+    # Build wide DataFrames
+    meta_cols = ["variant_name", "base_variant", "run_number"]
+    param_cols = sorted(parsed_param_keys)
+    wide_cols = meta_cols + param_cols + day_cols
+
+    if rows:
+        prevalence_df = pd.DataFrame(rows)
+        # ensure all expected columns exist (fill missing with NaN)
+        for c in wide_cols:
+            if c not in prevalence_df.columns:
+                prevalence_df[c] = np.nan
+        prevalence_df = prevalence_df[wide_cols]
+    else:
+        prevalence_df = pd.DataFrame(columns=wide_cols)
+
+    if not return_cumulative_incidence:
+        # possibly return long
+        if return_long:
+            id_vars = meta_cols + param_cols
+            long = prevalence_df.melt(id_vars=id_vars, value_vars=day_cols, var_name="time", value_name="prevalence")
+            # convert time to integer index (strip prefix)
+            long["time"] = long["time"].str[len(day_prefix):].astype(int)
+            # reorder columns
+            long = long[id_vars + ["time", "prevalence"]]
+            return long
+        else:
+            return prevalence_df
+    else:
+        # build cumulative wide
+        if cum_rows:
+            cumulative_df = pd.DataFrame(cum_rows)
+            for c in wide_cols:
+                if c not in cumulative_df.columns:
+                    cumulative_df[c] = np.nan
+            cumulative_df = cumulative_df[wide_cols]
+        else:
+            cumulative_df = pd.DataFrame(columns=wide_cols)
+
+        if return_long:
+            id_vars = meta_cols + param_cols
+            prevalence_long = prevalence_df.melt(id_vars=id_vars, value_vars=day_cols, var_name="time", value_name="prevalence")
+            prevalence_long["time"] = prevalence_long["time"].str[len(day_prefix):].astype(int)
+            prevalence_long = prevalence_long[id_vars + ["time", "prevalence"]]
+
+            cumulative_long = cumulative_df.melt(id_vars=id_vars, value_vars=day_cols, var_name="time", value_name="cumulative_incidence")
+            cumulative_long["time"] = cumulative_long["time"].str[len(day_prefix):].astype(int)
+            cumulative_long = cumulative_long[id_vars + ["time", "cumulative_incidence"]]
+
+            return prevalence_long, cumulative_long
+        else:
+            return prevalence_df, cumulative_df
