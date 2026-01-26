@@ -38,6 +38,7 @@ class ModelParameters(TypedDict):
     infectious_period: float
     incubation_period_vax: float
     infectious_period_vax: float
+    conferred_immunity_duration: float
     gamma_alpha: float #alpha value for gamma distribution of inc/inf periods
 
     relative_infectiousness_vax: float
@@ -233,7 +234,8 @@ class NetworkModel:
             self.county, 
             (self.params["run_name"]+ "_edgeList.parquet")
             )):
-            print(f"Edge list found for {self.params['run_name']}, reading...")
+            if not hasattr(self, "printed_edge_list"):
+                print(f"Edge list found for {self.params['run_name']}, reading...")
             self.edge_list = pd.read_parquet(os.path.join(os.getcwd(), 
             "data", 
             self.county, 
@@ -702,7 +704,6 @@ class NetworkModel:
     def simulate(self):
 
         for run in range(self.n_runs):
-            print(f"Running model run {run + 1} of {self.n_runs}...")
             self._initialize_states()
             #store vaccination status for run
             self.all_vax_status[run] = self.is_vaccinated.copy()
@@ -802,7 +803,7 @@ class NetworkModel:
                 if len(exp) == 0:
                     continue
                 ever_exposed[np.array(exp, dtype=int)] = True
-            total_infections = int(ever_exposed.sum())
+            total_infections = int(ever_exposed.sum()) #total_infections does not include imported infections
 
             #build at-risk mask, anyone who ever had infectious neighbor
             at_risk = np.zeros(N, dtype = bool)

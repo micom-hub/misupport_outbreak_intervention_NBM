@@ -21,10 +21,11 @@ import pandas as pd # noqa: F401
 import matplotlib # noqa: F401
 import matplotlib.pyplot as plt # noqa: F401
 
-from scripts.model_driver import prepare_contacts, run_variants, generate_sweep_variants, run_single_model  # noqa: F401
+from scripts.model_driver import prepare_contacts, run_variants, run_single_model  # noqa: F401
 from scripts.network_model import DefaultModelParams, \
 EqualPriority, RandomPriority, PrioritizeElders, \
 CallIndividualsAction  # noqa: F401
+from scripts.analysis_tools import generate_sweep_variants, aggregate_variant_results
 
 # --------------------------
 #       INTRODUCTION
@@ -149,3 +150,10 @@ print("Run finished!")
 #          RESULTS
 # --------------------------
 #statistical analysis, plotting, creating results files, etc.
+print("Aggregating run results...")
+df, summary =  aggregate_variant_results(
+    variant_results,
+    name_sep = "__",
+    aggregate_sweeps = True,
+    aggregated_summary = True
+    )
