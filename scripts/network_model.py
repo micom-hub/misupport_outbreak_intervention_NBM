@@ -83,7 +83,7 @@ class ModelParameters(TypedDict):
 
 DefaultModelParams: ModelParameters = {
     #Epdiemic Parameters
-    "base_transmission_prob": .4,
+    "base_transmission_prob": .8,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
@@ -115,7 +115,7 @@ DefaultModelParams: ModelParameters = {
     "lhd_default_int_duration": 10, #in days
 
     #Simulation Settings
-    "n_runs": 5,
+    "n_runs": 50,
     "run_name" : "test_run",
     "overwrite_edge_list": False,
     "simulation_duration": 45,
@@ -184,6 +184,8 @@ class NetworkModel:
         self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
         self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
 
+        self.all_vax_status = [None] * self.n_runs
+        self.all_lhd_action_logs = [None] * self.n_runs
 
         #Instantiate recorder and Local Health Department
         self.recorder_template = ExposureEventRecorder(init_event_cap = 1024, init_node_cap = 4096)
@@ -368,6 +370,9 @@ class NetworkModel:
         #Reset LHD intervention Multipliers
         self.in_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
         self.out_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
+
+        if hasattr(self, "lhd"):
+            self.lhd.reset_for_run()
        
         
     def name_to_ind(self, g: ig.Graph, names):
@@ -693,6 +698,8 @@ class NetworkModel:
         for run in range(self.n_runs):
             print(f"Running model run {run + 1} of {self.n_runs}...")
             self._initialize_states()
+            #store vaccination status for run
+            self.all_vax_status[run] = self.is_vaccinated.copy()
 
             t = 0
             while t < self.Tmax:
@@ -732,76 +739,253 @@ class NetworkModel:
                     self.stochastic_dieout = True
                     break
                 
-
+            #save per run data
             self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
             self.all_new_exposures[run] = [ne.copy() if hasattr(ne, "copy") else list(ne) for ne in self.new_exposures]
             self.all_stochastic_dieout[run] = self.stochastic_dieout
             self.all_end_days[run] = self.simulation_end_day
+            self.all_lhd_action_logs[run] = list(self.lhd.action_log)
+
 
     def epi_outcomes(self) -> pd.DataFrame:
         """
-        Computes summary statistics for. each run on the model
-
-        Returns a pandas DataFrame with a row for each run, and columns:
-        - Total_infections
-        - epidemic_duration
-        - peak_infections
-        - peak_prevalence
-        - time_of_peak_infection
-        - percent_unvax_infected
-        - percent_vax_infected
-        - stochastic_dieout
+    Calculates epidemic outcomes with a row for each run, and columns:
+    - total_infections
+    attack_rate
+    -attack_rate_by_age_{bins}
+    - attack_rate_vaccinated, attack_rate_unvaccinated
+    - peak_incidence 
+    - peak_prevalence 
+    - time_of_peak_infection
+    -secondary attack rate by contact type (sar_{ct})
+    - effective_reproduction_number (mean R)
+    - number_of_calls
+    - people_called
+    avg_days_quarantine_imposed
+    - stochastic_dieout
+    - epidemic_duration
         """
-        N = self.N
-        try: 
-            vax_status = self.is_vaccinated
-        except AttributeError:
-            raise ValueError("Model states not initialized; run at least one simulation before computing summary statistics")
+        #supress numpy division warnings
+        #TODO look into whether this affects validity
+        warnings.filterwarnings("ignore", category = RuntimeWarning, module = "numpy.*")
+
+
         
+        N = self.N
+
+        #require simulations have been run
+        if any(x is None for x in self.all_new_exposures):
+            raise ValueError("Model runs not completed; run simulate() before computing outcomes")
+
         summary = []
+
+        #age bins 
+        age_bins = [0, 6, 19, 35, 65,200]
+        age_labels = ["0-5", "6-18", "19-34", "35-64", "65+"]
+
         for run in range(self.n_runs):
             exposures = self.all_new_exposures[run]
             states_over_time = self.all_states_over_time[run]
             stochastic_dieout = bool(self.all_stochastic_dieout[run])
-            epidemic_time = self.all_end_days[run]
+            epidemic_time = int(self.all_end_days[run])
+            snapshots = self.exposure_event_log[run]
 
-            #Determine unique infections
-            ever_exposed = np.zeros(N, dtype = bool)
+            #determine ever exposed
+            ever_exposed = np.zeros(N, dtype=bool)
             for exp in exposures:
-                ever_exposed[np.array(exp, dtype = int)] = True
+                if len(exp) == 0:
+                    continue
+                ever_exposed[np.array(exp, dtype=int)] = True
             total_infections = int(ever_exposed.sum())
+            overall_attack_rate = (total_infections / float(N))
 
-            #Peak infections and timing
-            infectious_counts = [len(state[2]) for state in states_over_time]
-            if infectious_counts:
-                peak_infectious = int(max(infectious_counts))
-                time_of_peak = int(np.argmax(infectious_counts))
+            #build at-risk mask, anyone who ever had infectious neighbor
+            at_risk = np.zeros(N, dtype = bool)
+            neighbor_map = self.neighbor_map
+            if states_over_time:
+                for state in states_over_time:
+                    infectious_nodes = state[2]
+                    if not infectious_nodes:
+                        continue
+                    for src in infectious_nodes:
+                        for nbr_tuple in neighbor_map.get(int(src), []):
+                            nbr = int(nbr_tuple[0])
+                            at_risk[nbr] = True
+            n_at_risk = int(at_risk.sum())
+            infected_at_risk = int((ever_exposed & at_risk).sum())
+            attack_rate_at_risk = (infected_at_risk / float(n_at_risk)) if n_at_risk > 0 else np.nan
+
+            #Age-stratified attack rates among individuals ever at-risk
+            ages = self.ages
+            attack_by_age = {}
+            age_members = {}
+            for i, label in enumerate(age_labels):
+                a_min, a_max = age_bins[i], age_bins[i+1]
+                members = np.where((ages >= a_min) & (ages < a_max))[0]
+                age_members[label] = members
+                if members.size == 0:
+                    attack_by_age[label] = np.nan
+                else:
+                    at_risk_mask = at_risk[members]
+                    n_risk_members = int(at_risk_mask.sum())
+                    if n_risk_members == 0:
+                        attack_by_age[label] = np.nan
+                    else:
+                        infected_risk_members = int(ever_exposed[members][at_risk_mask].sum())
+                        attack_by_age[label] = infected_risk_members / float(n_risk_members)
+
+            #Vaccination stratified attack rates among at-risk
+            #For vaccinated AT START of outbreak
+            vax_status = np.asarray(self.all_vax_status[run], dtype = bool)
+            ar_vax_mask = at_risk & vax_status
+            ar_unvax_mask = at_risk & (~vax_status)
+            n_at_risk_vax = int(ar_vax_mask.sum())
+            n_at_risk_unvax = int(ar_unvax_mask.sum())
+            attack_rate_vax = (ever_exposed[ar_vax_mask].sum() / n_at_risk_vax) if n_at_risk_vax > 9 else np.nan
+            attack_rate_unvax = (ever_exposed[ar_unvax_mask].sum() / n_at_risk_unvax) if n_at_risk_unvax > 9 else np.nan
+
+            #Peak incidence, with day 0 including imported inf.
+            daily = [np.array(e, dtype=int) for e in exposures]
+            if len(daily) > 0 and daily[0].size == 0:
+                daily[0] = np.array(self.params.get("I0", []), dtype=int)
+            daily_counts = [int(arr.size) for arr in daily] if len(daily) else []
+            peak_incidence = int(max(daily_counts)) if daily_counts else 0
+            time_of_peak_incidence = int(np.argmax(daily_counts)) if daily_counts else None
+
+            #Peak prevalence + time
+            peak_infections = 0
+            time_of_peak = None
+            for t, state in enumerate(states_over_time):
+                I_nodes = np.array(state[2], dtype = int)
+                nI = int(I_nodes.size)
+                if nI > peak_infections:
+                    peak_infections = nI
+                    peak_prev = (nI / float(N))
+                    time_of_peak = int(t)
+
+            #Cumulative incidence overall and stratified
+            cumulative_incidence_by_age = {}
+            for label in age_labels:
+                members = age_members[label]
+                if members.size == 0:
+                    cumulative_incidence_by_age[label] = np.nan
+                else:
+                    cumulative_incidence_by_age[label] = float(ever_exposed[members].sum()) / members.size
+
+            if vax_status is not None:
+                n_vax = int(vax_status.sum())
+                n_unvax = int((~vax_status).sum())
+                cumulative_incidence_vax = (float(ever_exposed[vax_status].sum()) / n_vax) if n_vax > 0 else np.nan
+                cumulative_incidence_unvax = (float(ever_exposed[~vax_status].sum()) / n_unvax) if n_unvax > 0 else np.nan
             else:
-                peak_infectious = 0
-                time_of_peak = None
+                cumulative_incidence_vax = np.nan
+                cumulative_incidence_unvax = np.nan
 
-            peak_prevalence = peak_infectious / N
 
-            #Vaccination-stratified infection rates
-            n_unvax = int((~vax_status).sum())
-            n_vax = int(vax_status.sum())
+            #Secondary Attack Rate by contact type and Effective R0
+            #SAR - proportion of contacts infected
+            #Mean, sd, and median effective R0
+            total_exposed_by_ct = {ct: 0 for ct in self.contact_types}
+            total_infected_by_ct = {ct: 0 for ct in self.contact_types}
+            assigned = np.zeros(N, dtype=bool)  #attribute infection to src
+            source_secondary = defaultdict(int)
+            unique_sources = set()
 
-            pct_unvax_infected = (ever_exposed[~vax_status].sum() / n_unvax) if n_unvax else np.nan
-            pct_vax_infected = (ever_exposed[vax_status].sum() / n_vax) if n_vax else np.nan
+            for snap in snapshots:
+                n_events = int(snap["event_time"].shape[0])
+                if n_events == 0:
+                    continue
+                for ei in range(n_events):
+                    src = int(snap["event_source"][ei])
+                    unique_sources.add(src)
+                    ct_id = int(snap["event_type"][ei])
+                    ct_name = self.id_to_ct.get(ct_id, None)
+                    s = int(snap["event_nodes_start"][ei])
+                    L = int(snap["event_nodes_len"][ei])
+                    if L == 0:
+                        continue
+                    nodes = snap["nodes"][s : s + L]
+                    infs = snap["infections"][s : s + L]
+                    ct_name = ct_name if ct_name is not None else "unknown"
+                    total_exposed_by_ct[ct_name] = total_exposed_by_ct.get(ct_name, 0) + int(L)
+                    for j in range(L):
+                        node = int(nodes[j])
+                        if bool(infs[j]) and not assigned[node]:
+                            assigned[node] = True
+                            total_infected_by_ct[ct_name] = total_infected_by_ct.get(ct_name, 0) + 1
+                            source_secondary[src] += 1
 
-            summary.append({
-                "run_number": run,
-                "total_infections": total_infections,
-                "epidemic_duration": epidemic_time,
-                "peak_infections": peak_infectious,
-                "peak_prevalence": peak_prevalence,
-                "time_of_peak_infection": time_of_peak,
-                "pct_unvax_infected": pct_unvax_infected,
-                "pct_vax_infected": pct_vax_infected,
-                "stochastic_dieout": stochastic_dieout
-            })
+            sar_by_ct = {}
+            for ct in self.contact_types:
+                exposed_ct = total_exposed_by_ct.get(ct, 0)
+                infected_ct = total_infected_by_ct.get(ct, 0)
+                sar_by_ct[ct] = (infected_ct / float(exposed_ct)) if exposed_ct > 0 else np.nan
+            
+            total_secondary = sum(source_secondary.values())
+            n_sources = len(unique_sources)
+            eff_R = (total_secondary / float(n_sources)) if n_sources > 0 else np.nan
+            eff_R_std = np.std(list(source_secondary.values())) if n_sources > 0 else np.nan
+            eff_R_median = np.median(list(source_secondary.values())) if  n_sources > 0 else np.nan
+
+            #LHD Metrics - quarantine and calls
+            lhd_log = self.all_lhd_action_logs[run]
+            call_entries = [e for e in lhd_log if e.get("action_type") == "call"] 
+            number_of_call_actions = len(call_entries)
+            people_called = sum(int(e.get("nodes_count", 0)) for e in call_entries)
+            if people_called > 0:
+                total_person_days = sum(int(e.get("duration", 0)) * int(e.get("nodes_count", 0)) for e in call_entries)
+                avg_days_quarantine = total_person_days / float(people_called)
+
+            else:
+                avg_days_quarantine = np.nan
+
+                # Assemble row
+            row = {
+                "run_number": int(run),
+                "total_infections": int(total_infections),
+                "n_at_risk": int(n_at_risk),
+                "infected_at_risk": int(infected_at_risk),
+                "attack_rate_at_risk": float(attack_rate_at_risk) if not np.isnan(attack_rate_at_risk) else np.nan,
+                "peak_incidence": int(peak_incidence),
+                "time_of_peak_incidence": time_of_peak_incidence,
+                "peak_infections": int(peak_infections),
+                "time_of_peak_infections": time_of_peak,
+                "peak_prevalence_overall": float(peak_prev),
+                "attack_rate_vaccinated_at_risk": float(attack_rate_vax) if not np.isnan(attack_rate_vax) else np.nan,
+                "attack_rate_unvaccinated_at_risk": float(attack_rate_unvax) if not np.isnan(attack_rate_unvax) else np.nan,
+                "effective_reproduction_number": float(eff_R) if not np.isnan(eff_R) else np.nan,
+                "effective_reproduction_number_std": float(eff_R_std) if not np.isnan(eff_R_std) else np.nan,
+                "effective_reproduction_number_median": float(eff_R_median) if not np.isnan(eff_R_median) else np.nan,
+                "number_of_call_actions": int(number_of_call_actions),
+                "people_called": int(people_called),
+                "avg_days_quarantine_imposed": float(avg_days_quarantine) if not np.isnan(avg_days_quarantine) else np.nan,
+                "stochastic_dieout": stochastic_dieout,
+                "epidemic_duration": int(epidemic_time),
+            }
+
+            # attach age-specific attack rates among at-risk and cumulative incidence by age
+            for label in age_labels:
+                row[f"attack_rate_age_{label}_at_risk"] = attack_by_age[label]
+                row[f"cumulative_incidence_age_{label}"] = cumulative_incidence_by_age[label]
+
+            # vaccination cumulative incidence
+            row["cumulative_incidence_vaccinated"] = cumulative_incidence_vax
+            row["cumulative_incidence_unvaccinated"] = cumulative_incidence_unvax
+
+            # attach SAR per contact type and raw exposed/infected counts
+            for ct in self.contact_types:
+                row[f"sar_{ct}"] = sar_by_ct.get(ct, np.nan)
+                row[f"exposed_{ct}"] = int(total_exposed_by_ct.get(ct, 0))
+                row[f"infected_{ct}"] = int(total_infected_by_ct.get(ct, 0))
+
+            summary.append(row)
+
+
+        #re-enable warnings
+        warnings.filterwarnings("default", category = RuntimeWarning, module = "numpy.*")
         return pd.DataFrame(summary)
 
+        
     def epi_curve(self, run_number = 0, suffix: str = None):
         """
         Build an epi curve for a given run of the model
@@ -2017,6 +2201,14 @@ class LocalHealthDepartment:
             self.schedule_action(action, current_time, resource_cost = group_cost)
 
         return
+    def reset_for_run(self):
+        """
+        Reset LHD state for new model run 
+        """
+        self.expiry = {}
+        self.action_log = []
+        self._active_actions = {}
+        self._action_token_counts = {}
 
 
 #Test run on population N = 2186
