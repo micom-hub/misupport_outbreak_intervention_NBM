@@ -21,8 +21,10 @@ import pandas as pd # noqa: F401
 import matplotlib # noqa: F401
 import matplotlib.pyplot as plt # noqa: F401
 
-from scripts.model_driver import prepare_contacts, run_variants, run_single_model  # noqa: F401
-from scripts.network_model import DefaultModelParams, EqualPriority, RandomPriority, PrioritizeElders  # noqa: F401
+from scripts.model_driver import prepare_contacts, run_variants, generate_sweep_variants, run_single_model  # noqa: F401
+from scripts.network_model import DefaultModelParams, \
+EqualPriority, RandomPriority, PrioritizeElders, \
+CallIndividualsAction  # noqa: F401
 
 # --------------------------
 #       INTRODUCTION
@@ -46,8 +48,8 @@ BASE_PARAMS.update({
     "record_exposure_events": True,
     "save_data_files": True,
     "overwrite_edge_list": True,
-    "county": "Keweenaw",
-    "I0": [50]
+    "county": "Alcona",
+    "I0": [906]
 })
 
 #Results root path for this experiment
@@ -108,6 +110,10 @@ VARIANTS = [
         "save_exposures": False,
     }
 ]
+
+#Optionally, construct a parameter sweep
+sweep_params = {}
+VARIANTS = generate_sweep_variants(VARIANTS, sweep_params)
 
 
 #Save run configuration next to results

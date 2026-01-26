@@ -44,6 +44,7 @@ class ModelParameters(TypedDict):
     vax_efficacy: float
     vax_uptake: float
     susceptibility_multiplier_under_five: float #increase in susceptibility if age <= 5
+    susceptibility_multiplier_elderly: float #susc mult age >= 65
 
     # Population Params
     hh_contacts: int
@@ -92,7 +93,8 @@ DefaultModelParams: ModelParameters = {
     "relative_infectiousness_vax": 0.05,
     "vax_efficacy": .997,
     "vax_uptake": 0.85, 
-    "susceptibility_multiplier_under_five": 2.0,
+    "susceptibility_multiplier_under_five": 1,
+    "susceptibility_multiplier_elderly": 1,
 
     #Contact Parameters
     "wp_contacts": 10,
@@ -117,7 +119,7 @@ DefaultModelParams: ModelParameters = {
     #Simulation Settings
     "n_runs": 50,
     "run_name" : "test_run",
-    "overwrite_edge_list": False,
+    "overwrite_edge_list": True,
     "simulation_duration": 45,
     "I0": [906, 450, 34],
     "seed": 2026,
@@ -576,6 +578,7 @@ class NetworkModel:
         base_prob = self.params['base_transmission_prob']
         vax_efficacy = self.params['vax_efficacy']
         susc_mult_under5 = self.params['susceptibility_multiplier_under_five']
+        susc_mult_elderly = self.params["susceptibility_multiplier_elderly"]
         rel_inf_vax = self.params['relative_infectiousness_vax']
 
         #local aliases
@@ -618,8 +621,11 @@ class NetworkModel:
 
                 #age weighted
                 under5 = (ages[sus_neighbors] <= 5)
+                elderly = (ages[sus_neighbors] >= 65)
                 if susc_mult_under5 != 1.0:
                     prob[under5] = prob[under5] * susc_mult_under5
+                if susc_mult_elderly != 1.0:
+                    prob[elderly] = prob[elderly]*susc_mult_elderly
                 
                 prob = np.clip(prob, 0.0, 1.0)
 
@@ -797,7 +803,7 @@ class NetworkModel:
                     continue
                 ever_exposed[np.array(exp, dtype=int)] = True
             total_infections = int(ever_exposed.sum())
-            
+
             #build at-risk mask, anyone who ever had infectious neighbor
             at_risk = np.zeros(N, dtype = bool)
             neighbor_map = self.neighbor_map

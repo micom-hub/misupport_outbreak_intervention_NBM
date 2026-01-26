@@ -33,18 +33,18 @@ BASE_PARAMS = DefaultModelParams.copy()
 BASE_PARAMS.update({
     "n_runs": 100,
     "base_transmission_prob": 1,
-    "simulation_duration": 100,
+    "simulation_duration": 20,
     "seed": 2026,
     "record_exposure_events": True,
+    "overwrite_edge_list": False,
     "save_data_files": True,
-    "overwrite_edge_list": True,
-    "county": "Keweenaw",
+    "county": "Alcona",
     "I0": [50]
 })
 
 #Results root path for this experiment
 EXPERIMENT_DIR = os.path.join("experiments", "results", EXPERIMENT_NAME)
-RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%dT%H%M%SEST")
+RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%dT%H%MEST")
 RUN_DIR = os.path.join(EXPERIMENT_DIR, RUN_TIMESTAMP)
 os.makedirs(RUN_DIR, exist_ok = True)
 
@@ -95,7 +95,7 @@ with open(os.path.join(RUN_DIR, "experiment_config.json"), "w") as f:
         "description": DESCRIPTION,
         "base_params": BASE_PARAMS,
         "variants": VARIANTS,
-        "timestamp": datetime.datetime.utcnow().isoformat() 
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat() 
     }, f, indent = 4, default = str)
 
 
