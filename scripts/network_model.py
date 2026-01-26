@@ -353,7 +353,7 @@ class NetworkModel:
         self.new_infections = []
 
         #pick random I0 if none provided
-        initial_infectious = self.params.get("I0", [self.rng.randint(0,self.N)])
+        initial_infectious = self.params.get("I0", [self.rng.integers(0,self.N)])
         self.state[initial_infectious] = 2
         self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)
 
