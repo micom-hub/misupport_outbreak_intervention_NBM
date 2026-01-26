@@ -122,7 +122,7 @@ DefaultModelParams: ModelParameters = {
     "run_name" : "test_run",
     "overwrite_edge_list": True,
     "simulation_duration": 45,
-    "I0": [906, 450, 34],
+    "I0": [1000],
     "seed": 2026,
     "county": "Keweenaw",
     "state": "Michigan",
@@ -234,8 +234,6 @@ class NetworkModel:
             self.county, 
             (self.params["run_name"]+ "_edgeList.parquet")
             )):
-            if not hasattr(self, "printed_edge_list"):
-                print(f"Edge list found for {self.params['run_name']}, reading...")
             self.edge_list = pd.read_parquet(os.path.join(os.getcwd(), 
             "data", 
             self.county, 

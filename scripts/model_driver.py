@@ -18,11 +18,13 @@ from copy import deepcopy
 from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
+import re
 import warnings
 
 from scripts.synth_data_processing import synthetic_data_process
 from scripts.fred_fetch import downloadPopData
 from scripts.network_model import NetworkModel
+from scripts.analysis_tools import _try_parse_value, _parse_variant_name
 
 def prepare_contacts(county: str, state: str, data_dir: str = "data", overwrite_files: bool = True, save_files: bool = False):
     """
@@ -153,10 +155,11 @@ def run_variants(
     base_seed = int(base_seed) if base_seed is not None else int(base_params.get("seed", 0))
 
     variant_results = []
+    combined_action_log = []
+
     for v_ind, variant in enumerate(variants):
         name = variant.get("name", f"variant_{v_ind}")
-        var_dir = os.path.join(run_dir, f"{name}")
-        os.makedirs(var_dir, exist_ok = True)
+        # do not create a variant subfolder; keep results at run_dir
 
         #update seed for each variant, update param changes
         if base_seed is not None:
@@ -174,29 +177,80 @@ def run_variants(
             algorithm_map = variant.get("algorithm_map"),
             factory_map = variant.get("factory_map"),
             seed = seed,
-            results_dir = var_dir,
-            save_exposures = variant.get("save_exposures", False)
+            results_dir = None, #for variant runs, don't write per-variant file
+            save_exposures = False
         )
         if model is None:
             raise RuntimeError("run_single_model() did not return a NetworkModel instance")
 
-        #save summary and action log
-        try: 
-            summary = model.epi_outcomes()
-            summary.to_csv(os.path.join(var_dir, "run_summary.csv"), index = False)
-        except Exception as e:
-            warnings.warn(f"Could not save summary for variant {name}: {e}")
+        #optionally save exposures per-variant to run_dir
+        if variant.get("save_exposures", False):
+            try:
+                safe_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", name)
+                exposure_fname = os.path.join(run_dir, f"exposure_event_log_{safe_name}.npz")
+                np.savez_compressed(exposure_fname, *model.exposure_event_log)
+            except Exception as e:
+                warnings.warn(f"Could not save exposures for variant {name}: {e}")
 
-        try:
-            with open(os.path.join(var_dir, "action_log.json"), "w") as f:
-                json.dump(model.lhd.action_log, f, default= str, indent = 4)
-        except Exception as e:
-            warnings.warn(f"Could not save action log: {e}")
-        
+        #append model results variant_results
         variant_results.append({
             "variant_name": name,
-            "variant_dir": var_dir,
             "model": model
         })
 
+        #Collect LHD action logs recorded per run in model.all_lhd_action_logs
+        base_variant, swept_params = _parse_variant_name(name, name_sep="__")
+        all_lhd_logs = getattr(model, "all_lhd_action_logs", []) or []
+        for run_number, run_log in enumerate(all_lhd_logs):
+            if not run_log:
+                continue
+            for action_entry in run_log:
+                # copy and annotate with metadata
+                try:
+                    entry = dict(action_entry)
+                except Exception:
+                    entry = {"raw": str(action_entry)}
+                entry["variant_name"] = name
+                entry["base_variant"] = base_variant
+                entry["run_number"] = int(run_number)
+                # attach sweep params (if any) as top-level fields
+                for k, v in swept_params.items():
+                    entry[k] = v
+                combined_action_log.append(entry)
+
+        print(f"Run complete for Variant '{name}")
+
+    #Save combined action log to run_dir/action_log.json
+    logs = combined_action_log
+
+    if logs:
+        df_actions = pd.json_normalize(logs, sep = '_')
+
+        #make lists strings to keep csv normal
+        def _stringify_cell(x):
+            if isinstance(x, (list, dict, np.ndarray)):
+                return json.dumps(x, default = str)
+            return x
+        
+        for col in df_actions.columns:
+            if df_actions[col].apply(lambda v: isinstance(v, (list, dict, np.ndarray))).any():
+                df_actions[col] = df_actions[col].apply(_stringify_cell)
+            
+        order = [
+            'base_variant', 'variant_name', 'run_number',
+            'time', 'action_id', 'action_type', 'kind',
+            'nodes_count', 'hours_used', 'duration',
+            'reversible_tokens', 'nonreversible_tokens'
+        ]
+
+        cols = [c for c in order if c in df_actions.columns] + [c for c in df_actions.columns if c not in order]
+        df_actions = df_actions[cols]
+
+        csv_path = os.path.join(run_dir, "action_log.csv")
+        df_actions.to_csv(csv_path, index = False, encoding = 'utf-8')
+
+    else:
+        empty_cols = ['variant_name','base_variant','run_number','time','action_id','action_type','kind','nodes_count','hours_used','duration','reversible_tokens','nonreversible_tokens']
+        pd.DataFrame(columns=empty_cols).to_csv(os.path.join(run_dir, "action_log.csv"), index=False)
+   
     return variant_results

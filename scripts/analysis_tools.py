@@ -1,9 +1,10 @@
 from typing import Dict, List, Optional, Tuple, Any, Callable, Iterable
 import itertools
 import copy
+import re
 import warnings
 import numpy as np
-
+import pandas as pd
 #Create parameter sweeps
 def generate_sweep_variants(
     variants_list: List[Dict[str, Any]],
@@ -11,7 +12,6 @@ def generate_sweep_variants(
     *,
     interior_points: bool = True,
     include_base: bool = False,
-    group_by_base: bool = False,
     name_sep: str = "__",
     value_formatter: Optional[Callable[[Any], str]] = None,
     int_keys: Optional[Iterable[str]] = None,
@@ -27,7 +27,6 @@ Args:
     - if interior_points = True, n is number of points between min and max
         else, n is the total number of points
     -include_base: if True, each base variant is included and unchanged
-    -group_by_base if True returns a dict mapping base_name -> [variants], otherwise returns a list of variants
     - name_sep: string to join name pieces (base + param=value)
     - value_formatter: optional callable to format values
     -int_keys: optional iterable of parameter names to be cast to int
@@ -127,4 +126,173 @@ Returns:
 
     return out_variants
 
-#For a model run with a parameter sweep, reaggregate variants by 
+#For a model run with a parameter sweep, reaggregate variants by parameter sweep
+
+def _try_parse_value(s: str):
+    """Try to interpret string as int, then float, then bool, else return original string."""
+    if s is None:
+        return None
+    s = str(s)
+    low = s.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if re.fullmatch(r"-?\d+", s):
+        try:
+            return int(s)
+        except Exception:
+            pass
+    try:
+        f = float(s)
+        return f
+    except Exception:
+        return s
+
+
+def _parse_variant_name(variant_name: str, name_sep: str = "__") -> Tuple[str, Dict[str, Any]]:
+    """
+    Parse variant_name like "Base__param1=1__param2=0.5" into:
+      base_name = "Base"
+      params = {"param1": 1, "param2": 0.5}
+    """
+    if variant_name is None:
+        return "", {}
+    parts = str(variant_name).split(name_sep)
+    base = parts[0]
+    params: Dict[str, Any] = {}
+    for part in parts[1:]:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            params[k] = _try_parse_value(v)
+        elif part:
+            # bare token -> True
+            params[part] = True
+    return base, params
+
+
+def aggregate_variant_results(
+    variant_results: List[Dict[str, Any]],
+    *,
+    name_sep: str = "__",
+    aggregate_sweeps: bool = True,
+    aggregated_summary: bool = True,
+    numeric_aggs: Optional[List[str]] = None
+) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+    """
+    Build a per-run DataFrame for all variants and optionally an aggregated summary.
+
+    Args:
+        variant_results: list of dicts with keys:
+            - 'variant_name' (str) or 'name'
+            - 'model' (NetworkModel instance, already simulated)
+        name_sep: separator used in variant names for swept parameters (default "__")
+        aggregate_sweeps: if True, parsed sweep parameters are exposed as columns in overall_df
+        aggregated_summary: if True, return a second DataFrame with aggregated summary stats
+        aggregated_action_log: if True, returns a third Dataframe with aggregated action log
+        numeric_aggs: list of aggregation functions to compute for numeric columns (default: ['mean','std','median','min','max'])
+
+    Returns:
+        (overall_df, combined_summary_or_None)
+        - overall_df: pandas DataFrame with one row per model run, augmented with:
+            ['variant_name', 'variant_dir', 'base_variant', <sweep_param_cols...>, <epi_outcomes columns...>]
+        - combined_summary: if aggregated_summary True, a DataFrame of aggregated statistics grouped by:
+            * if aggregate_sweeps and sweep params present: ['base_variant'] + sorted(sweep_param_keys)
+            * else: ['variant_name']
+          combined_summary contains columns like '<metric>_mean', '<metric>_std', etc., plus 'n_runs'.
+          If aggregated_summary is False, this return value is None.
+
+    Notes:
+        - If a model or model.epi_outcomes() fails, that variant will be skipped with a warning.
+        - The function always returns overall_df (may be empty).
+    """
+    if numeric_aggs is None:
+        numeric_aggs = ["mean", "std", "median", "min", "max"]
+
+    per_run_frames: List[pd.DataFrame] = []
+    all_param_keys = set()
+
+    for i, entry in enumerate(variant_results):
+        vname = entry.get("variant_name") or entry.get("name") or f"variant_{i}"
+        model = entry.get("model", None)
+
+        base_name, params = _parse_variant_name(vname, name_sep=name_sep)
+        all_param_keys.update(params.keys())
+
+        if model is None:
+            warnings.warn(f"aggregate_variant_results: missing model for variant '{vname}' - skipping")
+            continue
+
+        # call epi_outcomes for model
+        try:
+            epi_df = model.epi_outcomes()
+            if not isinstance(epi_df, pd.DataFrame):
+                epi_df = pd.DataFrame(epi_df)
+        except Exception as exc:
+            warnings.warn(f"aggregate_variant_results: epi_outcomes() failed for '{vname}': {exc}")
+            epi_df = pd.DataFrame()
+
+        # augment per-run table with variant metadata and sweep params
+        pr = epi_df.copy()
+        pr["variant_name"] = vname
+        pr["base_variant"] = base_name
+        # attach parsed sweep parameters as columns (same value for every run row of this model)
+        for k, val in params.items():
+            pr[k] = val
+
+        per_run_frames.append(pr)
+
+    # overall per-run DataFrame
+    if per_run_frames:
+        overall_df = pd.concat(per_run_frames, ignore_index=True)
+    else:
+        # create an empty overall_df with canonical columns so callers can rely on column existence
+        cols = ["variant_name", "variant_dir", "base_variant"] + sorted(all_param_keys)
+        overall_df = pd.DataFrame(columns=cols)
+
+    # Optionally build aggregated summary
+    combined_summary: Optional[pd.DataFrame] = None
+    if aggregated_summary:
+        # determine grouping columns
+        sweep_keys = sorted(list(all_param_keys)) if aggregate_sweeps else []
+        if aggregate_sweeps and sweep_keys:
+            group_by_cols = ["base_variant"] + sweep_keys
+        else:
+            # no sweep parameters detected or aggregate_sweeps False -> group per variant_name
+            group_by_cols = ["variant_name"]
+
+        # Ensure the grouping columns exist in overall_df
+        for g in group_by_cols:
+            if g not in overall_df.columns:
+                overall_df[g] = np.nan
+
+        # numeric columns to aggregate (exclude group_by columns)
+        numeric_cols = overall_df.select_dtypes(include=[np.number]).columns.tolist()
+        exclude_from_aggregation = {"run_number"}
+        exclude_set = set(group_by_cols) | exclude_from_aggregation
+        numeric_cols_to_agg = [c for c in numeric_cols if c not in exclude_set]
+
+        if overall_df.empty or not numeric_cols_to_agg:
+            # Return an empty aggregated DataFrame with group_by columns + a 'n_runs' column
+            combined_summary = pd.DataFrame(columns=group_by_cols + ["n_runs"])
+        else:
+            # perform groupby aggregation
+            grouped = overall_df.groupby(group_by_cols)[numeric_cols_to_agg].agg(numeric_aggs)
+
+            # flatten multiindex columns -> "metric_agg"
+            grouped.columns = [f"{metric}_{agg}" for metric, agg in grouped.columns.to_flat_index()]
+
+            # add n_runs (group size)
+            counts = overall_df.groupby(group_by_cols).size().rename("n_runs")
+            grouped = grouped.join(counts)
+
+            combined_summary = grouped.reset_index()
+
+
+    return overall_df, combined_summary
+
+
+
+
+    
+    
