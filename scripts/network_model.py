@@ -125,7 +125,7 @@ DefaultModelParams: ModelParameters = {
     "run_name" : "test_run",
     "overwrite_edge_list": True,
     "simulation_duration": 45,
-    "I0": [1000], #randomized if None
+    "I0": None, #randomized if None
     "seed": 2026,
     "county": "Keweenaw",
     "state": "Michigan",
@@ -364,7 +364,10 @@ class NetworkModel:
         self.new_infections = []
 
         #pick random I0 if none provided
-        initial_infectious = self.params.get("I0", [self.rng.integers(0,self.N)])
+        initial_infectious = self.params.get("I0", None)
+        if not initial_infectious:
+            initial_infectious = [self.rng.integers(0,self.N)]
+            self.params["I0"] = initial_infectious
         self.state[initial_infectious] = 2
         self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)
 
