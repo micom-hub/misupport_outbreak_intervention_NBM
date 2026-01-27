@@ -8,3 +8,6 @@ results
 results/
 *.prof
 *.lprof
+analyses
+analyses/*
+experiments/elderly_prioritization_experiment.py
