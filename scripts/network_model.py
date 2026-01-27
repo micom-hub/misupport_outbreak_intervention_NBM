@@ -38,7 +38,8 @@ class ModelParameters(TypedDict):
     infectious_period: float
     incubation_period_vax: float
     infectious_period_vax: float
-    conferred_immunity_duration: float
+    conferred_immunity_duration: Optional[float]
+    lasting_partial_immunity: Optional[float]
     gamma_alpha: float #alpha value for gamma distribution of inc/inf periods
 
     relative_infectiousness_vax: float
@@ -92,6 +93,8 @@ DefaultModelParams: ModelParameters = {
     "incubation_period_vax": 10.5,
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
+    "conferred_immunity_duration": None, #duration where one is completely immune post-infection
+    "lasting_partial_immunity": None, #0-1, permanent reduced sus
     "vax_efficacy": .997,
     "vax_uptake": 0.85, 
     "susceptibility_multiplier_under_five": 1,
@@ -142,6 +145,7 @@ class NetworkModel:
     contacts_df, 
     params: ModelParameters = DefaultModelParams,
     *,
+    edge_list: Optional[pd.DataFrame] = None,
     rng = None,
     seed: Optional[int] = None,
     results_folder: Optional[str] = None,
@@ -163,6 +167,7 @@ class NetworkModel:
         self.contacts_df = contacts_df
         self.N = int(self.contacts_df.shape[0])
         self.Tmax = int(self.params.get("simulation_duration", 100))
+        
 
         #choose RNG: explicit rng > seed arg > params['seed] 
         if rng is not None:
@@ -177,6 +182,8 @@ class NetworkModel:
         self.county = self.params.get("county", "")
         self.n_runs = int(self.params.get("n_runs", 1))
 
+        #edge_list can be passed by driver
+        self.external_edge_list = edge_list 
         #One-time computation of network structures
         self._compute_network_structures()
 
@@ -227,25 +234,29 @@ class NetworkModel:
         - layout node names
         -layout name to ind
         """
-        #Create edge list
-        if (not self.params["overwrite_edge_list"]) and os.path.isfile(
-            os.path.join(os.getcwd(), 
-            "data", 
-            self.county, 
-            (self.params["run_name"]+ "_edgeList.parquet")
-            )):
-            self.edge_list = pd.read_parquet(os.path.join(os.getcwd(), 
-            "data", 
-            self.county, 
-            (self.params["run_name"]+ "_edgeList.parquet")
-            ))
+        #If the driver has supplied an edge list, use it directly
+        if getattr(self, "external_edge_list", None) is not None:
+            self.edge_list = self.external_edge_list.copy()
         else:
-            self.edge_list = build_edge_list(
-                contacts_df = self.contacts_df,
-                params = self.params, 
-                rng = self.rng, 
-                save = self.params["save_data_files"],
-                county = self.county)
+            # existing behavior: either reuse saved file or call build_edge_list
+            edgefile_path = os.path.join(
+                os.getcwd(),
+                "data",
+                self.county,
+                (self.params.get("run_name", "run") + "_edgeList.parquet")
+            )
+            # if a cached edge-list exists and overwrite_edge_list is False, read it
+            if (not bool(self.params.get("overwrite_edge_list", False))) and os.path.isfile(edgefile_path):
+                self.edge_list = pd.read_parquet(edgefile_path)
+            else:
+                # build edge list (this may save the file if build_edge_list honors save flag)
+                self.edge_list = build_edge_list(
+                    contacts_df = self.contacts_df,
+                    params = self.params,
+                    rng = self.rng,
+                    save = bool(self.params.get("save_data_files", False)),
+                    county = self.county
+                )
 
         #Create full adjacency matrix
         src = self.edge_list['source'].to_numpy(dtype = np.int32)
@@ -363,7 +374,7 @@ class NetworkModel:
         R =  []
 
         self.states_over_time.append([S,E,I,R])
-        self.new_exposures.append([])
+        self.new_exposures.append(np.empty(0, dtype = np.int32))
         self.new_infections.append(initial_infectious)
 
         #Reset run flags
@@ -686,7 +697,36 @@ class NetworkModel:
         recovered = np.where(self.state == 3)[0]
         self.time_in_state[recovered] += 1
 
-        #TODO R -> S with waning immunity
+         #R -> S with waning immunity
+        cid = self.params.get("conferred_immunity_duration", None)
+        if cid is not None:
+            try:
+                cid_val = float(cid)
+            except Exception:
+                cid_val = None
+
+            if cid_val is not None and cid_val >= 0:
+                #Revert those with greater time_in_state to sus
+                waned_mask = (self.state == 3) & (self.time_in_state >= cid_val)
+                if waned_mask.any():
+                    waned_nodes = np.where(waned_mask)[0]
+                    #move to sus and reset everything
+                    self.state[waned_nodes == 0]
+                    self.time_in_state[waned_nodes] = 0
+                    self.incubation_periods[waned_nodes] = np.nan
+                    self.infectious_periods[waned_nodes] = np.nan
+                    #check if there is lasting immunity, and reduce in multiplier
+                    lasting = self.params.get("lasting_partial_immunity", None)
+                    if lasting:
+                        lasting = np.clip(lasting, 0, 1)
+                        reduced_sus = (1-lasting)
+                        for ct in self.contact_types:
+                            self.in_multiplier[ct][waned_nodes] *= reduced_sus
+
+                            
+
+
+
 
 
         #Save timestep data
@@ -753,58 +793,151 @@ class NetworkModel:
             self.all_lhd_action_logs[run] = list(self.lhd.action_log)
 
 
-    def epi_outcomes(self) -> pd.DataFrame:
-        """
-    Calculates epidemic outcomes with a row for each run, and columns:
-    - total_infections
-    attack_rate
-    -attack_rate_by_age_{bins}
-    - attack_rate_vaccinated, attack_rate_unvaccinated
-    - peak_incidence 
-    - peak_prevalence 
-    - time_of_peak_infection
-    -secondary attack rate by contact type (sar_{ct})
-    - effective_reproduction_number (mean R)
-    - number_of_calls
-    - people_called
-    avg_days_quarantine_imposed
-    - stochastic_dieout
-    - epidemic_duration
-        """
-        #supress numpy division warnings
-        #TODO look into whether this affects validity
+    def epi_outcomes(self, reduced: bool = False) -> pd.DataFrame:    
+        """    
+        Calculates epidemic outcomes with a row for each run.
+    If reduced == True, returns a compact DataFrame with one row per run containing:
+    - run_number
+    - cumulative_incidence_percent : percent of population infected at least once
+    - cumulative_infections : total number of infection events (may exceed population)
+    - peak_prevalence : peak prevalence (fraction of population simultaneously infectious)
+    - time_of_peak_prevalence : timestep of peak prevalence (int) or None
+    - epidemic_duration : time when infection died out (or Tmax if not died out)
+
+    If reduced == False, returns a detailed DataFrame that includes both unique-person
+    and event-level metrics (SAR by contact type, effective R both by events and by unique
+    attribution, age-stratified measures, LHD metrics, etc.).
+    """
         warnings.filterwarnings("ignore", category = RuntimeWarning, module = "numpy.*")
 
-
-        
         N = self.N
 
-        #require simulations have been run
         if any(x is None for x in self.all_new_exposures):
             raise ValueError("Model runs not completed; run simulate() before computing outcomes")
 
         summary = []
 
-        #age bins 
-        age_bins = [0, 6, 19, 35, 65,200]
+        # Age bins (kept for the detailed output path)
+        age_bins = [0, 6, 19, 35, 65, 200]
         age_labels = ["0-5", "6-18", "19-34", "35-64", "65+"]
 
+        # stable contact type list
+        contact_types = list(self.contact_types)
+
         for run in range(self.n_runs):
-            exposures = self.all_new_exposures[run]
+            exposures_raw = self.all_new_exposures[run]
             states_over_time = self.all_states_over_time[run]
             stochastic_dieout = bool(self.all_stochastic_dieout[run])
-            epidemic_time = int(self.all_end_days[run])
-            snapshots = self.exposure_event_log[run]
+            epidemic_time = int(self.all_end_days[run]) if self.all_end_days is not None else int(self.Tmax)
+            snapshots = self.exposure_event_log[run] if run < len(self.exposure_event_log) else []
 
-            #determine ever exposed
-            ever_exposed = np.zeros(N, dtype=bool)
-            for exp in exposures:
-                if len(exp) == 0:
-                    continue
-                ever_exposed[np.array(exp, dtype=int)] = True
-            total_infections = int(ever_exposed.sum()) #total_infections does not include imported infections
+            # Normalize exposures into list of numpy int arrays
+            daily = []
+            for arr in (exposures_raw or []):
+                if isinstance(arr, np.ndarray):
+                    a = arr.astype(np.int32) if arr.size > 0 else np.empty(0, dtype=np.int32)
+                else:
+                    try:
+                        a = np.array(arr, dtype=np.int32) if len(arr) > 0 else np.empty(0, dtype=np.int32)
+                    except Exception:
+                        a = np.empty(0, dtype=np.int32)
+                daily.append(a)
 
-            #build at-risk mask, anyone who ever had infectious neighbor
+            # ensure day-0 includes I0 if empty
+            if len(daily) > 0 and daily[0].size == 0:
+                daily[0] = np.array(self.params.get("I0", []), dtype = np.int32)
+
+            # Flatten event-level exposures for run-level event counts and reinfection counts
+            nonempty = [d for d in daily if d.size > 0]
+            flat = np.concatenate(nonempty).astype(np.int32) if nonempty else np.empty(0, dtype=np.int32)
+
+            # Unique persons infected (ever) and event counts per person
+            if flat.size > 0:
+                reinfection_counts = np.bincount(flat, minlength=N)
+                total_infection_events = int(flat.size)
+                total_infections_unique = int((reinfection_counts > 0).sum())
+            else:
+                reinfection_counts = np.zeros(N, dtype=int)
+                total_infection_events = 0
+                total_infections_unique = 0
+
+            # Reduced summary path
+            if reduced:
+                # cumulative incidence percent (unique persons)
+                cumulative_incidence_percent = (float(total_infections_unique) / float(N) * 100.0) if N > 0 else np.nan
+
+                # peak prevalence (fraction) and time of peak
+                peak_infections = 0
+                time_of_peak = None
+                if states_over_time:
+                    for t, state in enumerate(states_over_time):
+                        I_nodes = np.array(state[2], dtype=int) if len(state) > 2 else np.empty(0, dtype=int)
+                        nI = int(I_nodes.size)
+                        if nI > peak_infections:
+                            peak_infections = nI
+                            time_of_peak = int(t)
+                peak_prevalence = (peak_infections / float(N)) if N > 0 else np.nan
+
+                # Compute event-level effective R by contact type
+                total_infected_events_by_ct = {ct: 0 for ct in contact_types}
+                unique_sources_per_ct = {ct: set() for ct in contact_types}
+
+                for snap in (snapshots or []):
+                    n_events = int(snap["event_time"].shape[0])
+                    if n_events == 0:
+                        continue
+                    for ei in range(n_events):
+                        src = int(snap["event_source"][ei])
+                        # safe extraction of contact-type id/name
+                        try:
+                            ct_id = int(snap["event_type"][ei])
+                            ct_name = self.id_to_ct.get(ct_id, None)
+                        except Exception:
+                            ct_name = None
+
+                        s = int(snap["event_nodes_start"][ei])
+                        L = int(snap["event_nodes_len"][ei])
+                        if L == 0:
+                            continue
+                        infs = snap["infections"][s : s + L]
+                        infected_events_count = int(np.sum(infs))
+                        ct_name = ct_name if ct_name is not None else "unknown"
+
+                        # ensure ct appears in our dictionaries
+                        if ct_name not in total_infected_events_by_ct:
+                            total_infected_events_by_ct[ct_name] = 0
+                            unique_sources_per_ct[ct_name] = set()
+
+                        total_infected_events_by_ct[ct_name] = total_infected_events_by_ct.get(ct_name, 0) + infected_events_count
+                        unique_sources_per_ct[ct_name].add(src)
+
+                # compute per-contact-type mean secondary infections (event-level)
+                eff_R_events_by_ct = {}
+                for ct in contact_types:
+                    n_src = len(unique_sources_per_ct.get(ct, set()))
+                    tot_inf = total_infected_events_by_ct.get(ct, 0)
+                    eff_R_events_by_ct[ct] = (tot_inf / float(n_src)) if n_src > 0 else np.nan
+
+                # assemble reduced row and include eff_R by contact type
+                row = {
+                    "run_number": int(run),
+                    "cumulative_incidence_percent": float(cumulative_incidence_percent) if not np.isnan(cumulative_incidence_percent) else np.nan,
+                    "cumulative_infections": int(total_infection_events),
+                    "peak_prevalence": float(peak_prevalence) if not np.isnan(peak_prevalence) else np.nan,
+                    "time_of_peak_prevalence": time_of_peak,
+                    "epidemic_duration": int(epidemic_time),
+                }
+
+                # append one column per known contact type, named eff_R_{ct}
+                for ct in contact_types:
+                    val = eff_R_events_by_ct.get(ct, np.nan)
+                    row[f"eff_R_{ct}"] = float(val) if not np.isnan(val) else np.nan
+
+                summary.append(row)
+                continue  # next run
+
+            # Detailed summary path (unchanged from previous full version)
+            # Build at-risk mask, anyone who ever had infectious neighbor
             at_risk = np.zeros(N, dtype = bool)
             neighbor_map = self.neighbor_map
             if states_over_time:
@@ -817,10 +950,10 @@ class NetworkModel:
                             nbr = int(nbr_tuple[0])
                             at_risk[nbr] = True
             n_at_risk = int(at_risk.sum())
-            infected_at_risk = int((ever_exposed & at_risk).sum())
+            infected_at_risk = int(((reinfection_counts > 0) & at_risk).sum())
             attack_rate_at_risk = (infected_at_risk / float(n_at_risk)) if n_at_risk > 0 else np.nan
 
-            #Age-stratified attack rates among individuals ever at-risk
+            # Age-stratified attack rates among individuals ever at-risk
             ages = self.ages
             attack_by_age = {}
             age_members = {}
@@ -836,28 +969,29 @@ class NetworkModel:
                     if n_risk_members == 0:
                         attack_by_age[label] = np.nan
                     else:
-                        infected_risk_members = int(ever_exposed[members][at_risk_mask].sum())
+                        infected_risk_members = int(((reinfection_counts > 0)[members][at_risk_mask]).sum())
                         attack_by_age[label] = infected_risk_members / float(n_risk_members)
 
-            #Vaccination stratified attack rates among at-risk
-            #For vaccinated AT START of outbreak
-            vax_status = np.asarray(self.all_vax_status[run], dtype = bool)
+            # Vaccination-stratified attack rates among at-risk (vax status at start)
+            vax_status = np.asarray(self.all_vax_status[run], dtype = bool) if self.all_vax_status[run] is not None else np.zeros(N, dtype=bool)
             ar_vax_mask = at_risk & vax_status
             ar_unvax_mask = at_risk & (~vax_status)
             n_at_risk_vax = int(ar_vax_mask.sum())
             n_at_risk_unvax = int(ar_unvax_mask.sum())
-            attack_rate_vax = (ever_exposed[ar_vax_mask].sum() / n_at_risk_vax) if n_at_risk_vax > 9 else np.nan
-            attack_rate_unvax = (ever_exposed[ar_unvax_mask].sum() / n_at_risk_unvax) if n_at_risk_unvax > 9 else np.nan
+            attack_rate_vax = ( ((reinfection_counts > 0)[ar_vax_mask].sum()) / n_at_risk_vax ) if n_at_risk_vax > 9 else np.nan
+            attack_rate_unvax = ( ((reinfection_counts > 0)[ar_unvax_mask].sum()) / n_at_risk_unvax ) if n_at_risk_unvax > 9 else np.nan
 
-            #Peak incidence, with day 0 including imported inf.
-            daily = [np.array(e, dtype=int) for e in exposures]
-            if len(daily) > 0 and daily[0].size == 0:
-                daily[0] = np.array(self.params.get("I0", []), dtype=int)
-            daily_counts = [int(arr.size) for arr in daily] if len(daily) else []
-            peak_incidence = int(max(daily_counts)) if daily_counts else 0
-            time_of_peak_incidence = int(np.argmax(daily_counts)) if daily_counts else None
+            # Peak incidence (event-level and unique-person-per-day)
+            daily_counts_events = [int(d.size) for d in daily] if daily else []
+            peak_incidence_events = int(max(daily_counts_events)) if daily_counts_events else 0
+            time_of_peak_incidence_events = int(np.argmax(daily_counts_events)) if daily_counts_events else None
 
-            #Peak prevalence + time
+            daily_counts_unique = [int(np.unique(d).size) for d in daily] if daily else []
+            peak_incidence_unique = int(max(daily_counts_unique)) if daily_counts_unique else 0
+            time_of_peak_incidence_unique = int(np.argmax(daily_counts_unique)) if daily_counts_unique else None
+
+            # Peak prevalence + time
+            peak_prev = 0.0
             peak_infections = 0
             time_of_peak = None
             for t, state in enumerate(states_over_time):
@@ -865,102 +999,123 @@ class NetworkModel:
                 nI = int(I_nodes.size)
                 if nI > peak_infections:
                     peak_infections = nI
-                    peak_prev = (nI / float(N))
+                    peak_prev = (nI / float(N)) if N > 0 else np.nan
                     time_of_peak = int(t)
 
-            #Cumulative incidence overall and stratified
+            # Cumulative incidence overall and stratified (unique persons)
             cumulative_incidence_by_age = {}
             for label in age_labels:
                 members = age_members[label]
                 if members.size == 0:
                     cumulative_incidence_by_age[label] = np.nan
                 else:
-                    cumulative_incidence_by_age[label] = float(ever_exposed[members].sum()) / members.size
+                    cumulative_incidence_by_age[label] = float((reinfection_counts > 0)[members].sum()) / members.size
 
-            if vax_status is not None:
-                n_vax = int(vax_status.sum())
-                n_unvax = int((~vax_status).sum())
-                cumulative_incidence_vax = (float(ever_exposed[vax_status].sum()) / n_vax) if n_vax > 0 else np.nan
-                cumulative_incidence_unvax = (float(ever_exposed[~vax_status].sum()) / n_unvax) if n_unvax > 0 else np.nan
-            else:
-                cumulative_incidence_vax = np.nan
-                cumulative_incidence_unvax = np.nan
+            n_vax = int(vax_status.sum())
+            n_unvax = int((~vax_status).sum())
+            cumulative_incidence_vax = (float((reinfection_counts > 0)[vax_status].sum()) / n_vax) if n_vax > 0 else np.nan
+            cumulative_incidence_unvax = (float((reinfection_counts > 0)[~vax_status].sum()) / n_unvax) if n_unvax > 0 else np.nan
 
+            # Secondary Attack Rate by contact type and Effective R (both event-level and unique attribution)
+            total_exposed_by_ct = {ct: 0 for ct in contact_types}
+            total_infected_events_by_ct = {ct: 0 for ct in contact_types}
+            total_infected_unique_by_ct = {ct: 0 for ct in contact_types}
 
-            #Secondary Attack Rate by contact type and Effective R0
-            #SAR - proportion of contacts infected
-            #Mean, sd, and median effective R0
-            total_exposed_by_ct = {ct: 0 for ct in self.contact_types}
-            total_infected_by_ct = {ct: 0 for ct in self.contact_types}
-            assigned = np.zeros(N, dtype=bool)  #attribute infection to src
-            source_secondary = defaultdict(int)
+            assigned = np.zeros(N, dtype=bool)  # attribute unique infection to first observed source
+            source_secondary_events = defaultdict(int)
+            source_secondary_unique = defaultdict(int)
             unique_sources = set()
 
-            for snap in snapshots:
+            for snap in (snapshots or []):
                 n_events = int(snap["event_time"].shape[0])
                 if n_events == 0:
                     continue
                 for ei in range(n_events):
                     src = int(snap["event_source"][ei])
                     unique_sources.add(src)
-                    ct_id = int(snap["event_type"][ei])
-                    ct_name = self.id_to_ct.get(ct_id, None)
+                    ct_id = int(snap["event_type"][ei]) if snap["event_type"].size > 0 else None
+                    ct_name = self.id_to_ct.get(ct_id, None) if ct_id is not None else None
                     s = int(snap["event_nodes_start"][ei])
                     L = int(snap["event_nodes_len"][ei])
                     if L == 0:
                         continue
-                    nodes = snap["nodes"][s : s + L]
-                    infs = snap["infections"][s : s + L]
+                    nodes = snap["nodes"][s : s + L].astype(int)
+                    infs = snap["infections"][s : s + L].astype(bool)
                     ct_name = ct_name if ct_name is not None else "unknown"
+
                     total_exposed_by_ct[ct_name] = total_exposed_by_ct.get(ct_name, 0) + int(L)
+                    infected_events_count = int(np.sum(infs))
+                    total_infected_events_by_ct[ct_name] = total_infected_events_by_ct.get(ct_name, 0) + infected_events_count
+                    source_secondary_events[src] += infected_events_count
+
+                    # unique attribution: first time a node is seen infected in the run
                     for j in range(L):
                         node = int(nodes[j])
                         if bool(infs[j]) and not assigned[node]:
                             assigned[node] = True
-                            total_infected_by_ct[ct_name] = total_infected_by_ct.get(ct_name, 0) + 1
-                            source_secondary[src] += 1
+                            total_infected_unique_by_ct[ct_name] = total_infected_unique_by_ct.get(ct_name, 0) + 1
+                            source_secondary_unique[src] += 1
 
-            sar_by_ct = {}
-            for ct in self.contact_types:
+            # compute SAR per ct (both event-level and unique-person-level)
+            sar_events_by_ct = {}
+            sar_unique_by_ct = {}
+            for ct in contact_types:
                 exposed_ct = total_exposed_by_ct.get(ct, 0)
-                infected_ct = total_infected_by_ct.get(ct, 0)
-                sar_by_ct[ct] = (infected_ct / float(exposed_ct)) if exposed_ct > 0 else np.nan
-            
-            total_secondary = sum(source_secondary.values())
-            n_sources = len(unique_sources)
-            eff_R = (total_secondary / float(n_sources)) if n_sources > 0 else np.nan
-            eff_R_std = np.std(list(source_secondary.values())) if n_sources > 0 else np.nan
-            eff_R_median = np.median(list(source_secondary.values())) if  n_sources > 0 else np.nan
+                infected_events_ct = total_infected_events_by_ct.get(ct, 0)
+                infected_unique_ct = total_infected_unique_by_ct.get(ct, 0)
+                sar_events_by_ct[ct] = (infected_events_ct / float(exposed_ct)) if exposed_ct > 0 else np.nan
+                sar_unique_by_ct[ct] = (infected_unique_ct / float(exposed_ct)) if exposed_ct > 0 else np.nan
 
-            #LHD Metrics - quarantine and calls
-            lhd_log = self.all_lhd_action_logs[run]
-            call_entries = [e for e in lhd_log if e.get("action_type") == "call"] 
+            total_secondary_events = sum(source_secondary_events.values())
+            total_secondary_unique = sum(source_secondary_unique.values())
+            n_sources = len(unique_sources)
+
+            eff_R_events = (total_secondary_events / float(n_sources)) if n_sources > 0 else np.nan
+            eff_R_events_std = np.std(list(source_secondary_events.values())) if n_sources > 0 else np.nan
+            eff_R_events_median = np.median(list(source_secondary_events.values())) if n_sources > 0 else np.nan
+
+            eff_R_unique = (total_secondary_unique / float(n_sources)) if n_sources > 0 else np.nan
+            eff_R_unique_std = np.std(list(source_secondary_unique.values())) if n_sources > 0 else np.nan
+            eff_R_unique_median = np.median(list(source_secondary_unique.values())) if n_sources > 0 else np.nan
+
+            # LHD Metrics - calls and quarantine
+            lhd_log = self.all_lhd_action_logs[run] or []
+            call_entries = [e for e in lhd_log if e.get("action_type") == "call"]
             number_of_call_actions = len(call_entries)
             people_called = sum(int(e.get("nodes_count", 0)) for e in call_entries)
             if people_called > 0:
                 total_person_days = sum(int(e.get("duration", 0)) * int(e.get("nodes_count", 0)) for e in call_entries)
                 avg_days_quarantine = total_person_days / float(people_called)
-
             else:
                 avg_days_quarantine = np.nan
 
-                # Assemble row
+            # Assemble row dictionary for detailed output
             row = {
                 "run_number": int(run),
-                "total_infections": int(total_infections),
+                "total_infections_unique": int(total_infections_unique),
+                "total_infection_events": int(total_infection_events),
+                "n_reinfected_people": int((reinfection_counts > 1).sum()),
+                "mean_reinfections_per_infected": float(reinfection_counts[reinfection_counts > 0].mean()) if (reinfection_counts > 0).any() else np.nan,
                 "n_at_risk": int(n_at_risk),
-                "infected_at_risk": int(infected_at_risk),
+                "infected_at_risk_unique": int(infected_at_risk),
                 "attack_rate_at_risk": float(attack_rate_at_risk) if not np.isnan(attack_rate_at_risk) else np.nan,
-                "peak_incidence": int(peak_incidence),
-                "time_of_peak_incidence": time_of_peak_incidence,
+                "peak_incidence_events": int(peak_incidence_events),
+                "time_of_peak_incidence_events": time_of_peak_incidence_events,
+                "peak_incidence_unique": int(peak_incidence_unique),
+                "time_of_peak_incidence_unique": time_of_peak_incidence_unique,
                 "peak_infections": int(peak_infections),
                 "time_of_peak_infections": time_of_peak,
                 "peak_prevalence_overall": float(peak_prev),
                 "attack_rate_vaccinated_at_risk": float(attack_rate_vax) if not np.isnan(attack_rate_vax) else np.nan,
                 "attack_rate_unvaccinated_at_risk": float(attack_rate_unvax) if not np.isnan(attack_rate_unvax) else np.nan,
-                "effective_reproduction_number": float(eff_R) if not np.isnan(eff_R) else np.nan,
-                "effective_reproduction_number_std": float(eff_R_std) if not np.isnan(eff_R_std) else np.nan,
-                "effective_reproduction_number_median": float(eff_R_median) if not np.isnan(eff_R_median) else np.nan,
+                # event-level R
+                "effective_reproduction_number_events": float(eff_R_events) if not np.isnan(eff_R_events) else np.nan,
+                "effective_reproduction_number_events_std": float(eff_R_events_std) if not np.isnan(eff_R_events_std) else np.nan,
+                "effective_reproduction_number_events_median": float(eff_R_events_median) if not np.isnan(eff_R_events_median) else np.nan,
+                # unique-person attribution R
+                "effective_reproduction_number_unique": float(eff_R_unique) if not np.isnan(eff_R_unique) else np.nan,
+                "effective_reproduction_number_unique_std": float(eff_R_unique_std) if not np.isnan(eff_R_unique_std) else np.nan,
+                "effective_reproduction_number_unique_median": float(eff_R_unique_median) if not np.isnan(eff_R_unique_median) else np.nan,
                 "number_of_call_actions": int(number_of_call_actions),
                 "people_called": int(people_called),
                 "avg_days_quarantine_imposed": float(avg_days_quarantine) if not np.isnan(avg_days_quarantine) else np.nan,
@@ -973,20 +1128,20 @@ class NetworkModel:
                 row[f"attack_rate_age_{label}_at_risk"] = attack_by_age[label]
                 row[f"cumulative_incidence_age_{label}"] = cumulative_incidence_by_age[label]
 
-            # vaccination cumulative incidence
+            # vaccination cumulative incidence (unique-person)
             row["cumulative_incidence_vaccinated"] = cumulative_incidence_vax
             row["cumulative_incidence_unvaccinated"] = cumulative_incidence_unvax
 
-            # attach SAR per contact type and raw exposed/infected counts
-            for ct in self.contact_types:
-                row[f"sar_{ct}"] = sar_by_ct.get(ct, np.nan)
+            # attach SAR per contact type and raw exposed/infected counts (both event and unique)
+            for ct in contact_types:
+                row[f"sar_events_{ct}"] = sar_events_by_ct.get(ct, np.nan)
+                row[f"sar_unique_{ct}"] = sar_unique_by_ct.get(ct, np.nan)
                 row[f"exposed_{ct}"] = int(total_exposed_by_ct.get(ct, 0))
-                row[f"infected_{ct}"] = int(total_infected_by_ct.get(ct, 0))
+                row[f"infected_events_{ct}"] = int(total_infected_events_by_ct.get(ct, 0))
+                row[f"infected_unique_{ct}"] = int(total_infected_unique_by_ct.get(ct, 0))
 
             summary.append(row)
 
-
-        #re-enable warnings
         warnings.filterwarnings("default", category = RuntimeWarning, module = "numpy.*")
         return pd.DataFrame(summary)
 
@@ -2008,7 +2163,7 @@ class LocalHealthDepartment:
             #costs must be a single float or array of size len(nodes)
             costs = out.get('costs', None)
             if costs is None:
-                costs = np.array([None] * nodes.shape[0], dtype = np.float32)
+                costs = np.full(nodes.shape[0], np.nan, dtype = np.float32)
             else:
                 costs = np.asarray(costs, dtype = object)
                 if costs.shape[0] != nodes.shape[0]:
