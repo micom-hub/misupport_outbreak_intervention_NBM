@@ -9,158 +9,32 @@ import math
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
+import ast 
+import json
 
-#Create straightforward parameter sweeps
-#variant for each combination of parameters
-def generate_sweep_variants(
-    variants_list: List[Dict[str, Any]],
-    sweep_spec: Dict[str, Tuple[float, float, int]],
-    *,
-    interior_points: bool = True,
-    include_base: bool = False,
-    name_sep: str = "__",
-    value_formatter: Optional[Callable[[Any], str]] = None,
-    int_keys: Optional[Iterable[str]] = None,
-    warn_threshold: int = 2000
-) -> List[Dict[str, Any]]:
-    """
-Builds sweep variants, taking main variants defined above, and returning them with systematically altered parameter values
+def generate_lhs_variants(    variants_list: List[Dict[str, Any]],    param_ranges: Dict[str, Tuple[float, float]],    n: int,    *,    name_sep: str = "__",    value_formatter: Optional[Callable[[Any], str]] = None,    int_keys: Optional[Iterable[str]] = None,    seed: Optional[int] = None) -> List[Dict[str, Any]]:    
+    """    
+Take base variants and conduct a parameter sweep across specified parameters
+
+  - Each generated variant includes:
+      * 'param_overrides' -> base param overrides merged with sampled sweep values
+      * 'sweep_params' -> dict[param_name -> sampled_value] (explicitly stored)
+      * 'sweep_index' -> unique integer index for the sample (global across all base variants)
+  - Variant names are produced as "<base_name>{name_sep}sample_{global_index}"
 
 Args:
-    variants_list: list of variant dicts following template above
-
-    sweep_spec: mapping_param_name -> (min_value, max_value, n)
-    - if interior_points = True, n is number of points between min and max
-        else, n is the total number of points
-    -include_base: if True, each base variant is included and unchanged
-    - name_sep: string to join name pieces (base + param=value)
-    - value_formatter: optional callable to format values
-    -int_keys: optional iterable of parameter names to be cast to int
-    - warn_threshold: if total generated variants exceeds threshold, emit warning
+  variants_list: list of base variant dicts (each may have 'param_overrides' and 'name').
+  param_ranges: dict mapping param_name -> (min, max). All values are treated as continuous.
+  n: number of LHS samples per base variant (integer >= 1).
+  name_sep: separator used when building generated variant names (default "__").
+  value_formatter: optional callable(value)->str for name formatting (not required since names are indexed).
+  int_keys: iterable of parameter names that should be cast to int in overrides.
+  seed: optional RNG seed for reproducibility.
 
 Returns:
-    - a flat list of variant dicts with the same keys as input variant dict
-    """
-    if not isinstance(variants_list, list):
-        raise TypeError("variants_list must be a list of variant dicts")
-
-    if not sweep_spec:
-        return copy.deepcopy(variants_list)
-
-    #build grid for each sweep key
-    value_arrays: Dict[str, np.ndarray] = {}
-    for key, spec in sweep_spec.items():
-        if not isinstance(spec, (list, tuple)) and len(spec == 3):
-            raise ValueError(f"sweep_spec[{key}] must be tuple/list (min, max, n_inbetween)")
-        mn, mx, n_inbetween = spec
-        if interior_points:
-            num_points = int(n_inbetween) + 2
-        else: 
-            num_points = int(n_inbetween)
-        if num_points <= 0:
-            raise ValueError(f"number of points for '{key}' must be >= 1")
-        if num_points == 1:
-            vals = np.array([float(mn)])
-        else:
-            vals = np.linspace(float(mn), float(mx), num = num_points)
-        value_arrays[key] = vals
-
-    sweep_keys = list(value_arrays.keys())
-    grids = [value_arrays[k] for k in sweep_keys]
-    combos = list(itertools.product(*grids))
-    total_generated_per_base = len(combos)
-    total_out = total_generated_per_base * max(1, len(variants_list))
-    if total_out > warn_threshold:
-        warnings.warn(f"Sweeping will produce {total_out} variants. This may be large.")
-    
-    #default value formatter
-    if value_formatter is None:
-        def _fmt_val(x):
-            #integers as ints, floats compact
-            try:
-                if isinstance(x, (int, np.integer)):
-                    return str(int(x))
-                f = float(x)
-                #if near-integer and not requested as int, format as float
-                return f"{f:.6g}"
-            except Exception:
-                return str(x)
-        fmt = _fmt_val
-    else:
-        fmt = value_formatter
-    
-    int_keys = set(int_keys) if int_keys is not None else set()
-
-    out_variants: List[Dict[str, Any]] = []
-    for base in variants_list:
-        if not isinstance(base, dict):
-            raise TypeError("Each element of variants_list must be a dict")
-
-        base_copy = copy.deepcopy(base)
-        base_name = str(base_copy.get("name", "variant"))
-        base_param_overrides = copy.deepcopy(base_copy.get("param_overrides", {}) or {})
-
-        if include_base:
-            out_variants.append(base_copy)
-
-        for combo in combos:
-            new_variant = copy.deepcopy(base_copy)
-
-            #start from base param_overrides if any
-            new_param_overrides = copy.deepcopy(base_param_overrides)
-            sweep_values_for_naming = {}
-            for k, raw_val in zip(sweep_keys, combo):
-                if k in int_keys:
-                    val = int(round(float(raw_val)))
-                else:
-                    if isinstance(raw_val,(np.floating, np.float32, np.float64)):
-                        val = float(raw_val)
-                    elif isinstance(raw_val, (np.integer, np.int32, np.int64)):
-                        val = int(raw_val)
-                    else:
-                        val = raw_val
-                new_param_overrides[k] = val
-                sweep_values_for_naming[k] = val
-
-            new_variant["param_overrides"] = new_param_overrides
-
-            #build descriptive name
-            suffix = name_sep.join([f"{k}={fmt(sweep_values_for_naming[k])}" for k in sweep_keys])
-            new_variant["name"] = base_name + name_sep + suffix if suffix else base_name
-
-            out_variants.append(new_variant)
-
-    return out_variants
-
-
-#create LHS parameter sweeps
-#For a model run with a parameter sweep, reaggregate variants by parameter sweep
-def generate_lhs_variants(
-    variants_list: List[Dict[str, Any]],
-    param_ranges: Dict[str, Tuple[float, float]],
-    n: int,
-    *,
-    name_sep: str = "__",
-    value_formatter: Optional[Callable[[Any], str]] = None,
-    int_keys: Optional[Iterable[str]] = None,
-    seed: Optional[int] = None
-) -> List[Dict[str, Any]]:
-    """
-    Generate variant dicts using Latin-Hypercube-style sampling with n x variants replicates
-
-    Args:
-      variants_list: list of base variant dicts (same format as generate_sweep_variants input).
-      param_ranges: dict mapping param_name -> (min_value, max_value).
-      n: number of LHS samples per parameter (same N for all parameters).
-      name_sep: separator used when building generated variant names (default "__").
-      value_formatter: optional callable(value)->str used for name formatting.
-      int_keys: iterable of parameter names that should be cast to int in overrides.
-      seed: optional RNG seed for reproducibility.
-
-    Returns:
-      List[Dict[str, Any]]: flattened list of generated variant dicts (each has updated 'param_overrides' and 'name').
-    """
- # Type validations
+  List[Dict[str, Any]]: flattened list of generated variant dicts. Each dict is a deep copy of
+  the base variant with the added/updated keys described above.
+"""
     if not isinstance(variants_list, list):
         raise TypeError("variants_list must be a list of variant dicts")
     if not isinstance(param_ranges, dict):
@@ -169,22 +43,27 @@ def generate_lhs_variants(
     if n <= 0:
         raise ValueError("n must be >= 1")
 
+    # If no parameters to sweep, return deep copies of base variants but add empty sweep_params
     if not param_ranges:
-        return copy.deepcopy(variants_list)
+        out = []
+        for base in variants_list:
+            bcopy = copy.deepcopy(base)
+            bcopy.setdefault("param_overrides", copy.deepcopy(bcopy.get("param_overrides", {}) or {}))
+            bcopy["sweep_params"] = {}
+            bcopy["sweep_index"] = None
+            out.append(bcopy)
+        return out
 
-# Preserve param order from param_ranges dict
+    # preserve param order
     sweep_keys = list(param_ranges.keys())
 
-    # Print total variants that will be generated
     total_out = n * max(1, len(variants_list))
     print(f"Generating {total_out} variants ({len(variants_list)} base variant(s) x {n} LHS samples each)")
-
+    # RNG
     rng = np.random.default_rng(seed)
 
-
-    #build a jittered strata baseline [0, 1) then permute to param range
-    base = (np.arange(n) + rng.random(n)) / n  # shape (n,)
-
+    # Build LHS samples: create base jittered strata and permute per parameter
+    base = (np.arange(n) + rng.random(n)) / n  # values in [0,1)
     value_arrays: Dict[str, np.ndarray] = {}
     for k in sweep_keys:
         mn, mx = param_ranges[k]
@@ -198,7 +77,7 @@ def generate_lhs_variants(
             vals = mn + u * (mx - mn)
         value_arrays[k] = vals
 
-    #format names
+    # formatter (optional, not used for uniqueness; kept for compatibility)
     if value_formatter is None:
         def _fmt_val(x):
             try:
@@ -214,8 +93,8 @@ def generate_lhs_variants(
 
     int_keys = set(int_keys) if int_keys is not None else set()
 
-    #use values to produce variants
     out_variants: List[Dict[str, Any]] = []
+    global_index = 0
     for base_variant in variants_list:
         if not isinstance(base_variant, dict):
             raise TypeError("Each element of variants_list must be a dict")
@@ -223,36 +102,35 @@ def generate_lhs_variants(
         base_name = str(base_copy.get("name", "variant"))
         base_param_overrides = copy.deepcopy(base_copy.get("param_overrides", {}) or {})
 
+        # produce n samples for this base variant
         for i in range(n):
-            new_variant = copy.deepcopy(base_copy)
-            new_param_overrides = copy.deepcopy(base_param_overrides)
-            sweep_values_for_naming: Dict[str, Any] = {}
-
+            sweep_params: Dict[str, Any] = {}
             for k in sweep_keys:
                 raw_val = value_arrays[k][i]
                 if k in int_keys:
                     val = int(round(float(raw_val)))
                 else:
-                    # convert numpy scalars to python types
                     if isinstance(raw_val, (np.floating, np.float32, np.float64)):
                         val = float(raw_val)
                     elif isinstance(raw_val, (np.integer, np.int32, np.int64)):
                         val = int(raw_val)
                     else:
                         val = raw_val
-                new_param_overrides[k] = val
-                sweep_values_for_naming[k] = val
+                sweep_params[k] = val
 
-            new_variant["param_overrides"] = new_param_overrides
-
-            # build descriptive name using param order from param_ranges
-            suffix = name_sep.join([f"{k}={fmt(sweep_values_for_naming[k])}" for k in sweep_keys])
-            new_variant["name"] = base_name + name_sep + suffix if suffix else base_name
-
+            new_variant = copy.deepcopy(base_copy)
+            # merge sweep params into param_overrides (new overrides override base)
+            new_overrides = copy.deepcopy(base_param_overrides)
+            new_overrides.update(sweep_params)
+            new_variant["param_overrides"] = new_overrides
+            new_variant["sweep_params"] = sweep_params
+            new_variant["sweep_index"] = int(global_index)
+            # name uses unique global index so names are unique across all bases
+            new_variant["name"] = f"{base_name}{name_sep}sample_{global_index}"
             out_variants.append(new_variant)
+            global_index += 1
 
     return out_variants
-    
 
 
 #parsing helper
@@ -432,416 +310,279 @@ def aggregate_variant_results(
 
     return overall_df, combined_summary
 
-#Extract time series data from models
-def disease_over_time(
-    variant_results: List[Dict[str, Any]],
-    *,
-    name_sep: str = "__",
-    return_cumulative_incidence: bool = False,
-    return_long: bool = False,
-    day_prefix: str = "day_",
-    pad_with_last: bool = True
-) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]:
-    """
-    Build prevalence time-series (and optional cumulative-incidence series) per model run. Return in long format or not
-
-    Args:
-        variant_results: list of dicts each containing:
-            - 'variant_name' (str)
-            - 'model' (NetworkModel instance, already simulated)
-        name_sep: separator used in variant names (default "__")
-        return_cumulative_incidence: if True, return a second DataFrame with cumulative incidence
-        return_long: if True, return long (tidy) DataFrame(s) with one row per run per timepoint
-        day_prefix: prefix for timestep columns in wide format (default "day_")
-        pad_with_last: whether to pad shorter series with last observed value (True) or NaN (False)
-
-    Returns:
-        If return_cumulative_incidence is False:
-            - wide (or long if return_long=True) prevalence DataFrame
-        Else:
-            - tuple (prevalence_df, cumulative_incidence_df) in the chosen orientation (wide/long)
-    """
-    rows = []
-    cum_rows = []
-    max_t = 0
-    parsed_param_keys = set()
-
-    # First pass: determine max length and collect param keys
-    for entry in variant_results:
-        vname = entry.get("variant_name") or entry.get("name")
-        model = entry.get("model", None)
-        if model is None:
-            continue
-        base_name, params = _parse_variant_name(vname, name_sep=name_sep)
-        parsed_param_keys.update(params.keys())
-
-        # determine longest saved timeseries length among runs of this model
-        for run in range(model.n_runs):
-            states = model.all_states_over_time[run]
-            if states is None:
-                continue
-            L = len(states)
-            if L > max_t:
-                max_t = L
-
-    # prepare day column names
-    day_cols = [f"{day_prefix}{t}" for t in range(max_t)]
-
-    # Second pass: build per-run records
-    for entry in variant_results:
-        vname = entry.get("variant_name") or entry.get("name")
-        model = entry.get("model", None)
-        if model is None:
-            continue
-
-        base_name, params = _parse_variant_name(vname, name_sep=name_sep)
-
-        for run in range(model.n_runs):
-            # Meta
-            row = {
-                "variant_name": vname,
-                "base_variant": base_name,
-                "run_number": int(run)
-            }
-            # attach parsed sweep params
-            for k in sorted(parsed_param_keys):
-                row[k] = params.get(k, None)
-
-            # compute prevalence series
-            states_over_time = model.all_states_over_time[run]
-            if states_over_time is None or len(states_over_time) == 0:
-                prevalence = np.full(max_t, np.nan)
-            else:
-                N = model.N
-                preval_list = [len(state[2]) / float(N) if N > 0 else np.nan for state in states_over_time]
-                if len(preval_list) < max_t:
-                    if pad_with_last:
-                        last_val = preval_list[-1] if preval_list else np.nan
-                        preval_list = preval_list + [last_val] * (max_t - len(preval_list))
-                    else:
-                        preval_list = preval_list + [np.nan] * (max_t - len(preval_list))
-                else:
-                    preval_list = preval_list[:max_t]
-                prevalence = np.array(preval_list, dtype=float)
-
-            # cumulative incidence if requested
-            if return_cumulative_incidence:
-                exposures = model.all_new_exposures[run]
-                # treat exposures[0] empty as imported seeds
-                if len(exposures) > 0 and (hasattr(exposures[0], "__len__") and len(exposures[0]) == 0):
-                    exposures = list(exposures)
-                    exposures[0] = np.array(model.params.get("I0", []), dtype=int)
-                ever = np.zeros(model.N, dtype=bool)
-                cumul_list = []
-                for t in range(len(exposures)):
-                    new = np.array(exposures[t], dtype=int) if len(exposures[t]) > 0 else np.array([], dtype=int)
-                    if new.size:
-                        ever[new] = True
-                    cumul_list.append(ever.sum() / float(model.N) if model.N > 0 else np.nan)
-                if len(cumul_list) < max_t:
-                    if pad_with_last:
-                        last_c = cumul_list[-1] if cumul_list else 0.0
-                        cumul_list = cumul_list + [last_c] * (max_t - len(cumul_list))
-                    else:
-                        cumul_list = cumul_list + [np.nan] * (max_t - len(cumul_list))
-                else:
-                    cumul_list = cumul_list[:max_t]
-                cumulative = np.array(cumul_list, dtype=float)
-            else:
-                cumulative = None
-
-            # attach day columns (wide)
-            for idx, col in enumerate(day_cols):
-                row[col] = float(prevalence[idx]) if prevalence is not None else np.nan
-
-            rows.append(row)
-
-            if return_cumulative_incidence:
-                crow = {
-                    "variant_name": vname,
-                    "base_variant": base_name,
-                    "run_number": int(run)
-                }
-                for k in sorted(parsed_param_keys):
-                    crow[k] = params.get(k, None)
-                for idx, col in enumerate(day_cols):
-                    crow[col] = float(cumulative[idx]) if cumulative is not None else np.nan
-                cum_rows.append(crow)
-
-    # Build wide DataFrames
-    meta_cols = ["variant_name", "base_variant", "run_number"]
-    param_cols = sorted(parsed_param_keys)
-    wide_cols = meta_cols + param_cols + day_cols
-
-    if rows:
-        prevalence_df = pd.DataFrame(rows)
-        # ensure all expected columns exist (fill missing with NaN)
-        for c in wide_cols:
-            if c not in prevalence_df.columns:
-                prevalence_df[c] = np.nan
-        prevalence_df = prevalence_df[wide_cols]
-    else:
-        prevalence_df = pd.DataFrame(columns=wide_cols)
-
-    if not return_cumulative_incidence:
-        # possibly return long
-        if return_long:
-            id_vars = meta_cols + param_cols
-            long = prevalence_df.melt(id_vars=id_vars, value_vars=day_cols, var_name="time", value_name="prevalence")
-            # convert time to integer index (strip prefix)
-            long["time"] = long["time"].str[len(day_prefix):].astype(int)
-            # reorder columns
-            long = long[id_vars + ["time", "prevalence"]]
-            return long
-        else:
-            return prevalence_df
-    else:
-        # build cumulative wide
-        if cum_rows:
-            cumulative_df = pd.DataFrame(cum_rows)
-            for c in wide_cols:
-                if c not in cumulative_df.columns:
-                    cumulative_df[c] = np.nan
-            cumulative_df = cumulative_df[wide_cols]
-        else:
-            cumulative_df = pd.DataFrame(columns=wide_cols)
-
-        if return_long:
-            id_vars = meta_cols + param_cols
-            prevalence_long = prevalence_df.melt(id_vars=id_vars, value_vars=day_cols, var_name="time", value_name="prevalence")
-            prevalence_long["time"] = prevalence_long["time"].str[len(day_prefix):].astype(int)
-            prevalence_long = prevalence_long[id_vars + ["time", "prevalence"]]
-
-            cumulative_long = cumulative_df.melt(id_vars=id_vars, value_vars=day_cols, var_name="time", value_name="cumulative_incidence")
-            cumulative_long["time"] = cumulative_long["time"].str[len(day_prefix):].astype(int)
-            cumulative_long = cumulative_long[id_vars + ["time", "cumulative_incidence"]]
-
-            return prevalence_long, cumulative_long
-        else:
-            return prevalence_df, cumulative_df
-
+#Build time series plots
 def plot_epi_series(
-    df_long: pd.DataFrame,
+    df_timeseries: pd.DataFrame,  
     type: str = "prevalence",
     spaghetti: bool = False,
     frac: bool = True,
-    population: float | None = None,
     fixed_axis: bool = True,
-    main_title: str | None = None,
-    outbreak_threshold: Optional[float] = None,
-    outbreak_label_fmt: str | None = None,
-    outbreak_show_N_in_title: bool = True,
-    time_col: str = "time",
-    value_col: str | None = None,
-    run_col: str = "run_number",
-    variant_col: str = "variant_name",
-    facet_col: str = "base_variant",
-    collapse_func: str = "mean",
-    ncols: int = 3,
-    spaghetti_color: str = "#00274C",
-    spaghetti_alpha: float = 0.22,
-    mean_line_color: str = "#00274C",
-    mean_line_width: float = 2.2,
-    median_color: str = "#DB130D",
-    median_width: float = 2.8,
-    ci50_color: str = "#00283B",
-    ci90_color: str = "#0584FA",
-    ci95_color: str = "#8CC6FD",
-    band_alpha: float = 0.8,
-    figsize_per_facet: tuple[float, float] = (5.2, 3.6),
-):
+    outbreak_threshold: Optional[float] = None
+    ):
     """
-    Plot prevalence/incidence series from a long-format DataFrame.
+    Args:
+    df_timeseries: DataFrame with columns ['variant_name','base_variant','run_number',
+                    'prevalence_count_series','prevalence_frac_series',
+                    'cumulative_infections_count_series','cumulative_infections_frac_series', ...]
+    type: "prevalence" or "incidence"
+    spaghetti: if True plot spaghetti lines per run; if False plot fan (quantiles) + median
+    frac: if True plot fraction series, else plot counts
+    fixed_axis: if True, match y-axis across facets (top row or entire grid as appropriate)
+    outbreak_threshold: optional threshold to define outbreak runs (count if >1, fraction if <=1).
+                        If provided creates two-row layout: top = all runs, bottom = outbreak runs.
+    Returns:
+    (fig, axes) matplotlib Figure and axes array
 
-    Improvements from prior version:
-    - Correct grid indexing so facets map to subplot positions robustly.
-    - Optional two-row layout when outbreak_threshold is provided: top row = All Runs, bottom row = Outbreak Runs.
-    - Row labels ("All Runs", "Outbreak Runs...") placed in the left margin, closer to plots.
-    - "Number of Runs: N" label placed under each subplot, avoiding overlap with x-axis label.
     """
-    type = type.lower().strip()
-    if type not in {"prevalence", "incidence"}:
+    # Visual defaults (kept consistent)
+    spaghetti_color = "#00274C"
+    spaghetti_alpha = 0.22
+    mean_line_color = "#00274C"
+    mean_line_width = 2.2
+    median_color = "#DB130D"
+    median_width = 2.8
+    ci50_color = "#00283B"
+    ci90_color = "#0584FA"
+    ci95_color = "#8CC6FD"
+    band_alpha = 0.8
+    figsize_per_facet = (5.2, 4.6)
+
+    t = str(type).lower().strip()
+    if t not in {"prevalence", "incidence"}:
         raise ValueError('type must be "prevalence" or "incidence"')
 
-    if (not frac) and (population is None):
-        raise ValueError("population (scalar) is required when frac=False")
+    # required per-run columns
+    required_cols = {
+        "variant_name", "base_variant", "run_number",
+        "prevalence_count_series", "prevalence_frac_series",
+        "cumulative_infections_count_series", "cumulative_infections_frac_series"
+    }
+    missing = required_cols - set(df_timeseries.columns)
+    if missing:
+        raise ValueError(f"timeseries DataFrame missing required columns: {missing}")
 
-    # infer value_col when not provided
-    if value_col is None:
-        if type == "prevalence":
-            if "prevalence" not in df_long.columns:
-                raise ValueError('Expected a "prevalence" column for type="prevalence"')
-            value_col = "prevalence"
-        else:
-            if not frac:
-                if "cumulative_incidence" not in df_long.columns and "cumulative_cases" not in df_long.columns:
-                    raise ValueError('frac=False requires either "cumulative_incidence" or "cumulative_cases" column')
-                value_col = "cumulative_incidence" if "cumulative_incidence" in df_long.columns else "cumulative_cases"
+    # robust list parsing helper
+    def _ensure_list(x):
+        if x is None:
+            return []
+        if isinstance(x, np.ndarray):
+            return x.tolist()
+        if isinstance(x, (list, tuple)):
+            return list(x)
+        if isinstance(x, str):
+            s = x.strip()
+            if not s:
+                return []
+            try:
+                return json.loads(s)
+            except Exception:
+                try:
+                    return ast.literal_eval(s)
+                except Exception:
+                    return []
+        try:
+            # scalar NaN check
+            if np.isscalar(x) and pd.isna(x):
+                return []
+        except Exception:
+            pass
+        return [x]
+
+    # build long-format records per run/time and capture final cumulative for outbreak detection
+    long_records = []
+    final_values = {}  # (variant_name, run_number) -> {'final_count', 'final_frac'}
+
+    for _, row in df_timeseries.iterrows():
+        vname = row["variant_name"]
+        bname = row["base_variant"]
+        run_num = int(row.get("run_number", 0))
+
+        prev_count = _ensure_list(row.get("prevalence_count_series", []))
+        prev_frac = _ensure_list(row.get("prevalence_frac_series", []))
+        cum_count = _ensure_list(row.get("cumulative_infections_count_series", []))
+        cum_frac = _ensure_list(row.get("cumulative_infections_frac_series", []))
+
+        # choose series to plot
+        if t == "prevalence":
+            series = prev_frac if frac else prev_count
+            T = max(len(prev_count), len(prev_frac), len(cum_count), len(cum_frac))
+            # pad with last value
+            def pad(seq, L):
+                s = list(seq)
+                if len(s) >= L:
+                    return s[:L]
+                fill = s[-1] if s else 0
+                return s + [fill] * (L - len(s))
+            series = pad(series, T)
+            final_c = int(cum_count[-1]) if len(cum_count) > 0 else 0
+            final_f = float(cum_frac[-1]) if len(cum_frac) > 0 else 0.0
+        else:  # cumulative incidence plotting (never decreases)
+            # use cumulative arrays directly (counts or fractions)
+            if frac:
+                cum = list(cum_frac)
             else:
-                if "incidence" in df_long.columns:
-                    value_col = "incidence"
-                elif "cumulative_incidence" in df_long.columns:
-                    value_col = "cumulative_incidence"
-                else:
-                    raise ValueError('Expected "incidence" or "cumulative_incidence" for type="incidence"')
+                cum = list(cum_count)
+            T = len(cum)
+            # pad if necessary based on available series lengths
+            if T == 0:
+                # fallback: try to infer from prevalence length
+                T = max(len(prev_count), len(prev_frac))
+            def pad(seq, L):
+                s = list(seq)
+                if len(s) >= L:
+                    return s[:L]
+                fill = s[-1] if s else 0
+                return s + [fill] * (L - len(s))
+            cum = pad(cum, T)
+            # enforce non-decreasing by cumulative max
+            try:
+                cum = list(np.maximum.accumulate(np.array(cum, dtype=float)))
+            except Exception:
+                # fallback simple loop
+                cum_out = []
+                curmax = -np.inf
+                for v in cum:
+                    try:
+                        vv = float(v)
+                    except Exception:
+                        vv = 0.0
+                    if vv < curmax:
+                        vv = curmax
+                    else:
+                        curmax = vv
+                    cum_out.append(vv)
+                cum = cum_out
+            series = cum
+            final_c = int(cum_count[-1]) if len(cum_count) > 0 else int(series[-1]) if series else 0
+            final_f = float(cum_frac[-1]) if len(cum_frac) > 0 else float(series[-1]) if series else 0.0
 
-    # required columns
-    for c in (time_col, value_col, run_col, variant_col):
-        if c not in df_long.columns:
-            raise ValueError(f"Missing required column: {c}")
+        # append long records
+        for ti, val in enumerate(series):
+            try:
+                v = float(val)
+            except Exception:
+                v = float("nan")
+            long_records.append({
+                "base_variant": bname,
+                "variant_name": vname,
+                "run_number": int(run_num),
+                "time": int(ti),
+                "value": v
+            })
 
-    # facet list (base variants)
-    facets = pd.Series(df_long[facet_col].dropna().unique()).sort_values().tolist() if facet_col in df_long.columns else [None]
-    n_facets = len(facets)
+        final_values[(vname, run_num)] = {"final_count": int(final_c), "final_frac": float(final_f)}
 
-    # outbreak_threshold handling -> two-row layout if requested
+    if not long_records:
+        raise RuntimeError("No timeseries data to plot")
+
+    df_long = pd.DataFrame(long_records)
+
+    # facets by base_variant; one column per base variant (per request)
+    facets = sorted(df_long["base_variant"].dropna().unique().tolist()) if "base_variant" in df_long.columns else [None]
+    n_facets = len(facets) if facets else 1
+
     create_two_rows = outbreak_threshold is not None
     if create_two_rows:
         ncols_eff = n_facets if n_facets > 0 else 1
         nrows_eff = 2
     else:
-        ncols_eff = min(ncols, n_facets) if n_facets > 0 else 1
-        nrows_eff = int(np.ceil(n_facets / ncols_eff)) if n_facets > 0 else 1
+        ncols_eff = n_facets if n_facets > 0 else 1
+        nrows_eff = 1
 
-    # create subplots grid
     fig, axes = plt.subplots(nrows_eff, ncols_eff,
-                             figsize=(figsize_per_facet[0] * ncols_eff, figsize_per_facet[1] * nrows_eff),
-                             squeeze=False)
+                            figsize=(figsize_per_facet[0] * ncols_eff, figsize_per_facet[1] * nrows_eff),
+                            squeeze=False)
     axes = np.array(axes).reshape(nrows_eff, ncols_eff)
 
-    # axis labels
-    x_label = "Day" if time_col.lower() in {"day", "t", "time"} else time_col
-    is_cum = ("cumulative" in str(value_col).lower())
-    if type == "prevalence":
-        y_label = "Prevalence" if frac else "Infected (count)"
-    else:
-        y_label = "Cumulative cases" if not frac else ("Cumulative incidence" if is_cum else "Incidence (new infections / day)")
-
-    # auto main title
-    if main_title is None:
-        if type == "prevalence":
-            main_title = "Prevalence over time" if frac else "Number infected over time"
+    def _plot_for_facet(ax, sub_all_df):
+        if sub_all_df.empty:
+            return 0.0, 0
+        total_runs = sub_all_df.groupby(["variant_name", "run_number"]).ngroups
+        if spaghetti:
+            for (_, _), grp in sub_all_df.groupby(["variant_name", "run_number"], sort=False):
+                ax.plot(grp["time"].to_numpy(), grp["value"].to_numpy(), color=spaghetti_color, alpha=spaghetti_alpha, linewidth=0.7)
+            mean_series = sub_all_df.groupby("time")["value"].mean().sort_index()
+            if not mean_series.empty:
+                ax.plot(mean_series.index.to_numpy(), mean_series.to_numpy(), color=mean_line_color, linewidth=mean_line_width)
+            local_max = sub_all_df["value"].max()
+            return float(local_max), int(total_runs)
         else:
-            if not frac:
-                main_title = "Cumulative cases over time"
-            else:
-                main_title = "Cumulative incidence over time" if is_cum else "Incidence over time"
+            qs = sub_all_df.groupby("time")["value"].quantile([0.025, 0.05, 0.25, 0.5, 0.75, 0.95, 0.975]).unstack().sort_index()
+            if qs.empty:
+                return 0.0, int(total_runs)
+            x = qs.index.to_numpy()
+            ax.fill_between(x, qs[0.025], qs[0.975], color=ci95_color, alpha=band_alpha, linewidth=0)
+            ax.fill_between(x, qs[0.05], qs[0.95], color=ci90_color, alpha=band_alpha, linewidth=0)
+            ax.fill_between(x, qs[0.25], qs[0.75], color=ci50_color, alpha=band_alpha, linewidth=0)
+            ax.plot(x, qs[0.50], color=median_color, linewidth=median_width)
+            local_max = float(np.nanmax(qs.to_numpy()))
+            return local_max, int(total_runs)
 
-    # Pre-compute final cases per (variant, run) if outbreak filter requested
-    final_df = None
+    # compute outbreak pairs
     outbreak_pairs = set()
     if create_two_rows:
-        if "cumulative_cases" in df_long.columns:
-            final_df = df_long.groupby([variant_col, run_col], as_index=False)["cumulative_cases"].max().rename(columns={"cumulative_cases": "final_cases"})
-        elif "cumulative_incidence" in df_long.columns:
-            if outbreak_threshold > 1 and population is None:
-                raise ValueError("outbreak_threshold > 1 requires passing population to convert fractions to counts")
-            scale = population if outbreak_threshold > 1 else 1.0
-            tmp = df_long.groupby([variant_col, run_col], as_index=False)["cumulative_incidence"].max()
-            tmp["final_cases"] = tmp["cumulative_incidence"] * scale
-            final_df = tmp[[variant_col, run_col, "final_cases"]]
-        else:
-            raise ValueError("outbreak_threshold requires 'cumulative_cases' or 'cumulative_incidence' in df_long")
+        use_count = float(outbreak_threshold) > 1.0
+        thr = float(outbreak_threshold)
+        for (vname, rn), finals in final_values.items():
+            if use_count:
+                if finals.get("final_count", 0) > thr:
+                    outbreak_pairs.add((vname, int(rn)))
+            else:
+                if finals.get("final_frac", 0.0) > thr:
+                    outbreak_pairs.add((vname, int(rn)))
 
-        outbreak_pairs = set(tuple(x) for x in final_df.loc[final_df["final_cases"] > float(outbreak_threshold), [variant_col, run_col]].to_records(index=False))
-
-    # track N counts and per-row maxima
     top_counts = []
     bot_counts = []
     top_row_max = 0.0
     bottom_row_max = 0.0
 
-    # helper to plot on an axis and return local_max and total_runs
-    def _plot_for_facet(ax, sub_all_df):
-        """
-        Plot agg on provided axis, return (local_max, total_runs)
-        """
-        sub = sub_all_df[[time_col, value_col, variant_col, run_col]].dropna()
-        sub["_plot_value"] = pd.to_numeric(sub[value_col], errors="coerce")
-        sub = sub.dropna(subset=["_plot_value"])
-        if not frac:
-            sub["_plot_value"] = sub["_plot_value"] * float(population)
-
-        if sub.empty:
-            return 0.0, 0
-
-        agg = sub.groupby([variant_col, run_col, time_col], as_index=False)["_plot_value"].agg(collapse_func).sort_values([variant_col, run_col, time_col])
-
-        if spaghetti:
-            for _, g in agg.groupby([variant_col, run_col], sort=False):
-                ax.plot(g[time_col].to_numpy(), g["_plot_value"].to_numpy(), color=spaghetti_color, alpha=spaghetti_alpha, linewidth=0.7)
-            mean_series = agg.groupby(time_col)["_plot_value"].mean().sort_index()
-            if not mean_series.empty:
-                ax.plot(mean_series.index.to_numpy(), mean_series.to_numpy(), color=mean_line_color, linewidth=mean_line_width)
-            local_max = agg["_plot_value"].max() if not agg.empty else 0.0
-        else:
-            qs = agg.groupby(time_col)["_plot_value"].quantile([0.025, 0.05, 0.25, 0.50, 0.75, 0.95, 0.975]).unstack().sort_index()
-            if not qs.empty:
-                x = qs.index.to_numpy()
-                ax.fill_between(x, qs[0.025], qs[0.975], color=ci95_color, alpha=band_alpha, linewidth=0)
-                ax.fill_between(x, qs[0.05], qs[0.95], color=ci90_color, alpha=band_alpha, linewidth=0)
-                ax.fill_between(x, qs[0.25], qs[0.75], color=ci50_color, alpha=band_alpha, linewidth=0)
-                ax.plot(x, qs[0.50], color=median_color, linewidth=median_width)
-                # safest local max across quantiles
-                local_max = float(np.nanmax(qs.to_numpy()))
-            else:
-                local_max = 0.0
-
-        total_runs = sub_all_df[[variant_col, run_col]].drop_duplicates().shape[0]
-        return float(local_max), int(total_runs)
-
-    # Main plotting loop: map each facet index -> grid position(s)
     for i, facet in enumerate(facets):
         if create_two_rows:
-            # top axis at column i
             row_top, col_top = 0, i
             row_bot, col_bot = 1, i
         else:
-            row_top, col_top = divmod(i, ncols_eff)
-            row_bot, col_bot = None, None  # no bottom row
+            row_top, col_top = 0, i
+            row_bot, col_bot = None, None
 
         ax_top = axes[row_top, col_top]
-        if facet is None:
-            sub_all = df_long.copy()
-            facet_title = None
-        else:
-            sub_all = df_long[df_long[facet_col] == facet].copy()
-            facet_title = f"{facet}"
-
-        # Plot top
+        sub_all = df_long[df_long["base_variant"] == facet].copy()
         local_max_top, total_runs = _plot_for_facet(ax_top, sub_all)
         top_counts.append(total_runs)
         top_row_max = max(top_row_max, local_max_top)
-        ax_top.set_title(facet_title)
-        ax_top.set_xlabel(x_label)
-        ax_top.set_ylabel(y_label)
+        ax_top.set_title(str(facet))
+        ax_top.set_xlabel("Day")
+        if t == "prevalence":
+            ylabel = "Prevalence (fraction)" if frac else "Prevalence (count)"
+        else:
+            ylabel = "Cumulative incidence (fraction)" if frac else "Cumulative incidence (count)"
+        ax_top.set_ylabel(ylabel)
         ax_top.grid(True, alpha=0.25)
         ax_top.set_ylim(bottom=0)
 
-        # Plot bottom if outbreak layout
         if create_two_rows:
             ax_bot = axes[row_bot, col_bot]
-            # build sub_bot with outbreak pairs limited to this facet
             if outbreak_pairs:
-                pairs_df = pd.DataFrame(list(outbreak_pairs), columns=[variant_col, run_col])
-                facet_variants = sub_all[variant_col].drop_duplicates() if not sub_all.empty else pd.Series(dtype=object)
-                valid_pairs = pairs_df[pairs_df[variant_col].isin(facet_variants)]
-                if not valid_pairs.empty:
-                    sub_bot = sub_all.merge(valid_pairs, on=[variant_col, run_col], how="inner")
+                valid = [(v, r) for (v, r) in outbreak_pairs if v in sub_all["variant_name"].unique()]
+                if valid:
+                    valid_df = pd.DataFrame(valid, columns=["variant_name", "run_number"])
+                    sub_bot = sub_all.merge(valid_df, on=["variant_name", "run_number"], how="inner")
                 else:
                     sub_bot = pd.DataFrame(columns=sub_all.columns)
             else:
                 sub_bot = pd.DataFrame(columns=sub_all.columns)
 
-            local_max_bot, outbreak_count = _plot_for_facet(ax_bot, sub_bot) if not sub_bot.empty else (0.0, 0)
+            if not sub_bot.empty:
+                local_max_bot, outbreak_count = _plot_for_facet(ax_bot, sub_bot)
+            else:
+                local_max_bot, outbreak_count = 0.0, 0
             bot_counts.append(outbreak_count)
             bottom_row_max = max(bottom_row_max, local_max_bot)
-            ax_bot.set_xlabel(x_label)
-            ax_bot.set_ylabel(y_label)
+            ax_bot.set_xlabel("Day")
+            ax_bot.set_ylabel(ylabel)
             ax_bot.grid(True, alpha=0.25)
             ax_bot.set_ylim(bottom=0)
 
-    # Turn off any unused axes (non-two-row case)
+    # Turn off any unused axes (unlikely since columns == facets)
     if not create_two_rows:
         total_slots = nrows_eff * ncols_eff
         for slot in range(n_facets, total_slots):
@@ -849,13 +590,12 @@ def plot_epi_series(
             c = slot % ncols_eff
             axes[r, c].axis("off")
 
-    # Layout and margins: leave space for left row label and N labels below plots
-    left_margin = 0.11 if create_two_rows else 0.07   # keep smaller left margin than before
-    bottom_margin = 0.12
-    top_rect = 0.90 if not spaghetti else 0.94
+    left_margin = 0.11 if create_two_rows else 0.07
+    bottom_margin = 0.16
+    top_rect = 0.90
     fig.tight_layout(rect=[left_margin, bottom_margin, 1.0, top_rect])
+    fig.subplots_adjust(hspace=0.35) 
 
-    # Row-wise fixed axes if requested
     if create_two_rows and fixed_axis:
         if top_row_max > 0:
             ymax_top = top_row_max * 1.05
@@ -868,53 +608,42 @@ def plot_epi_series(
     elif not create_two_rows and fixed_axis:
         all_max = 0.0
         for ax in axes.ravel():
-            lines = ax.get_lines()
-            if lines:
-                for ln in lines:
-                    ydata = ln.get_ydata()
-                    if len(ydata):
-                        all_max = max(all_max, np.nanmax(ydata))
+            for ln in ax.get_lines():
+                ydata = ln.get_ydata()
+                if len(ydata):
+                    all_max = max(all_max, np.nanmax(ydata))
         if all_max > 0:
             ymax = all_max * 1.05
             for ax in axes.ravel():
                 ax.set_ylim(0, ymax)
 
-    # Add left-side row labels and 'Number of Runs' below each subplot.
-    # Place row-labels slightly inside the left_margin (closer to axes than before)
-    left_x = max(0.005, left_margin - 0.025)  # slightly left of left_margin
+    left_x = max(0.005, left_margin - 0.025)
     if create_two_rows:
-        # compute vertical centers of top and bottom rows
         top_centers = [axes[0, c].get_position() for c in range(ncols_eff)]
         bottom_centers = [axes[1, c].get_position() for c in range(ncols_eff)]
         top_row_center = float(np.mean([p.y0 + p.height / 2.0 for p in top_centers]))
         bottom_row_center = float(np.mean([p.y0 + p.height / 2.0 for p in bottom_centers]))
         fig.text(left_x, top_row_center, "All Runs", va="center", ha="center", rotation="vertical", fontsize=12, fontweight="bold")
-        thr_text = outbreak_label_fmt if outbreak_label_fmt is not None else f"Outbreak Runs: Threshold (Infections > {outbreak_threshold})"
-        fig.text(left_x, bottom_row_center, thr_text, va="center", ha="center", rotation="vertical", fontsize=11)
-
-        # per-subplot N labels below each axis
+        fig.text(left_x, bottom_row_center, f"Outbreak Runs (threshold {outbreak_threshold})", va="center", ha="center", rotation="vertical", fontsize=11)
         for c in range(ncols_eff):
             p_top = axes[0, c].get_position()
             x_center = p_top.x0 + p_top.width / 2.0
             y_label_pos = p_top.y0 - 0.055
-            fig.text(x_center, y_label_pos, f"Number of Runs: {top_counts[c]}", ha="center", va="top", fontsize=9)
-
+            fig.text(x_center, y_label_pos, f"Number of Runs: {top_counts[c] if c < len(top_counts) else 0}", ha="center", va="top", fontsize=9)
             p_bot = axes[1, c].get_position()
             x_center2 = p_bot.x0 + p_bot.width / 2.0
             y_label_pos2 = p_bot.y0 - 0.055
-            fig.text(x_center2, y_label_pos2, f"Number of Runs: {bot_counts[c]}", ha="center", va="top", fontsize=9)
+            fig.text(x_center2, y_label_pos2, f"Number of Runs: {bot_counts[c] if c < len(bot_counts) else 0}", ha="center", va="top", fontsize=9)
     else:
-        # single-/multi-row grid: place N under each used axis
         for i, facet in enumerate(facets):
-            r, c = divmod(i, ncols_eff)
+            r, c = 0, i
             p = axes[r, c].get_position()
             x_center = p.x0 + p.width / 2.0
             y_label_pos = p.y0 - 0.055
-            sub_all = df_long if facet is None else df_long[df_long[facet_col] == facet].copy()
-            total_runs = sub_all[[variant_col, run_col]].drop_duplicates().shape[0]
+            sub_all = df_long if facet is None else df_long[df_long["base_variant"] == facet].copy()
+            total_runs = sub_all[["variant_name", "run_number"]].drop_duplicates().shape[0]
             fig.text(x_center, y_label_pos, f"Number of Runs: {total_runs}", ha="center", va="top", fontsize=9)
 
-    # Legend for fan plots (median + bands)
     if not spaghetti:
         handles = [
             Line2D([0], [0], color=median_color, lw=median_width, label="Median"),
@@ -924,7 +653,10 @@ def plot_epi_series(
         ]
         fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.985), ncol=4, frameon=False)
 
-    # Centered suptitle
+    main_title = ("Prevalence over time (fraction)" if t == "prevalence" and frac else
+                "Prevalence over time (count)" if t == "prevalence" else
+                "Cumulative incidence over time (fraction)" if frac else
+                "Cumulative incidence over time (count)")
     fig.suptitle(main_title, x=0.5, y=0.995, ha="center", fontsize=14, fontweight="bold")
 
     return fig, axes
