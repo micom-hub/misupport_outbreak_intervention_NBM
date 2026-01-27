@@ -1,0 +1,17 @@
+name: LHDsim
+channels:
+  - defaults
+dependencies:
+  - python=3.14
+  - scipy
+  - numba
+  - networkx
+  - python-igraph
+  - selenium
+  - numpy
+  - pandas
+  - matplotlib
+  - pytest
+  - ipykernel
+  - pyarrow
+prefix: /opt/miniconda3/envs/LHDsim

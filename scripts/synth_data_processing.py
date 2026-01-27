@@ -5,7 +5,7 @@ import numpy as np
 from numba import njit
 
 #@profile
-def synthetic_data_process(county="Chippewa", save_files=True):
+def synthetic_data_process(county, save_files=True):
     print("Processing FRED synthetic population data...")
     """
     Processes FRED synthetic population zip files, cleans and merges demographic/contact/location info.

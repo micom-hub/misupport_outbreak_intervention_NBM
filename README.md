@@ -20,8 +20,7 @@ Findings from these simulations will be used to design an optimized LHD calling 
 * Reinfection is not possible
 
 #### Environment setup
+To set up the environment from the portable environment file, run:
+conda env create -f environment.yml
 
-Run this:
-```bash
-conda create -n contact-nbm -c conda-forge python=3.14 numpy scipy pandas matplotlib scikit-learn seaborn igraph networkx selenium ffmpeg
-```
+For FredFetch, your device must have a compatible chromedriver. As a workaround, you can download the synthetic population zip files from the FRED website linked in FredFetch, store it in a directory ./data/ and rename the file to {County}.zip

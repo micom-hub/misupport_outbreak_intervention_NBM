@@ -96,7 +96,7 @@ def test_step_and_simulate_run(net_model):
     # small simulate run (smoke)
     m.simulate()
     assert m.all_states_over_time[0]  # should exist
-    # epi_summary returns DataFrame
-    df = m.epi_summary()
+    # epi_outcomes returns DataFrame
+    df = m.epi_outcomes()
     assert isinstance(df, pd.DataFrame)
     assert "total_infections" in df.columns
