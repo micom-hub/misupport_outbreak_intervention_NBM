@@ -93,8 +93,8 @@ DefaultModelParams: ModelParameters = {
     "incubation_period_vax": 10.5,
     "infectious_period_vax": 5,
     "relative_infectiousness_vax": 0.05,
-    "conferred_immunity_duration": None, #duration where one is completely immune post-infection
-    "lasting_partial_immunity": None, #0-1, permanent reduced sus
+    "conferred_immunity_duration": 10, #duration where one is completely immune post-infection
+    "lasting_partial_immunity": .3, #0-1, percent immune relative to naive
     "vax_efficacy": .997,
     "vax_uptake": 0.85, 
     "susceptibility_multiplier_under_five": 1,

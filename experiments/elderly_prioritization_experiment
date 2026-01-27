@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt # noqa: F401
 
 from scripts.model_driver import prepare_contacts, run_variants, run_single_model  # noqa: F401
 from scripts.network_model import DefaultModelParams, EqualPriority, RandomPriority, PrioritizeElders, CallIndividualsAction # noqa: F401
-from scripts.analysis_tools import generate_sweep_variants, generate_lhs_variants, aggregate_variant_results
+from scripts.analysis_tools import *
 
 # --------------------------
 #       INTRODUCTION
@@ -45,7 +45,7 @@ Tests variants of models that prioritize calling elderly citizens over non-elder
 #Update BASE_PARAMS with values to be non-default
 BASE_PARAMS = DefaultModelParams.copy()
 BASE_PARAMS.update({
-    "n_runs": 10,
+    "n_runs": 100,
     "simulation_duration": 100,
     "seed": 2026,
     "save_data_files": True,
@@ -94,8 +94,8 @@ def call_action_factory(nodes, contact_type, prio, cost, params = None):
 #Define experiment variants
 #each variant gets a name, a dict of params to override with matching keys to base_params, a mapping of LHD action types to algorithms, a mapping of LHD action types to action factories, and a save_exposures option
 
-
-VARIANTS = [
+#Set base variants, which can differ in parameters, or LHD strategies
+BASE_VARIANTS = [
     {
         "name": "NO_LHD",
         "param_overrides": {},
@@ -118,9 +118,13 @@ VARIANTS = [
         "save_exposures": False,
     }
 ]
+#Sweep across parameters for each base variant
 print("Generating Parameter Sweep Variants")
-sweep_params = {"base_transmission_prob":(0,1)}
-VARIANTS = generate_lhs_variants(VARIANTS, sweep_params, n = 2)
+sweep_params = {
+    "base_transmission_prob":(0,1), 
+    "susceptibility_multiplier_elderly":(1,4)
+}
+VARIANTS = generate_lhs_variants(BASE_VARIANTS, sweep_params, n = 15)
 
 
 
@@ -140,6 +144,7 @@ with open(os.path.join(RUN_DIR, "experiment_config.json"), "w") as f:
 #         RUN MODEL
 # --------------------------
 #run model based on methods specifications
+#Note that variants_share_edge_list MUST be set to False for different variants to have independent contact networks
 
 print(f"Preparing contacts for county: {COUNTY}")
 contacts_df = prepare_contacts(COUNTY, STATE, data_dir = "data", save_files = BASE_PARAMS["save_data_files"])
@@ -150,7 +155,8 @@ variant_results = run_variants(
     base_params = BASE_PARAMS,
     variants = VARIANTS,
     run_dir = RUN_DIR,
-    base_seed = BASE_PARAMS.get("seed", 2026)
+    base_seed = BASE_PARAMS.get("seed", 2026),
+    variants_share_edge_list = True
 )
 
 print("Run finished!")
@@ -173,3 +179,14 @@ summary.to_csv(os.path.join(RUN_DIR, "aggregated_experiment_results.csv"))
 #major outbreak defined as 15+ cases
 df['outbreak'] = (df['total_infections'] >= 3)
 df['major_outbreak'] = (df['total_infections'] >= 10)
+
+df.insert(0, 'transmission_prob', df.pop('base_transmission_prob'))
+
+prev_series, cum_inc_series = disease_over_time(variant_results, return_cumulative_incidence= True, return_long = True)
+
+df.plot.scatter(x = 'transmission_prob', y = 'total_infections')
+plt.show()
+plt.close()
+
+fig, axes = plot_epi_series(cum_inc_series, type = "incidence", spaghetti = False, outbreak_threshold=5, population=variant_results[0]["model"].N)
+plt.show()

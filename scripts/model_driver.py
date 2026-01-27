@@ -21,7 +21,7 @@ import pandas as pd
 import re
 import warnings
 
-from scripts.synth_data_processing import synthetic_data_process
+from scripts.synth_data_processing import synthetic_data_process, build_edge_list
 from scripts.fred_fetch import downloadPopData
 from scripts.network_model import NetworkModel
 from scripts.analysis_tools import _try_parse_value, _parse_variant_name
@@ -100,7 +100,8 @@ def run_single_model(
     factory_map: Optional[Dict[str, callable]] = None,
     seed:Optional[int] = None,
     results_dir: Optional[str] = None,
-    save_exposures: bool = False
+    save_exposures: bool = False,
+    edge_list: Optional[pd.DataFrame] = None
 ) -> NetworkModel:
     """
     Instantiates a NetworkModel with contacts_df and params, registers algorithms and actions for LHD, runs simulate, and returns model for analysis
@@ -117,6 +118,7 @@ def run_single_model(
     model = NetworkModel(
         contacts_df = contacts_df, 
         params = params_copy,
+        edge_list = edge_list,
         rng = rng, 
         results_folder = results_dir,
         lhd_register_defaults = False, #only use provided actions for LHDs run by driver
@@ -139,20 +141,47 @@ def run_variants(
     base_params: Dict,
     variants: List[Dict],
     run_dir: str,
-    base_seed: Optional[int] = None
+    base_seed: Optional[int] = None,
+    variants_share_edge_list: Optional[bool] = None 
 ) -> List[Dict]:
     """
+        IF VARIANTS_SHARE_EDGE_LIST, edge lists will not be altered from variant to variant, therefore, if varying factors like contact weight or density, variants_share_edge_list MUST BE FALSE
+
         Run a list of model variants. Each variant is a dict with keys:
         - 'name' - string name of the variant
         - 'param_overrides' - dict of parameters to change and new values
         - algorithm_map' - dict of action_type -> Algorithm
         - 'factory_map' - dict action_type -> factory
-        - 'save_exposures'
+        - 'save_exposures
 
         Returns a list of dicts, one per variant, containing model instance and path
     """
     os.makedirs(run_dir, exist_ok = True)
     base_seed = int(base_seed) if base_seed is not None else int(base_params.get("seed", 0))
+
+
+    #Handle edge list logic for the run
+    if variants_share_edge_list is None:
+        variants_share_edge_list_flag = bool(base_params.get("variants_share_edge_list", False))
+    else:
+        variants_share_edge_list_flag = bool(variants_share_edge_list)
+
+ # If variants_share_edge_list is True, build one edge_list once (driver-level) and pass into all variants
+    shared_edge_list = None
+    if variants_share_edge_list_flag:
+        rng_for_edges = np.random.default_rng(int(base_seed)) if base_seed is not None else None
+        try:
+            shared_edge_list = build_edge_list(
+                contacts_df = contacts_df,
+                params = base_params,
+                rng = rng_for_edges,
+                save = bool(base_params.get("save_data_files", False)),
+                county = base_params.get("county", "")
+            )
+        except Exception as e:
+            warnings.warn(f"Failed building shared edge list in driver: {e}")
+            shared_edge_list = None
+
 
     variant_results = []
     combined_action_log = []
@@ -170,7 +199,9 @@ def run_variants(
         params["seed"] = int(seed)
 
         if len(variants) < 10:
-            print("Running model for variant: {name}")
+            print(f"Running model for variant: {name}")
+        edge_list_to_pass = shared_edge_list if variants_share_edge_list_flag else None
+
         model = run_single_model(
             contacts_df = contacts_df,
             params = params,
@@ -178,7 +209,8 @@ def run_variants(
             factory_map = variant.get("factory_map"),
             seed = seed,
             results_dir = None, #for variant runs, don't write per-variant file
-            save_exposures = False
+            save_exposures = False,
+            edge_list = edge_list_to_pass
         )
         if model is None:
             raise RuntimeError("run_single_model() did not return a NetworkModel instance")

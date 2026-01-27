@@ -306,6 +306,7 @@ def aggregate_variant_results(
     name_sep: str = "__",
     aggregate_sweeps: bool = True,
     aggregated_summary: bool = True,
+    reduced_results: bool = False,
     numeric_aggs: Optional[List[str]] = None
 ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
     """
@@ -354,7 +355,7 @@ def aggregate_variant_results(
 
         # call epi_outcomes for model
         try:
-            epi_df = model.epi_outcomes()
+            epi_df = model.epi_outcomes(reduced = reduced_results)
             if not isinstance(epi_df, pd.DataFrame):
                 epi_df = pd.DataFrame(epi_df)
         except Exception as exc:

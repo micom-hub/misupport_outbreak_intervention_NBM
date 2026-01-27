@@ -127,7 +127,7 @@ with open(os.path.join(RUN_DIR, "experiment_config.json"), "w") as f:
         "description": DESCRIPTION,
         "base_params": BASE_PARAMS,
         "variants": VARIANTS,
-        "timestamp": datetime.datetime.utcnow().isoformat() 
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat() 
     }, f, indent = 4, default = str)
 
 
