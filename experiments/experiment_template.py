@@ -135,6 +135,7 @@ with open(os.path.join(RUN_DIR, "experiment_config.json"), "w") as f:
 #         RUN MODEL
 # --------------------------
 #run model based on methods specifications
+# decide whether variants share edge list, and if model should be run in parallel
 
 print(f"Preparing contacts for county: {COUNTY}")
 contacts_df = prepare_contacts(COUNTY, STATE, data_dir = "data", save_files = BASE_PARAMS["save_data_files"])
@@ -145,7 +146,10 @@ variant_results = run_variants(
     base_params = BASE_PARAMS,
     variants = VARIANTS,
     run_dir = RUN_DIR,
-    base_seed = BASE_PARAMS.get("seed", 2026)
+    base_seed = BASE_PARAMS.get("seed", 2026),
+    variants_share_edge_list = True,
+    parallel = False,
+    max_workers = None
 )
 
 print("Run finished!")

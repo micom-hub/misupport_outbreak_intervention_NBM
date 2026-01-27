@@ -711,7 +711,7 @@ class NetworkModel:
                 if waned_mask.any():
                     waned_nodes = np.where(waned_mask)[0]
                     #move to sus and reset everything
-                    self.state[waned_nodes == 0]
+                    self.state[waned_nodes] = 0
                     self.time_in_state[waned_nodes] = 0
                     self.incubation_periods[waned_nodes] = np.nan
                     self.infectious_periods[waned_nodes] = np.nan
