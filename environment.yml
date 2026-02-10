@@ -1,6 +1,7 @@
 name: LHDsim
 channels:
   - defaults
+  - conda-forge
 dependencies:
   - python=3.14
   - scipy
