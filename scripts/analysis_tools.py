@@ -11,6 +11,7 @@ from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 import ast 
 import json
+import os 
 
 def generate_lhs_variants(    variants_list: List[Dict[str, Any]],    param_ranges: Dict[str, Tuple[float, float]],    n: int,    *,    name_sep: str = "__",    value_formatter: Optional[Callable[[Any], str]] = None,    int_keys: Optional[Iterable[str]] = None,    seed: Optional[int] = None) -> List[Dict[str, Any]]:    
     """    
@@ -334,7 +335,7 @@ def plot_epi_series(
     (fig, axes) matplotlib Figure and axes array
 
     """
-    # Visual defaults (kept consistent)
+     # Visual defaults (kept consistent)
     spaghetti_color = "#00274C"
     spaghetti_alpha = 0.22
     mean_line_color = "#00274C"
@@ -351,134 +352,178 @@ def plot_epi_series(
     if t not in {"prevalence", "incidence"}:
         raise ValueError('type must be "prevalence" or "incidence"')
 
-    # required per-run columns
-    required_cols = {
-        "variant_name", "base_variant", "run_number",
-        "prevalence_count_series", "prevalence_frac_series",
-        "cumulative_infections_count_series", "cumulative_infections_frac_series"
+    # required per-run columns (keep checks broad but informative)
+    req_cols = {
+        "variant_name",
+        "base_variant",
+        "run_number",
+        "prevalence_count_series",
+        "prevalence_frac_series",
+        "cumulative_infections_count_series",
+        "cumulative_infections_frac_series",
     }
-    missing = required_cols - set(df_timeseries.columns)
+    missing = req_cols - set(df_timeseries.columns)
     if missing:
         raise ValueError(f"timeseries DataFrame missing required columns: {missing}")
 
-    # robust list parsing helper
+    # robust list parsing helper (handles lists, numpy arrays, JSON or Python-list strings, NaN)
     def _ensure_list(x):
         if x is None:
             return []
-        if isinstance(x, np.ndarray):
-            return x.tolist()
         if isinstance(x, (list, tuple)):
             return list(x)
+        if isinstance(x, np.ndarray):
+            try:
+                return x.tolist()
+            except Exception:
+                return list(np.asarray(x).tolist())
         if isinstance(x, str):
             s = x.strip()
             if not s:
                 return []
+            # try JSON first, then Python literal
             try:
-                return json.loads(s)
+                parsed = json.loads(s)
+                if isinstance(parsed, (list, tuple)):
+                    return list(parsed)
+                # scalar -> wrap
+                return [parsed]
             except Exception:
                 try:
-                    return ast.literal_eval(s)
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, (list, tuple)):
+                        return list(parsed)
+                    return [parsed]
                 except Exception:
                     return []
+        # pandas NA-like values
         try:
-            # scalar NaN check
-            if np.isscalar(x) and pd.isna(x):
+            if pd.isna(x):
                 return []
         except Exception:
             pass
+        # fallback: wrap scalar in list
         return [x]
 
-    # build long-format records per run/time and capture final cumulative for outbreak detection
-    long_records = []
-    final_values = {}  # (variant_name, run_number) -> {'final_count', 'final_frac'}
-
-    for _, row in df_timeseries.iterrows():
-        vname = row["variant_name"]
-        bname = row["base_variant"]
-        run_num = int(row.get("run_number", 0))
-
-        prev_count = _ensure_list(row.get("prevalence_count_series", []))
-        prev_frac = _ensure_list(row.get("prevalence_frac_series", []))
-        cum_count = _ensure_list(row.get("cumulative_infections_count_series", []))
-        cum_frac = _ensure_list(row.get("cumulative_infections_frac_series", []))
-
-        # choose series to plot
-        if t == "prevalence":
-            series = prev_frac if frac else prev_count
-            T = max(len(prev_count), len(prev_frac), len(cum_count), len(cum_frac))
-            # pad with last value
-            def pad(seq, L):
-                s = list(seq)
-                if len(s) >= L:
-                    return s[:L]
-                fill = s[-1] if s else 0
-                return s + [fill] * (L - len(s))
-            series = pad(series, T)
-            final_c = int(cum_count[-1]) if len(cum_count) > 0 else 0
-            final_f = float(cum_frac[-1]) if len(cum_frac) > 0 else 0.0
-        else:  # cumulative incidence plotting (never decreases)
-            # use cumulative arrays directly (counts or fractions)
-            if frac:
-                cum = list(cum_frac)
-            else:
-                cum = list(cum_count)
-            T = len(cum)
-            # pad if necessary based on available series lengths
-            if T == 0:
-                # fallback: try to infer from prevalence length
-                T = max(len(prev_count), len(prev_frac))
-            def pad(seq, L):
-                s = list(seq)
-                if len(s) >= L:
-                    return s[:L]
-                fill = s[-1] if s else 0
-                return s + [fill] * (L - len(s))
-            cum = pad(cum, T)
-            # enforce non-decreasing by cumulative max
+    # helpers to convert lists to numeric sequences
+    def _to_int_list(seq):
+        out = []
+        for v in seq:
             try:
-                cum = list(np.maximum.accumulate(np.array(cum, dtype=float)))
+                if isinstance(v, str):
+                    v2 = v.strip()
+                    if v2 == "":
+                        continue
+                    out.append(int(float(v2)))
+                else:
+                    if pd.isna(v):
+                        continue
+                    out.append(int(float(v)))
             except Exception:
-                # fallback simple loop
-                cum_out = []
-                curmax = -np.inf
-                for v in cum:
-                    try:
-                        vv = float(v)
-                    except Exception:
-                        vv = 0.0
-                    if vv < curmax:
-                        vv = curmax
+                # ignore bad entries
+                continue
+        return out
+
+    def _to_float_list(seq):
+        out = []
+        for v in seq:
+            try:
+                if isinstance(v, str):
+                    v2 = v.strip()
+                    if v2 == "":
+                        out.append(float("nan"))
                     else:
-                        curmax = vv
-                    cum_out.append(vv)
-                cum = cum_out
-            series = cum
-            final_c = int(cum_count[-1]) if len(cum_count) > 0 else int(series[-1]) if series else 0
-            final_f = float(cum_frac[-1]) if len(cum_frac) > 0 else float(series[-1]) if series else 0.0
-
-        # append long records
-        for ti, val in enumerate(series):
-            try:
-                v = float(val)
+                        out.append(float(v2))
+                else:
+                    if pd.isna(v):
+                        out.append(float("nan"))
+                    else:
+                        out.append(float(v))
             except Exception:
-                v = float("nan")
-            long_records.append({
-                "base_variant": bname,
+                out.append(float("nan"))
+        return out
+
+    # 1) One-pass parse of all runs into a compact run_entries list
+    run_entries = []  # each entry: {variant_name, base_variant, run_number, raw_series, T_row, final_count, final_frac}
+    for _, row in df_timeseries.iterrows():
+        vname = row.get("variant_name")
+        bname = row.get("base_variant")
+        # robust run_number parsing
+        rn_val = row.get("run_number", 0)
+        try:
+            run_num = int(rn_val)
+        except Exception:
+            try:
+                run_num = int(float(rn_val))
+            except Exception:
+                run_num = 0
+
+        # parse all series that may be present
+        prev_count_raw = _ensure_list(row.get("prevalence_count_series", []))
+        prev_frac_raw = _ensure_list(row.get("prevalence_frac_series", []))
+        cum_count_raw = _ensure_list(row.get("cumulative_infections_count_series", []))
+        cum_frac_raw = _ensure_list(row.get("cumulative_infections_frac_series", []))
+
+        # numeric conversions
+        prev_count = _to_int_list(prev_count_raw)
+        prev_frac = _to_float_list(prev_frac_raw)
+        cum_count = _to_int_list(cum_count_raw)
+        cum_frac = _to_float_list(cum_frac_raw)
+
+        # Per-run canonical time length (mimic original behavior)
+        T_row = max(len(prev_count), len(prev_frac), len(cum_count), len(cum_frac))
+
+        # choose raw_series according to type/frac
+        if t == "prevalence":
+            chosen_raw = prev_frac if frac else prev_count
+        else:  # cumulative/incidence plotting
+            chosen_raw = cum_frac if frac else cum_count
+
+        # convert chosen_raw to numeric float list (do not pad yet)
+        chosen_numeric = _to_float_list(chosen_raw)
+
+        # final sizes for outbreak decisions (prefer cumulative arrays if present)
+        final_count = cum_count[-1] if len(cum_count) > 0 else None
+        final_frac = cum_frac[-1] if len(cum_frac) > 0 else None
+
+        run_entries.append(
+            {
                 "variant_name": vname,
+                "base_variant": bname,
                 "run_number": int(run_num),
-                "time": int(ti),
-                "value": v
-            })
+                "raw_series": chosen_numeric,  # list[float] (may be empty)
+                "T_row": int(T_row),
+                "final_count": int(final_count) if final_count is not None else None,
+                "final_frac": float(final_frac) if final_frac is not None else None,
+            }
+        )
 
-        final_values[(vname, run_num)] = {"final_count": int(final_c), "final_frac": float(final_f)}
+    if not run_entries:
+        raise RuntimeError("No runs parsed from timeseries DataFrame")
 
-    if not long_records:
-        raise RuntimeError("No timeseries data to plot")
+    # 2) Compute outbreak boolean per run (robust)
+    if outbreak_threshold is not None:
+        thr = float(outbreak_threshold)
+        use_fraction = thr <= 1.0  # heuristic: <=1 -> interpret as fraction, >1 -> interpret as count
+        for e in run_entries:
+            if use_fraction:
+                final_f = e.get("final_frac")
+                e["outbreak"] = bool(final_f is not None and (final_f > thr))
+            else:
+                final_c = e.get("final_count")
+                e["outbreak"] = bool(final_c is not None and (final_c > thr))
+    else:
+        for e in run_entries:
+            e["outbreak"] = False
 
-    df_long = pd.DataFrame(long_records)
+    # 3) Group runs by facet (base_variant)
+    facet_map = {}
+    for e in run_entries:
+        facet_key = e.get("base_variant", None)
+        # Keep None as-is so titles show "None" -> will be cast to str later
+        facet_map.setdefault(facet_key, []).append(e)
 
-    # facets by base_variant; one column per base variant (per request)
-    facets = sorted(df_long["base_variant"].dropna().unique().tolist()) if "base_variant" in df_long.columns else [None]
+    facets = sorted(facet_map.keys(), key=lambda x: str(x)) if facet_map else [None]
     n_facets = len(facets) if facets else 1
 
     create_two_rows = outbreak_threshold is not None
@@ -489,48 +534,102 @@ def plot_epi_series(
         ncols_eff = n_facets if n_facets > 0 else 1
         nrows_eff = 1
 
-    fig, axes = plt.subplots(nrows_eff, ncols_eff,
-                            figsize=(figsize_per_facet[0] * ncols_eff, figsize_per_facet[1] * nrows_eff),
-                            squeeze=False)
+    fig, axes = plt.subplots(
+        nrows_eff,
+        ncols_eff,
+        figsize=(figsize_per_facet[0] * ncols_eff, figsize_per_facet[1] * nrows_eff),
+        squeeze=False,
+    )
     axes = np.array(axes).reshape(nrows_eff, ncols_eff)
 
-    def _plot_for_facet(ax, sub_all_df):
-        if sub_all_df.empty:
-            return 0.0, 0
-        total_runs = sub_all_df.groupby(["variant_name", "run_number"]).ngroups
-        if spaghetti:
-            for (_, _), grp in sub_all_df.groupby(["variant_name", "run_number"], sort=False):
-                ax.plot(grp["time"].to_numpy(), grp["value"].to_numpy(), color=spaghetti_color, alpha=spaghetti_alpha, linewidth=0.7)
-            mean_series = sub_all_df.groupby("time")["value"].mean().sort_index()
-            if not mean_series.empty:
-                ax.plot(mean_series.index.to_numpy(), mean_series.to_numpy(), color=mean_line_color, linewidth=mean_line_width)
-            local_max = sub_all_df["value"].max()
-            return float(local_max), int(total_runs)
+    # Helper to pad a run series to length L (pad with last value or 0)
+    def _pad_series_to_len(series_list, L):
+        s = list(series_list) if series_list else []
+        if L <= 0:
+            return []
+        if len(s) >= L:
+            # truncate
+            return [float(x) if (x is not None and not pd.isna(x)) else float("nan") for x in s[:L]]
+        # pad with last value or 0
+        fill = None
+        if len(s) > 0:
+            try:
+                fill = float(s[-1])
+            except Exception:
+                fill = 0.0
         else:
-            qs = sub_all_df.groupby("time")["value"].quantile([0.025, 0.05, 0.25, 0.5, 0.75, 0.95, 0.975]).unstack().sort_index()
-            if qs.empty:
+            fill = 0.0
+        out = []
+        for x in s:
+            try:
+                out.append(float(x))
+            except Exception:
+                out.append(float("nan"))
+        out.extend([fill] * (L - len(out)))
+        return out
+
+    # Plotting helper using vectorized arrays (much faster than groupby-quantile)
+    def _plot_for_facet(ax, entries_for_facet):
+        """
+        entries_for_facet: list of run-entry dicts for a given facet
+        returns: (local_max_value, total_runs)
+        """
+        if not entries_for_facet:
+            return 0.0, 0
+
+        total_runs = len(entries_for_facet)
+        T_facet = max(int(e.get("T_row", 0)) for e in entries_for_facet)
+        if T_facet <= 0:
+            # nothing to plot (no series lengths); still return run count
+            return 0.0, int(total_runs)
+
+        # Build numeric 2D array (n_runs x T_facet)
+        arr = np.full((total_runs, T_facet), np.nan, dtype=float)
+        for i, e in enumerate(entries_for_facet):
+            padded = _pad_series_to_len(e.get("raw_series", []), T_facet)
+            # ensure length
+            if len(padded) != T_facet:
+                padded = _pad_series_to_len(padded, T_facet)
+            arr[i, :] = np.asarray(padded, dtype=float)
+
+        if spaghetti:
+            # spaghetti: plot each run line, then mean
+            for i in range(arr.shape[0]):
+                ax.plot(np.arange(T_facet), arr[i, :], color=spaghetti_color, alpha=spaghetti_alpha, linewidth=0.7)
+            # mean series (ignore NaNs)
+            with np.errstate(invalid="ignore"):
+                mean_series = np.nanmean(arr, axis=0)
+            # plot mean if not all NaNs
+            if not np.all(np.isnan(mean_series)):
+                ax.plot(np.arange(T_facet), mean_series, color=mean_line_color, linewidth=mean_line_width)
+            local_max = float(np.nanmax(arr)) if np.isfinite(np.nanmax(arr)) else 0.0
+            return local_max, int(total_runs)
+        else:
+            # fan plot: compute quantiles vectorized
+            # check for any finite values
+            if not np.isfinite(arr).any():
                 return 0.0, int(total_runs)
-            x = qs.index.to_numpy()
-            ax.fill_between(x, qs[0.025], qs[0.975], color=ci95_color, alpha=band_alpha, linewidth=0)
-            ax.fill_between(x, qs[0.05], qs[0.95], color=ci90_color, alpha=band_alpha, linewidth=0)
-            ax.fill_between(x, qs[0.25], qs[0.75], color=ci50_color, alpha=band_alpha, linewidth=0)
-            ax.plot(x, qs[0.50], color=median_color, linewidth=median_width)
-            local_max = float(np.nanmax(qs.to_numpy()))
+
+            # percentiles in numeric form (np.nanpercentile expects 0-100)
+            q_levels = [2.5, 5.0, 25.0, 50.0, 75.0, 95.0, 97.5]
+            try:
+                qs = np.nanpercentile(arr, q_levels, axis=0)
+                # qs shape -> (len(q_levels), T_facet)
+            except Exception:
+                # fallback to safe quantile via np.apply_along_axis (slower)
+                qs = np.vstack([np.nanpercentile(arr, q, axis=0) for q in q_levels])
+
+            x = np.arange(arr.shape[1])
+            # plot bands
+            ax.fill_between(x, qs[0], qs[-1], color=ci95_color, alpha=band_alpha, linewidth=0)
+            ax.fill_between(x, qs[1], qs[-2], color=ci90_color, alpha=band_alpha, linewidth=0)
+            ax.fill_between(x, qs[2], qs[-3], color=ci50_color, alpha=band_alpha, linewidth=0)
+            # median
+            ax.plot(x, qs[3], color=median_color, linewidth=median_width)
+            local_max = float(np.nanmax(qs)) if np.isfinite(np.nanmax(qs)) else 0.0
             return local_max, int(total_runs)
 
-    # compute outbreak pairs
-    outbreak_pairs = set()
-    if create_two_rows:
-        use_count = float(outbreak_threshold) > 1.0
-        thr = float(outbreak_threshold)
-        for (vname, rn), finals in final_values.items():
-            if use_count:
-                if finals.get("final_count", 0) > thr:
-                    outbreak_pairs.add((vname, int(rn)))
-            else:
-                if finals.get("final_frac", 0.0) > thr:
-                    outbreak_pairs.add((vname, int(rn)))
-
+    # Prepare lists to store maxima and counts for axis scaling and annotations
     top_counts = []
     bot_counts = []
     top_row_max = 0.0
@@ -545,8 +644,9 @@ def plot_epi_series(
             row_bot, col_bot = None, None
 
         ax_top = axes[row_top, col_top]
-        sub_all = df_long[df_long["base_variant"] == facet].copy()
-        local_max_top, total_runs = _plot_for_facet(ax_top, sub_all)
+        entries_all = facet_map.get(facet, [])
+        # top: all runs within facet
+        local_max_top, total_runs = _plot_for_facet(ax_top, entries_all)
         top_counts.append(total_runs)
         top_row_max = max(top_row_max, local_max_top)
         ax_top.set_title(str(facet))
@@ -560,19 +660,11 @@ def plot_epi_series(
         ax_top.set_ylim(bottom=0)
 
         if create_two_rows:
+            # bottom: outbreak runs subset within the facet
             ax_bot = axes[row_bot, col_bot]
-            if outbreak_pairs:
-                valid = [(v, r) for (v, r) in outbreak_pairs if v in sub_all["variant_name"].unique()]
-                if valid:
-                    valid_df = pd.DataFrame(valid, columns=["variant_name", "run_number"])
-                    sub_bot = sub_all.merge(valid_df, on=["variant_name", "run_number"], how="inner")
-                else:
-                    sub_bot = pd.DataFrame(columns=sub_all.columns)
-            else:
-                sub_bot = pd.DataFrame(columns=sub_all.columns)
-
-            if not sub_bot.empty:
-                local_max_bot, outbreak_count = _plot_for_facet(ax_bot, sub_bot)
+            outbreak_entries = [e for e in entries_all if bool(e.get("outbreak", False))]
+            if outbreak_entries:
+                local_max_bot, outbreak_count = _plot_for_facet(ax_bot, outbreak_entries)
             else:
                 local_max_bot, outbreak_count = 0.0, 0
             bot_counts.append(outbreak_count)
@@ -582,7 +674,7 @@ def plot_epi_series(
             ax_bot.grid(True, alpha=0.25)
             ax_bot.set_ylim(bottom=0)
 
-    # Turn off any unused axes (unlikely since columns == facets)
+    # turn off unused axes (if any)
     if not create_two_rows:
         total_slots = nrows_eff * ncols_eff
         for slot in range(n_facets, total_slots):
@@ -594,8 +686,9 @@ def plot_epi_series(
     bottom_margin = 0.16
     top_rect = 0.90
     fig.tight_layout(rect=[left_margin, bottom_margin, 1.0, top_rect])
-    fig.subplots_adjust(hspace=0.35) 
+    fig.subplots_adjust(hspace=0.35)
 
+    # fixed axis scaling (preserve original behavior)
     if create_two_rows and fixed_axis:
         if top_row_max > 0:
             ymax_top = top_row_max * 1.05
@@ -617,6 +710,7 @@ def plot_epi_series(
             for ax in axes.ravel():
                 ax.set_ylim(0, ymax)
 
+    # layout and annotations (keep same look)
     left_x = max(0.005, left_margin - 0.025)
     if create_two_rows:
         top_centers = [axes[0, c].get_position() for c in range(ncols_eff)]
@@ -640,8 +734,8 @@ def plot_epi_series(
             p = axes[r, c].get_position()
             x_center = p.x0 + p.width / 2.0
             y_label_pos = p.y0 - 0.055
-            sub_all = df_long if facet is None else df_long[df_long["base_variant"] == facet].copy()
-            total_runs = sub_all[["variant_name", "run_number"]].drop_duplicates().shape[0]
+            sub_all = [] if facet not in facet_map else facet_map[facet]
+            total_runs = len(sub_all)
             fig.text(x_center, y_label_pos, f"Number of Runs: {total_runs}", ha="center", va="top", fontsize=9)
 
     if not spaghetti:
@@ -654,9 +748,546 @@ def plot_epi_series(
         fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.985), ncol=4, frameon=False)
 
     main_title = ("Prevalence over time (fraction)" if t == "prevalence" and frac else
-                "Prevalence over time (count)" if t == "prevalence" else
-                "Cumulative incidence over time (fraction)" if frac else
-                "Cumulative incidence over time (count)")
+                  "Prevalence over time (count)" if t == "prevalence" else
+                  "Cumulative incidence over time (fraction)" if frac else
+                  "Cumulative incidence over time (count)")
     fig.suptitle(main_title, x=0.5, y=0.995, ha="center", fontsize=14, fontweight="bold")
 
     return fig, axes
+   
+def ensure_list_cell(x):
+    """
+    Return a Python list for common types stored in timeseries rows:
+      - list/tuple -> list
+      - numpy.ndarray -> tolist()
+      - JSON-string / Python-list-string -> parsed
+      - scalar/NaN -> [] or [scalar] depending
+    """
+    if x is None:
+        return []
+    if isinstance(x, (list, tuple)):
+        return list(x)
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    if isinstance(x, (int, float)) and not np.isnan(x):
+        # scalar -> single-element list (rare)
+        return [x]
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return []
+        # try JSON first
+        try:
+            parsed = json.loads(s)
+            # ensure lists are lists
+            if isinstance(parsed, (list, tuple)):
+                return list(parsed)
+            # If parsed a scalar, wrap
+            return [parsed]
+        except Exception:
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, (list, tuple)):
+                    return list(parsed)
+                return [parsed]
+            except Exception:
+                # fallback: return the raw string in list
+                return [s]
+    # pandas NA-like values
+    try:
+        if pd.isna(x):
+            return []
+    except Exception:
+        pass
+    # fallback: wrap in list
+    return [x]
+    
+def load_run_results(run_dir: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Load aggregated run outputs saved by clean_run_results:
+        - aggregated_run_results.parquet (or .csv) -> overall_df
+        - timeseries.parquet (or .csv) -> timeseries_df (list-columns parsed)
+        Returns: (overall_df, timeseries_df)
+        Raises RuntimeError if required files not found.
+        """
+        run_dir = os.path.abspath(run_dir)
+        agg_parq = os.path.join(run_dir, "aggregated_run_results.parquet")
+        agg_csv = os.path.join(run_dir, "aggregated_run_results.csv")
+        ts_parq = os.path.join(run_dir, "timeseries.parquet")
+        ts_csv = os.path.join(run_dir, "timeseries.csv")
+
+        # Load overall_df
+        overall_df = None
+        if os.path.exists(agg_parq):
+            try:
+                overall_df = pd.read_parquet(agg_parq)
+            except Exception as e:
+                warnings.warn(f"Failed to read {agg_parq}: {e}; trying CSV fallback.")
+        if overall_df is None and os.path.exists(agg_csv):
+            overall_df = pd.read_csv(agg_csv, dtype=object)
+
+        if overall_df is None:
+            raise RuntimeError(f"No aggregated_run_results found in {run_dir}")
+
+        # Load timeseries
+        ts_df = None
+        if os.path.exists(ts_parq):
+            try:
+                ts_df = pd.read_parquet(ts_parq)
+            except Exception as e:
+                warnings.warn(f"Failed to read {ts_parq}: {e}; trying CSV fallback.")
+        if ts_df is None and os.path.exists(ts_csv):
+            try:
+                ts_df = pd.read_csv(ts_csv, dtype=object)
+                # parse list columns that were JSON-string-serialized
+                list_cols = [
+                    "prevalence_count_series",
+                    "prevalence_frac_series",
+                    "cumulative_infections_count_series",
+                    "cumulative_infections_frac_series",
+                ]
+                for col in list_cols:
+                    if col in ts_df.columns:
+                        ts_df[col] = ts_df[col].apply(lambda x: ensure_list_cell(x))
+            except Exception as e:
+                warnings.warn(f"Failed to read/parse {ts_csv}: {e}; creating empty timeseries DataFrame.")
+                ts_df = pd.DataFrame()
+
+        if ts_df is None:
+            raise RuntimeError(f"No timeseries found in {run_dir}")
+
+        # Ensure expected dtypes for common columns
+        if "run_number" in ts_df.columns:
+            try:
+                ts_df["run_number"] = ts_df["run_number"].astype(int)
+            except Exception:
+                # leave as-is if conversion fails
+                pass
+
+        return overall_df, ts_df
+
+
+def timeseries_to_metrics(
+    ts_df: pd.DataFrame,
+    *,
+    outbreak_threshold: Optional[float] = 10.0,
+    outbreak_threshold_is_fraction: Optional[bool] = None,
+    duration_frac_threshold: float = 0.01,
+    auc_normalize_by_T: bool = False,
+) -> pd.DataFrame:
+    """
+    Convert the per-run timeseries rows into a per-run metrics DataFrame.
+
+    For each row (variant_name + run_number) we compute:
+      - series_length
+      - final_size_count, final_size_frac (if available)
+      - peak_prevalence_count, peak_prevalence_frac
+      - peak_time (first index of peak)
+      - auc_prevalence_frac (sum over days; normalized by T if auc_normalize_by_T True)
+      - duration_above_frac (days prevalence_frac >= duration_frac_threshold)
+      - early_growth_rate (slope of log(series) per day estimated on first contiguous window of positive values up to 7 days)
+      - outbreak (boolean) determined by outbreak_threshold and outbreak_threshold_is_fraction:
+          * if outbreak_threshold_is_fraction == True -> use final_size_frac
+          * if False -> use final_size_count
+          * if None -> auto: if outbreak_threshold > 1 use count, else fraction
+    Returns DataFrame with one row per run.
+    """
+    rows = []
+
+    for _, row in ts_df.iterrows():
+        vname = row.get("variant_name", None)
+        bname = row.get("base_variant", None)
+        run_num = int(row.get("run_number", 0)) if row.get("run_number", None) is not None else 0
+
+        prev_count = ensure_list_cell(row.get("prevalence_count_series", []))
+        prev_frac = ensure_list_cell(row.get("prevalence_frac_series", []))
+        cum_count = ensure_list_cell(row.get("cumulative_infections_count_series", []))
+        cum_frac = ensure_list_cell(row.get("cumulative_infections_frac_series", []))
+
+        # Normalize numeric lists to floats/ints where possible
+        def to_float_list(seq):
+            out = []
+            for x in seq:
+                try:
+                    out.append(float(x))
+                except Exception:
+                    out.append(float("nan"))
+            return out
+
+        def to_int_list(seq):
+            out = []
+            for x in seq:
+                try:
+                    out.append(int(x))
+                except Exception:
+                    try:
+                        out.append(int(float(x)))
+                    except Exception:
+                        out.append(0)
+            return out
+
+        prev_count = to_int_list(prev_count) if prev_count else []
+        prev_frac = to_float_list(prev_frac) if prev_frac else []
+        cum_count = to_int_list(cum_count) if cum_count else []
+        cum_frac = to_float_list(cum_frac) if cum_frac else []
+
+        T = max(len(prev_count), len(prev_frac), len(cum_count), len(cum_frac))
+
+        # Final sizes (prefer cumulative arrays if present)
+        final_count = int(cum_count[-1]) if len(cum_count) > 0 else (int(prev_count[-1]) if prev_count else None)
+        final_frac = float(cum_frac[-1]) if len(cum_frac) > 0 else (float(prev_frac[-1]) if prev_frac else None)
+
+        # Peak prevalence
+        peak_prevalence_count = int(max(prev_count)) if prev_count else None
+        peak_prevalence_frac = float(max(prev_frac)) if prev_frac else None
+
+        # Peak time (first occurrence)
+        def first_index_of_max(lst):
+            if not lst:
+                return None
+            m = max(lst)
+            for i, v in enumerate(lst):
+                try:
+                    if float(v) == float(m):
+                        return int(i)
+                except Exception:
+                    continue
+            return None
+
+        peak_time = first_index_of_max(prev_frac if prev_frac else prev_count)
+
+        # AUC (sum of prevalence fraction); normalize by T if requested
+        auc = None
+        if prev_frac:
+            auc = float(np.nansum(prev_frac))
+            if auc_normalize_by_T and T > 0:
+                auc = auc / float(T)
+        elif prev_count and final_count is not None and final_frac is not None and final_frac > 0:
+            # if only counts available but we have final_frac, we can approximate fraction series by scaling
+            try:
+                approx_frac = [c / final_count * final_frac if final_count > 0 else 0.0 for c in prev_count]
+                auc = float(np.nansum(approx_frac))
+                if auc_normalize_by_T and T > 0:
+                    auc = auc / float(T)
+            except Exception:
+                auc = None
+
+        # Duration above specified fraction threshold
+        duration_above = None
+        if prev_frac:
+            duration_above = int(sum(1 for v in prev_frac if (not math.isnan(v)) and v >= duration_frac_threshold))
+        else:
+            duration_above = None
+
+        # Early exponential growth estimate (slope on log scale per day); return slope and doubling_time
+        def estimate_growth_rate_from_series(series_floats, min_positive=1, max_days=7):
+            if not series_floats:
+                return (None, None)
+            # use first contiguous window starting at first index with series >= min_positive
+            arr = np.array(series_floats, dtype=float)
+            # find indices where arr > 0 (or >= min_positive if counts)
+            pos_mask = arr > 0
+            if not np.any(pos_mask):
+                return (None, None)
+            first_pos = int(np.nonzero(pos_mask)[0][0])
+            # build window of up to max_days from first_pos, requiring positive values
+            window = arr[first_pos : first_pos + max_days]
+            # require at least 3 points for a slope
+            if len(window) < 3 or not np.all(window > 0):
+                # try to expand window to include zeros converted to tiny epsilon
+                window = arr[first_pos : first_pos + max_days]
+                if len(window) < 3 or np.sum(window > 0) < 2:
+                    return (None, None)
+            # fit slope on log(window)
+            t = np.arange(len(window))
+            y = window
+            # guard against non-positive values by clipping to tiny epsilon
+            y_clipped = np.clip(y, 1e-9, None)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                try:
+                    slope, intercept = np.polyfit(t, np.log(y_clipped), 1)
+                except Exception:
+                    return (None, None)
+            # doubling time: ln(2) / slope if slope > 0
+            doubling = None
+            try:
+                if slope > 0:
+                    doubling = math.log(2.0) / slope
+                else:
+                    doubling = None
+            except Exception:
+                doubling = None
+            return (float(slope), doubling)
+
+        # choose series for growth estimation: prefer counts if not all zeros; else use fractions
+        growth_slope = None
+        growth_doubling = None
+        if prev_count and any(v > 0 for v in prev_count):
+            growth_slope, growth_doubling = estimate_growth_rate_from_series([float(x) for x in prev_count])
+        elif prev_frac and any((not math.isnan(v)) and v > 0 for v in prev_frac):
+            growth_slope, growth_doubling = estimate_growth_rate_from_series([float(x) for x in prev_frac])
+
+        # Determine outbreak flag based on threshold and semantics
+        outbreak_flag = None
+        if outbreak_threshold is None:
+            outbreak_flag = None
+        else:
+            thr = float(outbreak_threshold)
+            if outbreak_threshold_is_fraction is None:
+                # heuristic: if threshold > 1 => treat as counts; else fraction
+                use_fraction = thr <= 1.0
+            else:
+                use_fraction = bool(outbreak_threshold_is_fraction)
+            if use_fraction:
+                # need final_frac
+                if final_frac is None:
+                    outbreak_flag = None
+                else:
+                    outbreak_flag = (final_frac > thr)
+            else:
+                if final_count is None:
+                    outbreak_flag = None
+                else:
+                    outbreak_flag = (final_count > thr)
+
+        # Build metrics row. Also copy any sweep columns present on the timeseries row so merging / plotting are easy
+        metrics_row = dict(
+            variant_name=vname,
+            base_variant=bname,
+            run_number=int(run_num),
+            series_length=int(T),
+            final_size_count=int(final_count) if final_count is not None else None,
+            final_size_frac=float(final_frac) if final_frac is not None else None,
+            peak_prevalence_count=int(peak_prevalence_count) if peak_prevalence_count is not None else None,
+            peak_prevalence_frac=float(peak_prevalence_frac) if peak_prevalence_frac is not None else None,
+            peak_time=int(peak_time) if peak_time is not None else None,
+            auc_prevalence_frac=float(auc) if auc is not None else None,
+            duration_above_frac=int(duration_above) if duration_above is not None else None,
+            early_growth_slope=float(growth_slope) if growth_slope is not None else None,
+            early_growth_doubling=float(growth_doubling) if growth_doubling is not None else None,
+            outbreak=bool(outbreak_flag) if outbreak_flag is not None else None,
+        )
+
+        # include any other sweep param columns present in row (non-series, primitives)
+        # Avoid adding list-valued series columns again
+        for k, v in row.items():
+            if k in metrics_row:
+                continue
+            if k in {
+                "prevalence_count_series",
+                "prevalence_frac_series",
+                "cumulative_infections_count_series",
+                "cumulative_infections_frac_series",
+            }:
+                continue
+            # only add primitive types (str/number/bool)
+            if isinstance(v, (str, int, float, bool, type(None), np.integer, np.floating)):
+                metrics_row[k] = v
+
+        rows.append(metrics_row)
+
+    metrics_df = pd.DataFrame(rows)
+    return metrics_df
+
+
+def plot_metric_box(
+    metrics_df: pd.DataFrame,
+    metric: str,
+    *,
+    by: str = "base_variant",
+    figsize: Tuple[float, float] = (8, 5),
+    show_points: bool = True,
+    log_scale: bool = False,
+    ax=None,
+):
+    """
+    Boxplot (with optional overlayed jittered points) of a numeric metric grouped by a categorical column.
+
+    Returns (fig, ax).
+    """
+    if metric not in metrics_df.columns:
+        raise ValueError(f"Metric '{metric}' not present in metrics_df columns")
+
+    groups = []
+    group_labels = []
+    if by in metrics_df.columns:
+        vals = metrics_df[by].fillna("NA")
+        unique_groups = sorted(vals.unique(), key=lambda x: str(x))
+        for g in unique_groups:
+            gvals = metrics_df.loc[vals == g, metric].dropna().astype(float).values
+            groups.append(gvals)
+            group_labels.append(str(g))
+    else:
+        # single group
+        gvals = metrics_df[metric].dropna().astype(float).values
+        groups = [gvals]
+        group_labels = ["all"]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = plt.gcf()
+
+    # Draw boxplot
+    box = ax.boxplot(
+        groups,
+        labels=group_labels,
+        patch_artist=True,
+        showmeans=True,
+        widths=0.6,
+    )
+    # Style the boxes
+    for patch in box["boxes"]:
+        patch.set_facecolor("#cfe2f3")
+        patch.set_edgecolor("#00274C")
+        patch.set_alpha(0.9)
+
+    # Overlay points
+    if show_points:
+        rng = np.random.default_rng(12345)
+        for i, vals in enumerate(groups):
+            if len(vals) == 0:
+                continue
+            jitter = rng.uniform(-0.08, 0.08, size=len(vals))
+            ax.scatter(np.full_like(vals, i + 1.0) + jitter, vals, color="#00274C", alpha=0.45, s=12)
+
+    ax.set_xlabel(by)
+    ax.set_ylabel(metric)
+    if log_scale:
+        ax.set_yscale("log")
+    ax.grid(alpha=0.25)
+    return fig, ax
+
+
+def plot_outbreak_probability_by_param(
+    metrics_df: pd.DataFrame,
+    param: str,
+    *,
+    bins: Optional[int] = 10,
+    param_bins: Optional[Iterable] = None,
+    outbreak_col: str = "outbreak",
+    min_count_per_bin: int = 2,
+    figsize: Tuple[float, float] = (8, 4),
+    ax=None,
+):
+    """
+    Plot the outbreak probability (mean(outbreak_col)) as a function of a parameter.
+    If the parameter is categorical / low-cardinality, show outbreak probability per category.
+    If numeric, bin into `bins` (or use param_bins) and plot mean +/- binomial CI (approx).
+    Returns (fig, ax, summary_df) where summary_df contains columns: bin_label, param_mean, p_outbreak, n.
+    """
+    if param not in metrics_df.columns:
+        raise ValueError(f"Parameter column '{param}' not found in metrics_df")
+
+    df = metrics_df[[param, outbreak_col]].dropna(subset=[param]).copy()
+    if df.empty:
+        raise RuntimeError("No data for plotting")
+
+    numeric = pd.api.types.is_numeric_dtype(df[param])
+    if numeric and (param_bins is None):
+        unique_count = df[param].nunique()
+        if unique_count <= 10:
+            # treat as categorical
+            df["bin_label"] = df[param].astype(str)
+            group_col = "bin_label"
+        else:
+            # numeric -> bin
+            df["bin_label"] = pd.cut(df[param], bins=bins)
+            group_col = "bin_label"
+    elif numeric and param_bins is not None:
+        df["bin_label"] = pd.cut(df[param], bins=param_bins)
+        group_col = "bin_label"
+    else:
+        # categorical / string
+        df["bin_label"] = df[param].astype(str)
+        group_col = "bin_label"
+
+    summary = df.groupby(group_col).agg(
+        n=("bin_label", "size"), p_outbreak=(outbreak_col, lambda s: float(np.nanmean(s.astype(float))))
+    )
+    # compute mean parameter per bin for ordering if numeric
+    try:
+        param_mean = df.groupby(group_col)[param].mean()
+        summary["param_mean"] = param_mean
+    except Exception:
+        summary["param_mean"] = np.nan
+
+    summary = summary.reset_index().sort_values("param_mean" if "param_mean" in summary.columns and summary["param_mean"].notna().any() else group_col)
+    # drop bins with very small n to reduce noise
+    summary_filtered = summary[summary["n"] >= min_count_per_bin].copy()
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = plt.gcf()
+
+    ax.plot(summary_filtered["param_mean"].values, summary_filtered["p_outbreak"].values, marker="o", linestyle="-", color="#DB130D")
+    ax.set_xlabel(param)
+    ax.set_ylabel("Outbreak probability")
+    ax.set_ylim(0, 1.05)
+    ax.grid(alpha=0.25)
+
+    return fig, ax, summary.reset_index(drop=True)
+
+
+def plot_heatmap_metric(
+    metrics_df: pd.DataFrame,
+    param_x: str,
+    param_y: str,
+    metric: str,
+    *,
+    x_bins: Optional[int] = 8,
+    y_bins: Optional[int] = 8,
+    agg: str = "mean",
+    cmap: str = "viridis",
+    figsize: Tuple[float, float] = (6, 5),
+    ax=None,
+):
+    """
+    Create a 2D heatmap of the aggregated metric over bins of param_x and param_y.
+    If the parameters are low-cardinality categorical variables, they will be used directly.
+    Returns (fig, ax, pivot_df)
+    pivot_df is the pivot table used to draw the heatmap (index=y, columns=x).
+    """
+    for c in (param_x, param_y, metric):
+        if c not in metrics_df.columns:
+            raise ValueError(f"Column '{c}' not found in metrics_df")
+
+    df = metrics_df[[param_x, param_y, metric]].dropna().copy()
+
+    # bin numeric parameters if specified
+    def _bin_col(series, bins):
+        if pd.api.types.is_numeric_dtype(series):
+            if bins is None:
+                return series
+            if isinstance(bins, int):
+                edges = np.linspace(series.min(), series.max(), bins + 1)
+                return pd.cut(series, bins=edges)
+            else:
+                return pd.cut(series, bins=bins)
+        else:
+            return series.astype(str)
+
+    df["x_bin"] = _bin_col(df[param_x], x_bins)
+    df["y_bin"] = _bin_col(df[param_y], y_bins)
+
+    pivot = df.pivot_table(index="y_bin", columns="x_bin", values=metric, aggfunc=agg)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = plt.gcf()
+
+    im = ax.imshow(pivot.values.astype(float), aspect="auto", origin="lower", cmap=cmap)
+    ax.set_xticks(np.arange(pivot.shape[1]))
+    ax.set_yticks(np.arange(pivot.shape[0]))
+    ax.set_xticklabels([str(c) for c in pivot.columns], rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels([str(i) for i in pivot.index], fontsize=8)
+    ax.set_xlabel(param_x)
+    ax.set_ylabel(param_y)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(f"{agg}({metric})")
+    ax.set_title(f"{agg} {metric} by {param_x} x {param_y}")
+    fig.tight_layout()
+    return fig, ax, pivot

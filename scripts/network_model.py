@@ -86,7 +86,7 @@ class ModelParameters(TypedDict):
 
 DefaultModelParams: ModelParameters = {
     #Epdiemic Parameters
-    "base_transmission_prob": .8,
+    "base_transmission_prob": 0.25,
     "incubation_period": 10.5,
     "infectious_period": 5,
     "gamma_alpha": 20,
