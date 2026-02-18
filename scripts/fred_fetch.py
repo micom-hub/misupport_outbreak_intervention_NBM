@@ -27,7 +27,7 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
     Output: A {county}.zip file in the data folder of the projectDirectory
     """
     cd = projectDirectory
-    data_dir = cd + "/data"
+    data_dir = os.path.join(cd, "data")
 
     options = webdriver.ChromeOptions()
     prefs = {
