@@ -11,3 +11,4 @@ results/
 analyses
 analyses/*
 experiments/elderly_prioritization_experiment.py
+writing/
