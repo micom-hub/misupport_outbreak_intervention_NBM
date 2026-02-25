@@ -16,8 +16,6 @@ import numpy as np
 import pandas as pd
 import igraph as ig
 import networkx as nx
-from scipy.sparse import csr_matrix
-from scipy.stats import truncnorm
 from typing import TypedDict, List, Dict, Any, Optional, Callable
 from collections import defaultdict
 import warnings
@@ -28,10 +26,12 @@ import matplotlib.animation as animation
 
 
 
-from scripts.synth_data_processing import build_edge_list, build_individual_lookup
+from scripts.synth_data_processing import build_edge_list
 
 from new_scripts.recorder.recorder import ExposureEventRecorder
 from new_scripts.lhd.lhd import LocalHealthDepartment
+from new_scripts.graph.graph_utils import build_graph_data
+
 
 
 class ModelParameters(TypedDict):
@@ -228,20 +228,12 @@ class NetworkModel:
     #@profile
     def _compute_network_structures(self):
         """
-        Compute expensive network structures that are preserved across runs:
-        - edge list
-        - adj matrix
-        - individual lookup
-        - neighbor_map and fast neighbor map
-        - full node list
-        - layout node names
-        -layout name to ind
+        Loads or builds an edge list from synthetic population data, then pre-computes computationally expensive network structures
         """
-        #If the driver has supplied an edge list, use it directly
+        #Get edge list from 
         if getattr(self, "external_edge_list", None) is not None:
             self.edge_list = self.external_edge_list.copy()
         else:
-            # existing behavior: either reuse saved file or call build_edge_list
             edgefile_path = os.path.join(
                 os.getcwd(),
                 "data",
@@ -261,83 +253,37 @@ class NetworkModel:
                     county = self.county
                 )
 
-        #Create full adjacency matrix
-        src = self.edge_list['source'].to_numpy(dtype = np.int32)
-        tgt = self.edge_list['target'].to_numpy(dtype = np.int32)
-        weights = self.edge_list['weight'].to_numpy(dtype = np.float32)
-        N_nodes = self.N
-
-        row = np.concatenate([src, tgt])
-        col = np.concatenate([tgt, src])
-        dat = np.concatenate([weights, weights])
-        self.adj_matrix = csr_matrix(
-            (dat, (row, col)), shape = (N_nodes, N_nodes)
-            )
-
-        #Create individual lookup table
-        self.individual_lookup = build_individual_lookup(self.contacts_df)
-
-        #Initialize individual vectors for quicker lookup
-        self.ages = self.individual_lookup["age"].to_numpy()
-        self.sexes = self.individual_lookup["sex"].to_numpy()
-        self.is_vaccinated = self.rng.random(self.N) < self.params["vax_uptake"]
-
-        #Set individual compliances array
-        avg_compliance = np.clip(self.params["mean_compliance"], 0, 1) #0-1
-        sd = 0.15 #sd for bounded normal distribution
-        #calculate truncnorm params
-        a = (0 - avg_compliance) / sd
-        b = (1 - avg_compliance) / sd
-        self.compliances = truncnorm.rvs(a,b,
-        loc = avg_compliance, scale = sd,
-        size = self.N, random_state = self.rng)
-
         
+        graphdata = build_graph_data(
+            edge_list = self.edge_list,
+            contacts_df = self.contacts_df,
+            params = self.params,
+            rng = self.rng,
+            N = self.N
+        )
 
-        #Create neighbor_map and fast_neighbor_map
-        self.neighbor_map = self._build_neighbor_map()
+        #copy graphdata fields into model
+        self.edge_list = graphdata.edge_list
+        self.adj_matrix = graphdata.adj_matrix
+        self.individual_lookup = graphdata.individual_lookup
+        self.ages = graphdata.ages
+        self.sexes = graphdata.sexes
 
-        self.fast_neighbor_map = {} #preprocess dict of dicts to speed up later
-        for src, neighbor_list in self.neighbor_map.items():
-            self.fast_neighbor_map[src] = {
-                tgt: (weight, ct) for tgt, weight, ct in neighbor_list
-                }
+        self.compliances = graphdata.compliances
 
-        #Create adjacency sparses by contact type 
-        #lookup indptr, indices, weights = csr_by_type['ct']
-        self.csr_by_type = self._build_type_csr()
-        self.contact_types = sorted(self.csr_by_type.keys()) #stable ct order
-        self.ct_to_id = {ct: i for i, ct in enumerate(self.contact_types)}
-        self.id_to_ct = {i: ct for ct, i in self.ct_to_id.items()}
+        self.neighbor_map = graphdata.neighbor_map
+        self.fast_neighbor_map = graphdata.fast_neighbor_map
+        self.csr_by_type = graphdata.csr_by_type
+        self.contact_types = graphdata.contact_types
+        self.ct_to_id = graphdata.ct_to_id
+        self.id_to_ct = graphdata.id_to_ct
 
-
-
-
-        #Create full node list
-        self.full_node_list = sorted(
-            set(self.edge_list['source']).union(
-                set(self.edge_list['target'])
-                ))
-
-        #Create node dict and full layout ind
-        name_to_ind_dict = {name:ind for ind, name in enumerate(self.full_node_list)}
-
-        #Create a full graph
-
-        g_full = ig.Graph()
-        g_full.add_vertices(len(self.full_node_list))
-        #Node names in the graph correspond to model indices
-        g_full.vs['name'] = self.full_node_list 
-
-        full_edges = list(zip(
-            [name_to_ind_dict[src] for src in self.edge_list['source']],
-            [name_to_ind_dict[tgt] for tgt in self.edge_list['target']]
-        ))
-        g_full.add_edges(full_edges)
-        self.fixed_layout = g_full.layout('grid') #set a layout for the full graph
-        self.layout_node_names = self.full_node_list
-        self.layout_name_to_ind = {name:i for i, name in enumerate(self.layout_node_names)}
-        self.g_full = g_full.copy()
+        self.full_node_list = graphdata.full_node_list
+        self.layout_node_names = graphdata.layout_node_names
+        self.layout_name_to_ind = graphdata.layout_name_to_ind
+        self.g_full = graphdata.g_full
+        self.fixed_layout = graphdata.fixed_layout
+        
 
         #Initialize multipliers for LHD interaction
         self.in_multiplier = {
@@ -393,167 +339,9 @@ class NetworkModel:
 
         if hasattr(self, "lhd"):
             self.lhd.reset_for_run()
+
+        return
        
-        
-    def name_to_ind(self, g: ig.Graph, names):
-        """Convert individual's names to igraph vertex indices
-
-        Args:
-            g (ig.Graph): a graph with named nodes
-            names (int/list/np.array): a list of individual names 
-
-        Returns: graph indices of the same datatype as names
-        """
-        name_to_index = {int(v["name"]): v.index for v in g.vs}
-        if isinstance(names, (int, np.integer)):
-            return name_to_index[names]
-        elif isinstance(names, (list, np.ndarray)):
-            inds = [name_to_index[n] for n in names]
-            return np.array(inds, dtype = int)
-        else:
-            raise TypeError("names must be int, list, or numpy array.")
-        
-    def ind_to_name(self, g: ig.Graph, inds):
-        """Convert nodes of an igraph to their corresponding names
-
-        Args:
-            g (ig.Graph): an igraph object with named nodes
-            inds (int/list/np.array/range): a list of indices present in g
-
-        Returns: Names of graph indices as np.array
-        """
-        if isinstance(inds, (int, np.integer)):
-            return g.vs[inds]["name"]
-        elif isinstance(inds, (list, np.ndarray, range)):
-            names = [int(g.vs[i]["name"]) for i in inds]
-            return np.array(names, dtype = int)
-
-        else:
-            raise TypeError("inds must be int, list, or numpy array.")
-            
-    #@profile
-    def _build_neighbor_map(self):
-        """
-        Build a mapping from node to list of (neighbor, weight) (make neighbor queries O(1))
-        """
-        #build a mapping of src: (tgt, weight, ct)
-        neighbor_map = {}
-        for row in self.edge_list.itertuples(index = False):
-            src, tgt, w, ct = row.source, row.target, row.weight, row.contact_type
-            if src not in neighbor_map:
-                neighbor_map[src] = []
-            neighbor_map[src].append((tgt, w, ct))
-            #symmetrize here, since edge_list is undirected from i, j where i<j
-            if tgt not in neighbor_map:
-                neighbor_map[tgt] = []
-            neighbor_map[tgt].append((src, w, ct))
-
-
-
-        return neighbor_map
-
-    def _build_type_csr(self):
-        """
-        Build an csr sparses by contact type that map a source node to a list of neighbors by type
-        """
-
-        neighbor_map = self.neighbor_map
-        N = self.N
-        total_edges = int(2*self.edge_list.shape[0])
-
-    #collect global arrays
-
-        src_array = np.empty(total_edges, dtype = np.int32)
-        tgt_array = np.empty(total_edges, dtype = np.int32)
-        wt_array = np.empty(total_edges, dtype = np.float32)
-
-        ct_to_id = {}
-        id_to_ct = []
-        ct_array = np.empty(total_edges, dtype = np.int16)
-
-        pos = 0
-        for src, neighbors in neighbor_map.items():
-            for tgt, wt, ct in neighbors:
-                src_array[pos] = src
-                tgt_array[pos] = tgt
-                wt_array[pos] = wt
-                if ct not in ct_to_id:
-                    ct_to_id[ct] = len(id_to_ct)
-                    id_to_ct.append(ct)
-                ct_array[pos] = ct_to_id[ct]
-                pos += 1
-
-        #slice to actual length
-        if pos < total_edges:
-            src_array = src_array[:pos]
-            tgt_array = tgt_array[:pos]
-            wt_array = wt_array[:pos]
-            ct_array = ct_array[:pos]
-
-    #sort edges by (ct, src) so they are contiguous and sources are grouped
-
-        order = np.lexsort((src_array, ct_array)) #primary key ct, secondary src
-        src_s = src_array[order]
-        tgt_s = tgt_array[order]
-        wt_s = wt_array[order]
-        ct_s = ct_array[order]
-
-    #split by type and build a csr for each type
-        csr_by_type = {}
-        unique_cts, ct_starts = np.unique(ct_s, return_index = True)
-        ct_starts = list(ct_starts) + [len(ct_s)]
-        for k, ct_id in enumerate(unique_cts):
-            start = ct_starts[k]
-            end = ct_starts[k+1]
-            srcs_ct = src_s[start:end]
-            tgts_ct = tgt_s[start:end]
-            wts_ct = wt_s[start:end]
-
-            if srcs_ct.size == 0:
-                indptr = np.zeros(N+1, dtype = np.int64)
-                indices = np.empty(0, dtype = np.int32)
-                weights = np.empty(0, dtype = np.float32)
-            else:
-                counts = np.bincount(srcs_ct, minlength = N)
-                indptr = np.empty(N+1, dtype = np.int64)
-                indptr[0] = 0
-                np.cumsum(counts, out = indptr[1:])
-                indices = tgts_ct.astype(np.int32, copy = True)
-                weights = wts_ct.astype(np.float32, copy = True)
-
-            csr_by_type[id_to_ct[int(ct_id)]] = (indptr, indices, weights)
-
-        return csr_by_type
-
-    
-    def assign_node_attribute(self, attr_name: str, vals: np.ndarray, indices: np.ndarray, g: ig.Graph) -> ig.Graph:
-        """Assigns a node attribute to specified nodes in an igraph Graph object
-
-        Args:
-            attr_name (str): The name of the attribute to be assigned
-            vals (np.ndarray): An array of values to be assigned
-            indices (np.ndarray): An array of MODEL INDICES (node names) for assignment
-            g (ig.Graph): an igraph containing the indices provided
-
-        Returns:
-            ig.Graph: The provided igraph with added attribute names
-
-        DO NOT USE for assigning node names
-        """
-
-        if len(vals) != len(indices):
-            raise ValueError("Length of values must match length of indices")
-
-        available_names = set(g.vs["name"])
-        if (set(indices) - available_names):
-            raise ValueError("Indices not present in the graph cannot have attributes added")
-
-        
-        name_to_ind = {v["name"]: v.index for v in g.vs}
-
-        node_ind = [name_to_ind[ind] for ind in indices]
-        g.vs[node_ind][attr_name] = vals
-        return g
 
         
     def assign_incubation_period(self, inds):
