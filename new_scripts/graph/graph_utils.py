@@ -1,14 +1,16 @@
-#graph_utils.py
-#Contains utility functions for building contact structure data, called in outbreak_model.py _compute_network_structures()
+"""
+graph_utils.py
+Contains utility functions for building contact structure data, called in outbreak_model.py _compute_network_structures()
+"""
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import pandas as pd
-import igraph as ig
 from scipy.sparse import csr_matrix
 from scipy.stats import truncnorm
 import logging
+import hashlib
 import os
 import json
 import shutil
@@ -50,11 +52,6 @@ class GraphData:
     ct_to_id: Dict[str, int]
     id_to_ct: Dict[int, str]
     full_node_list: List[int]
-    layout_node_names: List[int]
-    layout_name_to_ind: Dict[int, int]
-    g_full: ig.Graph
-    fixed_layout: Any
-
 
 def build_graph_data(
     edge_list: pd.DataFrame,
@@ -118,28 +115,6 @@ def build_graph_data(
     #full node list
     full_node_list = sorted(set(edge_list["source"]).union(set(edge_list["target"])))
 
-    #build an igraph layout for plotting
-    name_to_ind = {name: ind for ind, name in enumerate(full_node_list)}
-    g_full = ig.Graph()
-    g_full.add_vertices(len(full_node_list))
-    g_full.vs["name"] = full_node_list
-    full_edges = list(
-        zip(
-            [name_to_ind[src] for src in edge_list["source"]],
-            [name_to_ind[tgt] for tgt in edge_list["target"]],
-        )
-    )
-    if full_edges:
-        g_full.add_edges(full_edges)
-
-    # precompute static layout for visualization
-    try:
-        fixed_layout = g_full.layout("grid")
-    except Exception:
-        fixed_layout = g_full.layout("fr")
-
-    layout_node_names = full_node_list
-    layout_name_to_ind = {name: i for i, name in enumerate(layout_node_names)}
 
     return GraphData(
         N=int(N),
@@ -155,11 +130,7 @@ def build_graph_data(
         contact_types=contact_types,
         ct_to_id=ct_to_id,
         id_to_ct=id_to_ct,
-        full_node_list=full_node_list,
-        layout_node_names=layout_node_names,
-        layout_name_to_ind=layout_name_to_ind,
-        g_full=g_full,
-        fixed_layout=fixed_layout,
+        full_node_list=full_node_list
     )
 
 
@@ -270,6 +241,8 @@ def _build_type_csrs(neighbor_map: Dict[int, List[Tuple[int, float, Any]]], N: i
     return csr_by_type
 
 
+#Caching functions
+
 def save_graph_cache(graphdata: GraphData, cache_dir: str, overwrite: bool = False) -> None:
     """
     Saves a cache of GraphData to 'cache_dir':
@@ -310,14 +283,6 @@ def save_graph_cache(graphdata: GraphData, cache_dir: str, overwrite: bool = Fal
         #compliances
         if getattr(graphdata, "compliances", None) is not None:
             arrays["compliances"] = np.asarray(graphdata.compliances)
-
-        #full graph
-        if getattr(graphdata, "fixed_layout", None) is not None and getattr(graphdata, "layout_node_names", None) is not None:
-            coords = np.asarray(list(graphdata.fixed_layout), dtype=np.float32) if len(graphdata.fixed_layout) > 0 else np.empty((0, 2), dtype=np.float32)
-            names = np.asarray(graphdata.layout_node_names, dtype=np.int64)
-            np.save(os.path.join(tmp_dir, _LAYOUT_COORDS_FN), coords)
-            np.save(os.path.join(tmp_dir, _LAYOUT_NAMES_FN), names)
-
 
         np.savez_compressed(os.path.join(tmp_dir, _CSR_NPZ_FN), **arrays)
 
@@ -398,15 +363,6 @@ def load_graph_cache(cache_dir: str) -> GraphData:
 
     compliances = np.asarray(loaded["compliances"]) if "compliances" in loaded.files else None
 
-    # optional layout arrays
-    layout_coords_path = os.path.join(cache_dir, _LAYOUT_COORDS_FN)
-    layout_names_path = os.path.join(cache_dir, _LAYOUT_NAMES_FN)
-    layout_coords = None
-    layout_node_names = None
-    if os.path.exists(layout_coords_path) and os.path.exists(layout_names_path):
-        layout_coords = np.load(layout_coords_path)
-        layout_node_names = np.load(layout_names_path).tolist()
-
 
     #Build unsaved graph utils like is done in build_graph_data
     N = int(metadata.get("N", int(individual_lookup.shape[0])))
@@ -414,40 +370,8 @@ def load_graph_cache(cache_dir: str) -> GraphData:
     neighbor_map = _build_neighbor_map(edge_list)
     fast_neighbor_map = {src: {tgt: (w, ct) for (tgt, w, ct) in nbrs} for src, nbrs in neighbor_map.items()}
 
-    if layout_node_names is not None:
-        name_to_ind = {int(n): idx for idx, n in enumerate(layout_node_names)}
-        g_full = ig.Graph()
-        g_full.add_vertices(len(layout_node_names))
-        g_full.vs["name"] = [int(n) for n in layout_node_names]
-        edges = []
-        for s, t in zip(edge_list["source"].to_numpy(dtype=int), edge_list["target"].to_numpy(dtype=int)):
-            if int(s) not in name_to_ind or int(t) not in name_to_ind:
-                g_full = None
-                break
-            edges.append((name_to_ind[int(s)], name_to_ind[int(t)]))
-        if g_full is not None and edges:
-            g_full.add_edges(edges)
-            fixed_layout = [tuple(p) for p in np.asarray(layout_coords)] if layout_coords is not None else g_full.layout("grid")
-        else:
-            g_full = None
 
-    if g_full is None:
-        full_node_list = sorted(set(edge_list["source"]).union(set(edge_list["target"])))
-        name_to_ind = {name: ind for ind, name in enumerate(full_node_list)}
-        g_full = ig.Graph()
-        g_full.add_vertices(len(full_node_list))
-        g_full.vs["name"] = full_node_list
-        full_edges = list(zip([name_to_ind[s] for s in edge_list["source"]], [name_to_ind[t] for t in edge_list["target"]]))
-        if full_edges:
-            g_full.add_edges(full_edges)
-        try:
-            fixed_layout = g_full.layout("grid")
-        except Exception:
-            fixed_layout = g_full.layout("kk")
-
-        layout_node_names = full_node_list
-
-        ct_to_id = metadata.get("ct_to_id", {ct: i for i, ct in enumerate(contact_types)})
+    ct_to_id = metadata.get("ct_to_id", {ct: i for i, ct in enumerate(contact_types)})
     id_to_ct = metadata.get("id_to_ct", {int(v): k for k, v in ct_to_id.items()})
 
     ages = individual_lookup["age"].to_numpy()
@@ -468,19 +392,33 @@ def load_graph_cache(cache_dir: str) -> GraphData:
         contact_types=contact_types,
         ct_to_id={str(k): int(v) for k, v in ct_to_id.items()},
         id_to_ct={int(k): str(v) for k, v in id_to_ct.items()},
-        full_node_list=layout_node_names if layout_node_names is not None else sorted(set(edge_list["source"]).union(set(edge_list["target"]))),
-        layout_node_names=layout_node_names if layout_node_names is not None else sorted(set(edge_list["source"]).union(set(edge_list["target"]))),
-        layout_name_to_ind={int(n): i for i, n in enumerate(layout_node_names)} if layout_node_names is not None else {name: i for i, name in enumerate(sorted(set(edge_list["source"]).union(set(edge_list["target"]))))},
-        g_full=g_full,
-        fixed_layout=fixed_layout,
     )
 
     return loaded_data
 
 
+    def _compute_graph_cache_key(edge_list: pd.DataFrame, params: dict, cache_version: int = 1, sample_size: int = 1024) -> str:
+        """
+        Create a cache key string for edge_list + params to build graph with a deterministic summary/sample of DF to keep cost low
+        """
+        cols = [c for c in ["source", "target", "weight", "contact_type"] if c in edge_list.columns]
+
+        nrows = int(len(edge_list))
+        agg = {
+            "nrows": nrows,
+            "sum_src": int(edge_list["source"].sum()) if "source" in edge_list.columns else 0,
+            "sum_tgt": int(edge_list["target"].sum()) if "target" in edge_list.columns else 0,
+            "sum_w": float(edge_list["weight"].sum()) if "weight" in edge_list.columns else 0.0,
+            "ct_counts": {str(k): int(v) for k, v in (edge_list["contact_type"].value_counts().to_dict().items() if "contact_type" in edge_list.columns else {})},
+        }
 
 
-    
+
+
+
+
+
+        
 
 
 

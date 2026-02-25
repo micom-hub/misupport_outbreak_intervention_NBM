@@ -15,14 +15,12 @@ import os
 import numpy as np
 import pandas as pd
 import igraph as ig
-import networkx as nx
 from typing import TypedDict, List, Dict, Any, Optional, Callable
 from collections import defaultdict
 import warnings
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-import matplotlib.animation as animation
 
 
 
@@ -277,12 +275,7 @@ class NetworkModel:
         self.contact_types = graphdata.contact_types
         self.ct_to_id = graphdata.ct_to_id
         self.id_to_ct = graphdata.id_to_ct
-
         self.full_node_list = graphdata.full_node_list
-        self.layout_node_names = graphdata.layout_node_names
-        self.layout_name_to_ind = graphdata.layout_name_to_ind
-        self.g_full = graphdata.g_full
-        self.fixed_layout = graphdata.fixed_layout
         
 
         #Initialize multipliers for LHD interaction
@@ -1172,40 +1165,42 @@ class NetworkModel:
         plt.close()
         
     def draw_network(self, t: int, run_number = 0, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
-        """Visualizes the active subnetwork at a time t, that consists of all "active nodes" (E, I, or R) and all of their susceptible neighbors
-
-        Args:
-            t (int): timestep to plot
-            run_number: run to visualize, if multiple model runs
-            ax (matplotlib axis, optional): axis for plotting
-            clear (bool): whether to clear axis
-            saveFile (bool): save to file
-            suffix (str): filename suffix
+        """
+        Draws a network containing outbreak-involved nodes (E,I,R) + neighbors at time t
         """
 
         #get indices of E, I, R
         S, E, I, R = self.all_states_over_time[run_number][t] # noqa: E741
         affected_inds = set(E) | set(I) | set(R) 
 
-        #get direct neighbors of affected nodes
-        neighbors_set = set()
-        for node in affected_inds:
-            node_index = self.layout_name_to_ind[node]
-            nbr_indices = self.g_full.neighbors(node_index)
-            nbr_names = [self.g_full.vs[nbr]["name"] for nbr in nbr_indices]
-            neighbors_set.update(nbr_names)
+        #neighbors of affected nodes
+        neighbors = set()
+        for ind in affected_inds:
+            for (nbr, w, ct) in self.neighbor_map.get(int(ind), []):
+                neighbors.add(int(nbr))
+
         #combine affected nodes and neighbors
-        plot_nodes = sorted(affected_inds | neighbors_set)
+        plot_nodes = sorted(affected_inds | neighbors)
 
-        #create a subgraph from self.g_full with. these nodes
-        node_name_to_index = {v["name"]: v.index for v in self.g_full.vs}
-        subgraph_indices = [node_name_to_index[name] for name in plot_nodes]
-        subgraph = self.g_full.subgraph(subgraph_indices)
+        #build subgraph
+        name_to_ind = {name: idx for idx, name in enumerate(plot_nodes)}
+        subg = ig.Graph()
+        subg.add_vertices(len(plot_nodes))
+        subg.vs["name"] = plot_nodes
 
-        #assign colors by state
-        #note that subgraph reindexes nodes so need to remap
+        #add edges
+        edges = []
+        for src in plot_nodes:
+            for (tgt, w, ct) in self.neighbor_map.get(int(src), []):
+                if int(tgt) in name_to_ind:
+                    edges.append((name_to_ind[src],name_to_ind[int(tgt)]))
+
+        if edges:
+            subg.add_edges(edges)
+
+        #color by state
         color_map = {}
-        for v in subgraph.vs:
+        for v in subg.vs:
             name = v["name"]
             if name in S:
                 color_map[name] = "blue"
@@ -1221,12 +1216,9 @@ class NetworkModel:
             else:
                 color_map[name] = "gray"
 
-        colors = [color_map[v["name"]] for v in subgraph.vs] 
+        colors = [color_map[v["name"]] for v in subg.vs] 
 
-        #Use full graph layout
-        indices_in_full = [self.layout_name_to_ind[v["name"]] for v in subgraph.vs]
-        layout = [self.fixed_layout[i] for i in indices_in_full]
-        node_labels = subgraph.vs["name"]
+        layout = subg.layout("fr")
 
         #plot
         if ax is None:
@@ -1238,14 +1230,14 @@ class NetworkModel:
             ax.clear()
         
         ig.plot(
-            subgraph,
+            subg,
             layout = layout,
             vertex_color = colors,
             vertex_size = 15,
             edge_color = "gray",
             bbox = (600, 600),
             target = ax,
-            vertex_label = node_labels if len(subgraph.vs) <= 40 else None
+            vertex_label = subg.vs["name"] if len(subg.vs) <= 40 else None
         )
         ax.set_title(f"Network at t = {t}")
 
@@ -1261,116 +1253,6 @@ class NetworkModel:
     
 
         return
-
-    def make_movie(self, dt: int = 1, run_number = 0, filename: str = "network_outbreak.mp4", fps: int = 3):
-        """_summary_
-
-        Args:
-            run_number: which run to create a movie for if multiple model runs
-            dt (int, optional): Time interval between network visualizations Defaults to 1.
-            filename (str, optional): Name to save to Defaults to "network_outbreak.mp4".
-            fps (int, optional): Defaults to 3.
-
-        Creates a .mp4 file of the network evolution saved in results/run_name
-        """
-        if not self.params["save_data_files"]:
-            raise Exception("save_data_files is false, but a network movie was requested")
-        out_path = os.path.join(self.results_folder, filename)
-
-        fig, ax = plt.subplots(figsize = (8,8))
-
-        #get timesteps
-        timesteps = list(range(0, len(self.all_states_over_time[run_number]), dt))
-        if (len(self.states_over_time)-1) not in timesteps:
-            timesteps.append(len(self.states_over_time)-1) #always show last step
-        
-        def update(frame):
-            t = timesteps[frame]
-            ax.clear()
-            self.draw_network(t, ax = ax, clear = False)
-            ax.set_title(f"{self.params['run_name']} | Day {t}")
-            return ax
-        
-        ani = animation.FuncAnimation(fig, update, frames = len(timesteps), interval = 1000/fps, blit = False, repeat = False)
-
-        print("Saving outbreak movie...")
-        #ffmpeg MUST BE INSTALLED
-        try:
-            ani.save(out_path, writer = 'ffmpeg', fps = fps)
-        except(FileNotFoundError, ValueError) as e:
-            print("\nERROR: FFmpag is needed to save mp4 movies, but wasn't found")
-            print("Install ffmpeg and ensure it is in your system path")
-            print(f"Error Message: {e}")
-        finally:
-            plt.close(fig)
-
-        print(f"Outbreak movie saved to {out_path}...")
-
-        return
-
-    def make_graphml_file(self, t: int, run_number:int = 0, suffix: str = None):
-        """ Visualize the network at a given timestep using grephi
-
-        Args:
-            t (int): a timestep of the network to visualize
-            run_number(int): a run number to produce the graph for
-        Returns:
-            Saves a .graphml of the network to open externally
-        """
-
-        #Get neighbors of affected nodes from g_full
-        S, E, I, R = self.all_states_over_time[run_number][t]  # noqa: E741
-        affected_inds = set(E) | set(I) | set(R)
-
-        neighbors_set = set()
-        for node in affected_inds:
-            node_index = self.layout_name_to_ind[node]
-            nbr_indices = self.g_full.neighbors(node_index)
-            nbr_names = [self.g_full.vs[nbr]["name"] for nbr in nbr_indices]
-            neighbors_set.update(nbr_names)
-        plot_nodes = sorted(affected_inds | neighbors_set)
-
-        node_name_to_index = {v["name"]: v.index for v in self.g_full.vs}
-        subgraph_indices = [node_name_to_index[name] for name in plot_nodes]
-        subgraph = self.g_full.subgraph(subgraph_indices)
-
-
-        def igraph_to_networkx(g: ig.Graph) -> nx.Graph:
-
-            """
-            Takes an igraph graph object and converts it to a networkX graph to be visualized with grephi
-
-            Args:
-                g (ig.Graph): an igraph Graph
-
-            Returns:
-                nx.Graph: a networkX graph object
-            """
-          
-            G = nx.Graph()
-            #add attributes
-            for v in g.vs:
-                node_id = v["name"]
-                attrs = v.attributes().copy()
-                attrs.pop("name", None) #don't duplicate name
-                G.add_node(node_id, **attrs)
-            for e in g.es:
-                u = g.vs[e.source]["name"]
-                v = g.vs[e.target]["name"]
-                attrs = e.attributes().copy()
-                G.add_edge(u, v, **attrs)
-            return G
-
-        nx_g = igraph_to_networkx(subgraph)
-        self.nx_g = nx_g
-        if self.params["save_data_files"]:
-            netpath = os.path.join(self.results_folder, "networkfile")
-            if suffix:
-                netpath = netpath + suffix
-            nx.write_graphml(nx_g, (netpath + ".graphml"))
-
-        return
-
 
 
 #Test run on population N = 2186
