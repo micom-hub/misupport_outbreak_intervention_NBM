@@ -23,4 +23,6 @@ Findings from these simulations will be used to design an optimized LHD calling 
 To set up the environment from the portable environment file, run:
 conda env create -f environment.yml
 
-For FredFetch, your device must have a compatible chromedriver. As a workaround, you can download the synthetic population zip files from the FRED website linked in FredFetch, store it in a directory ./data/ and rename the file to {County}.zip
+### Test Run Model
+
+Run [Model Driver](scripts/model_driver.py). If you'd like to change the model geography, change the county and state values in prepare_contacts. To run model with non-default parameters instantiate a ModelParameters object with different parameter values, then run 
