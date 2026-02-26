@@ -19,6 +19,72 @@ from new_scripts.recorder.recorder import ExposureEventRecorder
 from new_scripts.lhd.lhd import LocalHealthDepartment
 from new_scripts.graph.graph_utils import GraphData 
 
+@njit
+def _determine_new_exposures_numba(
+state,           
+infectious_indices,
+indptr_list,
+indices_list,             
+weights_list,            
+out_mat,                   
+in_mat,                    
+is_vax,             
+ages,                      
+base_prob,
+vax_efficacy,
+susc_under5,
+susc_elderly,
+rel_inf_vax
+):
+    N = state.shape[0]
+    newly_exposed = np.zeros(N, dtype = np.bool_)
+    n_ct = len(indptr_list)
+
+    #loop over infectious nodes
+    for infected_ind in range(infectious_indices.shape[0]):
+        src = infectious_indices[infected_ind]
+        for ct_ind in range(n_ct):
+            indptr = indptr_list[ct_ind]
+            indices = indices_list[ct_ind]
+            weights = weights_list[ct_ind]
+
+            start = indptr[src]
+            end = indptr[src + 1]
+            if end <= start:
+                continue
+
+            out_mult_src = out_mat[ct_ind, src]
+
+            #calculate effective transmission weight
+            for k in range(start, end):
+                nbr = indices[k]
+                if state[nbr] != 0:
+                    continue
+                w = weights[k]
+                in_mult_nbr = in_mat[ct_ind, nbr]
+                effective_w = w*out_mult_src*in_mult_nbr
+
+                prob = base_prob*effective_w
+                if is_vax[src]:
+                    prob = prob*rel_inf_vax
+                if vax_efficacy != 0.0:
+                    if is_vax[nbr]:
+                        prob = prob*(1.0-vax_efficacy)
+                if ages[nbr] <= 5:
+                    prob = prob * susc_under5
+                elif ages[nbr] >= 65:
+                    prob = prob * susc_elderly
+
+                if prob <= 0.0:
+                    continue
+                if prob > 1.0:
+                    prob = 1.0
+                
+                if np.random.random() < prob:
+                    newly_exposed[nbr] = True
+    return newly_exposed
+
+
 
 #-----Outbreak Model-------
 class NetworkModel:
@@ -179,72 +245,6 @@ class NetworkModel:
 
 
         return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf)
-
-    #@profile
-    @njit
-    def _determine_new_exposures_numba(
-    state,           
-    infectious_indices,
-    indptr_list,
-    indices_list,             
-    weights_list,            
-    out_mat,                   
-    in_mat,                    
-    is_vax,             
-    ages,                      
-    base_prob,
-    vax_efficacy,
-    susc_under5,
-    susc_elderly,
-    rel_inf_vax
-):
-        N = state.shape[0]
-        newly_exposed = np.zeros(N, dtype = np.bool_)
-        n_ct = len(indptr_list)
-
-        #loop over infectious nodes
-        for infected_ind in range(infectious_indices.shape[0]):
-            src = infectious_indices[infected_ind]
-            for ct_ind in range(n_ct):
-                indptr = indptr_list[ct_ind]
-                indices = indices_list[ct_ind]
-                weights = weights_list[ct_ind]
-
-                start = indptr[src]
-                end = indptr[src + 1]
-                if end <= start:
-                    continue
-
-                out_mult_src = out_mat[ct_ind, src]
-
-                #calculate effective transmission weight
-                for k in range(start, end):
-                    nbr = indices[k]
-                    if state[nbr] != 0:
-                        continue
-                    w = weights[k]
-                    in_mult_nbr = in_mat[ct_ind, nbr]
-                    effective_w = w*out_mult_src*in_mult_nbr
-
-                    prob = base_prob*effective_w
-                    if is_vax[src]:
-                        prob = prob*rel_inf_vax
-                    if vax_efficacy != 0.0:
-                        if is_vax[nbr]:
-                            prob = prob*(1.0-vax_efficacy)
-                    if ages[nbr] <= 5:
-                        prob = prob * susc_under5
-                    elif ages[nbr] >= 65:
-                        prob = prob * susc_elderly
-
-                    if prob <= 0.0:
-                        continue
-                    if prob > 1.0:
-                        prob = 1.0
-                    
-                    if np.random.random() < prob:
-                        newly_exposed[nbr] = True
-        return newly_exposed
     
     def _prepare_numba_structures(self):
         """
@@ -298,93 +298,65 @@ class NetworkModel:
 
     def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
         """
-    Determine who becomes newly exposed (pre-infectious) this timestep.
-    If recorder is provided, it will track exposure events for each (src, ct)
-    storing: exposure metadata
-
-    Returns: np.ndarray of newly exposed node indices
+        Wrapper that prepares inputs, calls the numba compiled function to compute newly exposed,and optionally reconstructs per-event metadata for the recorder (if provided).
         """
-
-
-        N = self.N
-        newly_exposed = np.zeros(N, dtype = bool)
         infectious_indices = np.where(self.state == 2)[0]
+        if infectious_indices.size == 0:
+            return np.array([], dtype=np.int32)
 
-        if len(infectious_indices) == 0:
-            return np.array([], dtype = int)
+        base_prob = float(self.config.epi.base_transmission_prob)
+        vax_efficacy = float(self.config.epi.vax_efficacy)
+        susc_under5 = float(self.config.epi.susceptibility_multiplier_under_five)
+        susc_elderly = float(self.config.epi.susceptibility_multiplier_elderly)
+        rel_inf_vax = float(self.config.epi.relative_infectiousness_vax)
 
-        #gather factors affecting transmission probability
-        base_prob = self.config.epi.base_transmission_prob
-        vax_efficacy = self.config.epi.vax_efficacy
-        susc_mult_under5 = self.config.epi.susceptibility_multiplier_under_five
-        susc_mult_elderly = self.config.epi.susceptibility_multiplier_elderly
-        rel_inf_vax = self.config.epi.relative_infectiousness_vax
+        if not getattr(self, "_numba_ready", False):
+            self._prepare_numba_structures()
 
-        #local aliases
-        csr_by_type = self.csr_by_type
-        is_vax = self.is_vaccinated
-        ages = self.ages
-        rng = self.rng
+        # update multipliers in-place from dictionaries 
+        self._update_multiplier_matrices()
 
-        #iterate over exposure events (src,ct) to determine transmission probabilities
-        for src in infectious_indices:
-            for ct, (indptr, indices, weights) in csr_by_type.items():
-                start = indptr[src]
-                end = indptr[src+1]
-                if end <= start:
-                    continue
-                #determine susceptible neighbors
-                neighbors = indices[start:end]
-                w = weights[start:end]
-                sus_mask = (self.state[neighbors] == 0)
-                if not sus_mask.any():
-                    continue
-                sus_neighbors = neighbors[sus_mask]
-                sus_w = w[sus_mask].astype(np.float32)
-
-                #gather intervention multipliers 
-                out_mult = self.out_multiplier[ct][src]
-                in_mult = self.in_multiplier[ct][sus_neighbors]
-
-                #calculate effective weight and transmission prob
-                effective_w = sus_w * out_mult * in_mult
-                prob = base_prob * effective_w
-
-                #vaccination weighted
-                if is_vax[src]:
-                    prob = prob * rel_inf_vax
-                
-                vax_tgt = is_vax[sus_neighbors]
-                if vax_efficacy != 0:
-                    prob = prob * ((1.0 - vax_efficacy)** vax_tgt)
-
-                #age weighted
-                under5 = (ages[sus_neighbors] <= 5)
-                elderly = (ages[sus_neighbors] >= 65)
-                if susc_mult_under5 != 1.0:
-                    prob[under5] = prob[under5] * susc_mult_under5
-                if susc_mult_elderly != 1.0:
-                    prob[elderly] = prob[elderly]*susc_mult_elderly
-                
-                prob = np.clip(prob, 0.0, 1.0)
-
-
-                #Determine who becomes infected
-                draws = rng.random(prob.shape)
-                infected_mask = (draws < prob)
-                if infected_mask.any():
-                    infected_nodes = sus_neighbors[infected_mask]
-                    newly_exposed[infected_nodes] = True
-                
-                #Record event data
-                if recorder is not None:
-                    type_id = self.ct_to_id[ct]
-                    #pass array and infected mask 
-                    recorder.append_event(self.current_time, int(src), int(type_id), sus_neighbors, infected_mask)
+        newly_bool = _determine_new_exposures_numba(
+            self.state.astype(np.int8),
+            infectious_indices.astype(np.int64),
+            self._numba_indptr_list,
+            self._numba_indices_list,
+            self._numba_weights_list,
+            self._numba_out_mat,
+            self._numba_in_mat,
+            self.is_vaccinated,
+            self.ages.astype(np.int32),
+            base_prob,
+            vax_efficacy,
+            susc_under5,
+            susc_elderly,
+            rel_inf_vax
+        )
 
         
-        result = np.where(newly_exposed)[0].astype(np.int32)
-        return result
+        newly_exposed = np.where(newly_bool)[0].astype(np.int32)
+
+
+        if recorder is not None:
+            contact_types = self._numba_contact_types
+            for src in infectious_indices:
+                for j, ct in enumerate(contact_types):
+                    indptr = self._numba_indptr_list[j]
+                    indices = self._numba_indices_list[j]
+                    start = indptr[src]
+                    end = indptr[src + 1]
+                    if end <= start:
+                        continue
+                    neighbors = indices[start:end]
+                    sus_mask = (self.state[neighbors] == 0)
+                    if not sus_mask.any():
+                        continue
+                    sus_neighbors = neighbors[sus_mask]
+                    infected_mask = newly_bool[sus_neighbors]
+                    if infected_mask.any():
+                        type_id = self.ct_to_id[ct]
+                        recorder.append_event(self.current_time, int(src), int(type_id), sus_neighbors, infected_mask)
+        return newly_exposed
 
     #@profile
     def step(self, recorder: ExposureEventRecorder = None):

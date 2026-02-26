@@ -208,9 +208,93 @@ def get_master(
         metadata = {"master_cache_key": master_key, "saved": False}
         return master_df, metadata
 
-
 # Single model run
 
+def run_single_model(
+    contacts_src: Union[pd.DataFrame, str],
+    cfg: Union[ModelConfig, Dict[str, Any]],
+    *,
+    algorithm_map: Optional[Dict[str, object]] = None,
+    factory_map: Optional[Dict[str, callable]] = None,
+    seed: Optional[int] = None,
+    results_dir: Optional[str] = None,
+    save_exposures: bool = False,
+    master_cache_root: Optional[str] = None,
+    force_master_rebuild: bool = False,
+    lock_timeout: float = 600.0
+) -> NetworkModel:
+    """
+    High-level driver function:
+      - ensure contacts DF;
+      - load/build master edge list (cached);
+      - build minimal master graphdata for fast sampling;
+      - sample a model-level edge_list deterministically (run_index = 0 so all internal n_runs are identical);
+      - build/persist full GraphData for the sampled network (cached per master+cfg);
+      - instantiate NetworkModel with provided graphdata and config and run model.simulate()
+    """
+
+    # Normalize ModelConfig input
+    if isinstance(cfg, dict):
+        cfg = ModelConfig.from_nested_dict(cfg)
+    if seed is not None:
+        cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
+
+    # Resolve contacts_df
+    if isinstance(contacts_src, pd.DataFrame):
+        contacts_df = contacts_src.reset_index(drop=True)
+    elif isinstance(contacts_src, str):
+        # treat as path-to-parquet or county name
+        if os.path.exists(contacts_src) and contacts_src.endswith(".parquet"):
+            contacts_df = pd.read_parquet(contacts_src).reset_index(drop=True)
+        else:
+            # treat as county name (use cfg.sim.state to complement)
+            contacts_df = prepare_contacts(contacts_src, cfg.sim.state, data_dir="data", overwrite_files=cfg.sim.overwrite_edge_list, save_files=cfg.sim.save_data_files)
+    else:
+        raise TypeError("contacts_src must be a DataFrame or a path/county string")
+
+    # set results_dir
+    results_dir = results_dir or os.path.join(os.getcwd(), "results", cfg.sim.run_name)
+    if cfg.sim.save_data_files:
+        os.makedirs(results_dir, exist_ok=True)
+
+    # Build or load master
+    master_df, master_meta = get_master(contacts_df, cfg, cache_root=master_cache_root, rng=np.random.default_rng(int(cfg.sim.seed)), force_rebuild=force_master_rebuild, lock_timeout=lock_timeout)
+
+    # Build minimal graphdata (CSR-by-type only) for sampling
+    minimal_graphdata = build_minimal_graphdata_from_edge_list(master_df, N=int(contacts_df.shape[0]))
+
+    # Compute deterministic model-level run seed (we sample once per model so internal replicates share)
+    model_run_index = 0
+    run_seed = cfg.sim.seed  # the sampler function derives run_seed using base_run_seed + run_index
+    # Build a run cache key: include master key and sampling-relevant params (to avoid collisions)
+    master_key = cfg.sim.master_cache_key or _master_cache_key_from_config(cfg)
+
+    sampled_edges_df = sample_from_master_graphdata(minimal_graphdata, cfg, base_run_seed=cfg.sim.seed, run_index=0, rng=None)
+    # Build full run GraphData (this is the heavy step)
+    run_graphdata = build_graph_data(edge_list=sampled_edges_df, contacts_df=contacts_df, params=cfg.to_dict(), rng=np.random.default_rng(int(cfg.sim.seed)), N=int(contacts_df.shape[0]))
+
+    # Instantiate NetworkModel with provided prebuilt GraphData
+    model = NetworkModel(
+        graphdata = run_graphdata, 
+        config = cfg,
+        rng = np.random.default_rng(int(cfg.sim.seed)),
+        results_folder = results_dir,
+        lhd_register_defaults = False,
+        lhd_algorithm_map = algorithm_map,
+        lhd_action_factory_map = factory_map
+    )
+
+    # Run simulation
+    model.simulate()
+
+    # Optional save exposures (legacy behavior)
+    if save_exposures and results_dir:
+        np.savez_compressed(os.path.join(results_dir, "exposure_event_log.npz"), *model.exposure_event_log)
+
+    return model
+
+
+#Infrastructure for variant runs
 def prepare_scenario(contacts_df, cfg: ModelConfig, *, cache_root = None, rng = None):
     #Ensure master edge list exists
     master_df, master_meta = get_master(contacts_df, cfg, cache_root=cache_root, rng=rng)
