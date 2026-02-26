@@ -22,8 +22,6 @@ from new_scripts.config import ModelConfig, DEFAULT_MODEL_CONFIG
 from new_scripts.graph.cache_utils import (
     load_master_edge_list,
     save_master_edge_list,
-    save_graph_cache,
-    load_graph_cache,
 )
 from new_scripts.graph.graph_utils import (
     build_minimal_graphdata_from_edge_list,
@@ -212,167 +210,30 @@ def get_master(
 
 
 # Single model run
-def run_single_model(
-    contacts_src: Union[pd.DataFrame, str],
-    cfg: Union[ModelConfig, Dict[str, Any]],
-    *,
-    algorithm_map: Optional[Dict[str, object]] = None,
-    factory_map: Optional[Dict[str, callable]] = None,
-    seed: Optional[int] = None,
-    results_dir: Optional[str] = None,
-    save_exposures: bool = False,
-    master_cache_root: Optional[str] = None,
-    force_master_rebuild: bool = False,
-    lock_timeout: float = 600.0,
-) -> NetworkModel:
-    """
-    Full model run
-    """
 
-    # Normalize ModelConfig input
-    if isinstance(cfg, dict):
-        cfg = ModelConfig.from_nested_dict(cfg)
-    if seed is not None:
-        cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
+def prepare_scenario(contacts_df, cfg: ModelConfig, *, cache_root = None, rng = None):
+    #Ensure master edge list exists
+    master_df, master_meta = get_master(contacts_df, cfg, cache_root=cache_root, rng=rng)
+    master_graphdata = build_minimal_graphdata_from_edge_list(master_df, N=int(contacts_df.shape[0]))
+    sampled_edges = sample_from_master_graphdata(master_graphdata, cfg, base_run_seed=cfg.sim.seed, run_index=0, rng=rng)
+    run_graphdata = build_graph_data(edge_list=sampled_edges, contacts_df=contacts_df, params=cfg.to_dict(), rng=rng or np.random.default_rng(cfg.sim.seed), N=int(contacts_df.shape[0]))
+    return run_graphdata
 
-    # Go from contacts_src to contacts_df
-    if isinstance(contacts_src, pd.DataFrame):
-        contacts_df = contacts_src.reset_index(drop=True)
-    elif isinstance(contacts_src, str):
-        # if contacts_src is a string, read filepath
-        if os.path.exists(contacts_src) and contacts_src.endswith(".parquet"):
-            contacts_df = pd.read_parquet(contacts_src).reset_index(drop=True)
-        else:
-            # treat as county name (use cfg.sim.state to complement)
-            contacts_df = prepare_contacts(
-                contacts_src,
-                cfg.sim.state,
-                data_dir="data",
-                overwrite_files=cfg.sim.overwrite_edge_list,
-                save_files=cfg.sim.save_data_files,
-            )
-    else:
-        raise TypeError("contacts_src must be a DataFrame or a path/county string")
-
-    # set results_dir
-    results_dir = results_dir or os.path.join(os.getcwd(), "results", cfg.sim.run_name)
-    if cfg.sim.save_data_files:
-        os.makedirs(results_dir, exist_ok=True)
-
-    # Build or load master
-    master_df, master_meta = get_master(
-        contacts_df,
-        cfg,
-        cache_root=master_cache_root,
-        rng=np.random.default_rng(int(cfg.sim.seed)),
-        force_rebuild=force_master_rebuild,
-        lock_timeout=lock_timeout,
-    )
-
-    # Build minimal graphdata (CSR-by-type only) for sampling
-    minimal_graphdata = build_minimal_graphdata_from_edge_list(
-        master_df, N=int(contacts_df.shape[0])
-    )
-
-    # Compute deterministic model-level run seed (we sample once per model so internal replicates share)
-    model_run_index = 0
-    run_seed = (
-        cfg.sim.seed
-    )  # the sampler function derives run_seed using base_run_seed + run_index
-    # Build a run cache key: include master key and sampling-relevant params (to avoid collisions)
-    master_key = cfg.sim.master_cache_key or _master_cache_key_from_config(cfg)
-    run_cache_key = _run_cache_key_from_master(master_key, cfg)
-    run_cache_dir = os.path.join(
-        master_cache_root
-        or cfg.sim.graph_cache_dir
-        or os.path.join(results_dir, "graph_cache"),
-        run_cache_key,
-    )
-    os.makedirs(os.path.dirname(run_cache_dir), exist_ok=True)
-
-    # Try to load cached run GraphData
-    run_graphdata = None
-    run_lock = FileLock(run_cache_dir + ".lock")
-    try:
-        with run_lock.acquire(timeout=lock_timeout):
-            if os.path.isdir(run_cache_dir):
-                try:
-                    run_graphdata = load_graph_cache(run_cache_dir)
-                except Exception:
-                    try:
-                        shutil.rmtree(run_cache_dir)
-                    except Exception:
-                        pass
-            if run_graphdata is None:
-                # sample the model-level edge_list from minimal master (use run_index=0 so internal runs are identical)
-                sampled_edges_df = sample_from_master_graphdata(
-                    minimal_graphdata,
-                    cfg,
-                    base_run_seed=cfg.sim.seed,
-                    run_index=0,
-                    rng=None,
-                )
-                # Build full run GraphData (this is the heavy step)
-                run_graphdata = build_graph_data(
-                    edge_list=sampled_edges_df,
-                    contacts_df=contacts_df,
-                    params=cfg.to_dict(),
-                    rng=np.random.default_rng(int(cfg.sim.seed)),
-                    N=int(contacts_df.shape[0]),
-                )
-                # Persist run graphdata for reuse by other variants
-                try:
-                    save_graph_cache(
-                        run_graphdata,
-                        run_cache_dir,
-                        cache_key=run_cache_key,
-                        edge_list_df=sampled_edges_df,
-                        params=cfg.to_dict(),
-                        params_keys_for_hash=[
-                            "hh_weight",
-                            "wp_weight",
-                            "sch_weight",
-                            "gq_weight",
-                            "cas_weight",
-                        ],
-                        cache_version=1,
-                        overwrite=False,
-                    )
-                except FileExistsError:
-                    # another process may have created it – load the saved one
-                    run_graphdata = load_graph_cache(run_cache_dir)
-    except Timeout:
-        # lock acquisition timed out; fallback to in-memory sampling (no cache write)
-        sampled_edges_df = sample_from_master_graphdata(
-            minimal_graphdata,
-            cfg.to_dict(),
-            base_run_seed=cfg.sim.seed,
-            run_index=0,
-            rng=None,
-        )
-        run_graphdata = build_graph_data(
-            edge_list=sampled_edges_df,
-            contacts_df=contacts_df,
-            params=cfg.to_dict(),
-            rng=np.random.default_rng(int(cfg.sim.seed)),
-            N=int(contacts_df.shape[0]),
-        )
-
-    # Instantiate NetworkModel with provided prebuilt GraphData
+def run_variant_on_graphdata(contacts_df, cfg: ModelConfig, graphdata, variant_map, variant_dir):
     model = NetworkModel(
-        graphdata=run_graphdata,
+        contacts_df=contacts_df,
         config=cfg,
+        graphdata=graphdata,
         rng=np.random.default_rng(int(cfg.sim.seed)),
-        results_folder=results_dir,
+        results_folder=variant_dir,
         lhd_register_defaults=False,
-        lhd_algorithm_map=algorithm_map,
-        lhd_action_factory_map=factory_map,
+        lhd_algorithm_map=variant_map,
     )
 
-    # Run simulation
     model.simulate()
-
+    
     return model
+
 
 
 # --------------------------
@@ -430,5 +291,5 @@ if __name__ == "__main__":
         }
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state)
+    prepare_scenario(contacts, cfg)
     model = run_single_model(contacts, cfg, results_dir="results/exp1")
-    model.epi_curve()

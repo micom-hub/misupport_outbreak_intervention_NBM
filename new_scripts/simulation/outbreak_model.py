@@ -10,8 +10,8 @@ from collections import defaultdict
 import warnings
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from filelock import FileLock, Timeout
-import shutil
+from numba import njit
+from numba.typed import List as NumbaList
 
 
 from new_scripts.config import ModelConfig
@@ -181,6 +181,121 @@ class NetworkModel:
         return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf)
 
     #@profile
+    @njit
+    def _determine_new_exposures_numba(
+    state,           
+    infectious_indices,
+    indptr_list,
+    indices_list,             
+    weights_list,            
+    out_mat,                   
+    in_mat,                    
+    is_vax,             
+    ages,                      
+    base_prob,
+    vax_efficacy,
+    susc_under5,
+    susc_elderly,
+    rel_inf_vax
+):
+        N = state.shape[0]
+        newly_exposed = np.zeros(N, dtype = np.bool_)
+        n_ct = len(indptr_list)
+
+        #loop over infectious nodes
+        for infected_ind in range(infectious_indices.shape[0]):
+            src = infectious_indices[infected_ind]
+            for ct_ind in range(n_ct):
+                indptr = indptr_list[ct_ind]
+                indices = indices_list[ct_ind]
+                weights = weights_list[ct_ind]
+
+                start = indptr[src]
+                end = indptr[src + 1]
+                if end <= start:
+                    continue
+
+                out_mult_src = out_mat[ct_ind, src]
+
+                #calculate effective transmission weight
+                for k in range(start, end):
+                    nbr = indices[k]
+                    if state[nbr] != 0:
+                        continue
+                    w = weights[k]
+                    in_mult_nbr = in_mat[ct_ind, nbr]
+                    effective_w = w*out_mult_src*in_mult_nbr
+
+                    prob = base_prob*effective_w
+                    if is_vax[src]:
+                        prob = prob*rel_inf_vax
+                    if vax_efficacy != 0.0:
+                        if is_vax[nbr]:
+                            prob = prob*(1.0-vax_efficacy)
+                    if ages[nbr] <= 5:
+                        prob = prob * susc_under5
+                    elif ages[nbr] >= 65:
+                        prob = prob * susc_elderly
+
+                    if prob <= 0.0:
+                        continue
+                    if prob > 1.0:
+                        prob = 1.0
+                    
+                    if np.random.random() < prob:
+                        newly_exposed[nbr] = True
+        return newly_exposed
+    
+    def _prepare_numba_structures(self):
+        """
+        Convert self.csr_by_type and multiplier dicts into Numba-friendly structures
+        (typed lists and contiguous arrays). Called once (or at first use).
+        """
+        contact_types = list(self.contact_types)
+        self._numba_contact_types = contact_types
+        n_ct = len(contact_types)
+        N = self.N
+
+        # Build typed lists for indptr, indices, weights (ct order must match contact_types)
+        indptr_list = NumbaList()
+        indices_list = NumbaList()
+        weights_list = NumbaList()
+
+        for ct in contact_types:
+            indptr, indices, weights = self.csr_by_type[ct]
+            indptr_list.append(np.ascontiguousarray(indptr.astype(np.int64)))
+            indices_list.append(np.ascontiguousarray(indices.astype(np.int64)))
+            weights_list.append(np.ascontiguousarray(weights.astype(np.float32)))
+
+        # Multiplier matrices (n_ct x N). We'll update these in place each step.
+        out_mat = np.empty((n_ct, N), dtype=np.float32)
+        in_mat = np.empty((n_ct, N), dtype=np.float32)
+        for j, ct in enumerate(contact_types):
+            out_mat[j, :] = np.ascontiguousarray(self.out_multiplier[ct].astype(np.float32))
+            in_mat[j, :] = np.ascontiguousarray(self.in_multiplier[ct].astype(np.float32))
+
+        # store
+        self._numba_indptr_list = indptr_list
+        self._numba_indices_list = indices_list
+        self._numba_weights_list = weights_list
+        self._numba_out_mat = out_mat
+        self._numba_in_mat = in_mat
+        self._numba_ready = True
+
+    def _update_multiplier_matrices(self):
+        """
+        Update the in/out multiplier matrices in-place from current dicts.
+        Call before each call into the njit function if multipliers may have changed.
+        """
+        for j, ct in enumerate(self._numba_contact_types):
+            # in-place copy to avoid reallocations
+            self._numba_out_mat[j, :] = self.out_multiplier[ct].astype(np.float32)
+            self._numba_in_mat[j, :] = self.in_multiplier[ct].astype(np.float32)
+                    
+
+
+
+
     def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
         """
     Determine who becomes newly exposed (pre-infectious) this timestep.
@@ -1078,28 +1193,6 @@ class NetworkModel:
     
 
         return
-
-
-#Test run on population N = 2186
-if __name__ == "__main__":
-    Keweenaw_contacts = pd.read_parquet("./data/Keweenaw/contacts.parquet")
-
-    testModel = NetworkModel(contacts_df = Keweenaw_contacts)
-    print("Running Model on Keweenaw County...")
-    testModel.simulate()
-
-    print("Plotting outcomes...")
-    if testModel.n_runs < 10:
-        for run in range(testModel.n_runs):
-            testModel.epi_curve(run_number= run, suffix = f"run_{run+1}")
-            testModel.cumulative_incidence_plot(run_number= run, 
-                suffix = f"run_{run+1}", strata = "age")
-            testModel.cumulative_incidence_plot(run_number= run, 
-                suffix = f"run_{run+1}", strata = "sex")
-            testModel.cumulative_incidence_plot(run_number= run, 
-                suffix = f"run_{run+1}", strata = "vaccination")
-    testModel.cumulative_incidence_spaghetti()
-    results = testModel.epi_outcomes()
 
     
 
