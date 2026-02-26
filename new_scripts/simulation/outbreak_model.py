@@ -5,135 +5,29 @@ import os
 import numpy as np
 import pandas as pd
 import igraph as ig
-from typing import TypedDict, List, Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable
 from collections import defaultdict
 import warnings
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+from filelock import FileLock, Timeout
+import shutil
 
 
-from scripts.synth_data_processing import build_edge_list
+from new_scripts.config import ModelConfig
 from new_scripts.recorder.recorder import ExposureEventRecorder
 from new_scripts.lhd.lhd import LocalHealthDepartment
-from new_scripts.graph.graph_utils import build_graph_data
+from new_scripts.graph.graph_utils import GraphData 
 
-
-
-class ModelParameters(TypedDict):
-    # Epi Params
-    base_transmission_prob: float
-    incubation_period: float
-    infectious_period: float
-    incubation_period_vax: float
-    infectious_period_vax: float
-    conferred_immunity_duration: Optional[float]
-    lasting_partial_immunity: Optional[float]
-    gamma_alpha: float #alpha value for gamma distribution of inc/inf periods
-
-    relative_infectiousness_vax: float
-    vax_efficacy: float
-    vax_uptake: float
-    susceptibility_multiplier_under_five: float #increase in susceptibility if age <= 5
-    susceptibility_multiplier_elderly: float #susc mult age >= 65
-
-    # Population Params
-    hh_contacts: int
-    wp_contacts: int
-    sch_contacts: int
-    gq_contacts: int
-    cas_contacts: int
-    hh_weight: float
-    wp_weight: float
-    sch_weight: float
-    gq_weight: float
-    cas_weight: float
-
-    #LHD Params
-    mean_compliance: float 
-    lhd_employees: int
-    lhd_discovery_prob: float
-    lhd_workday_hrs: int
-    lhd_default_int_reduction: float
-    lhd_default_call_duration: float
-    lhd_default_int_duration: int
-
-    # Simulation Settings
-    n_runs: int
-    run_name: str #prefix for model run
-    overwrite_edge_list: bool #Try to reload previously generated edge list for this run to save time
-    simulation_duration: int  # days
-    I0: List[int] #1 random int if none
-    seed: int
-    county: str #county to run on
-    state: str #state to run on
-    record_exposure_events: bool
-    save_plots: bool
-    save_data_files: bool
-    make_movie: bool
-    display_plots: bool
-
-DefaultModelParams: ModelParameters = {
-    #Epdiemic Parameters
-    "base_transmission_prob": 0.25,
-    "incubation_period": 10.5,
-    "infectious_period": 5,
-    "gamma_alpha": 20,
-    "incubation_period_vax": 10.5,
-    "infectious_period_vax": 5,
-    "relative_infectiousness_vax": 0.05,
-    "conferred_immunity_duration": None, #duration where one is completely immune post-infection
-    "lasting_partial_immunity": None, #0-1, percent immune relative to naive
-    "vax_efficacy": .997,
-    "vax_uptake": 0.85, 
-    "susceptibility_multiplier_under_five": 1,
-    "susceptibility_multiplier_elderly": 1,
-
-    #Contact Parameters
-    "wp_contacts": 10,
-    "sch_contacts": 10,
-    "gq_contacts": 10,
-    "cas_contacts": 5,
-    "hh_weight": 1,
-    "wp_weight": .5,
-    "sch_weight": .6,
-    "gq_weight": .3,
-    "cas_weight": .1,
-
-    #LHD Params
-    "mean_compliance": 1,
-    "lhd_employees": 10,
-    "lhd_workday_hrs": 8,
-    "lhd_discovery_prob": .25,
-    "lhd_default_call_duration": 0.1,#in hours
-    "lhd_default_int_reduction": 0.8,
-    "lhd_default_int_duration": 10, #in days
-
-    #Simulation Settings
-    "n_runs": 50,
-    "run_name" : "test_run",
-    "overwrite_edge_list": True,
-    "simulation_duration": 45,
-    "I0": None, #randomized if None
-    "seed": 2026,
-    "county": "Keweenaw",
-    "state": "Michigan",
-    "record_exposure_events": True, #Necessary for LHD Dynamics
-    "save_plots": True,
-    "save_data_files": True,
-    "make_movie": False,
-    "display_plots": False
-
-}
 
 #-----Outbreak Model-------
 class NetworkModel:
     #@profile
     def __init__(
-        self, 
-    contacts_df, 
-    params: ModelParameters = DefaultModelParams,
+        self,  
+    config: ModelConfig,
+    graphdata: GraphData,
     *,
-    edge_list: Optional[pd.DataFrame] = None,
     rng = None,
     seed: Optional[int] = None,
     results_folder: Optional[str] = None,
@@ -141,14 +35,14 @@ class NetworkModel:
     lhd_algorithm_map: Optional[Dict[str, object]] = None,
     lhd_action_factory_map: Optional[Dict[str, Callable[..., Any]]] = None):
         """
-        Unpack parameters, set-up storage variables, and initialize model
+        Unpack config and graphdata
         """
-        #Unpack params and model settings
-        self.params = dict(params)
-        self.contacts_df = contacts_df
-        self.N = int(self.contacts_df.shape[0])
-        self.Tmax = int(self.params.get("simulation_duration", 100))
         
+        self.config = config
+        self.config.validate()
+        
+        self._assign_graphdata_to_model(graphdata)
+        self.Tmax = self.config.sim.simulation_duration
 
         #choose RNG: explicit rng > seed arg > params['seed] 
         if rng is not None:
@@ -156,17 +50,13 @@ class NetworkModel:
         elif seed is not None:
             self.rng = np.random.default_rng(int(seed))
         else:
-            seed_from_params = self.params["seed"]
+            seed_from_params = self.config.sim.seed
             self.rng = np.random.default_rng(int(seed_from_params))
 
         #run metadata:
-        self.county = self.params.get("county", "")
-        self.n_runs = int(self.params.get("n_runs", 1))
+        self.county = self.config.sim.county
+        self.n_runs = self.config.sim.n_runs
 
-        #edge_list can be passed by driver
-        self.external_edge_list = edge_list 
-        #One-time computation of network structures
-        self._compute_network_structures()
 
         #Set up storage for full run
         self.all_states_over_time = [None]*self.n_runs
@@ -185,9 +75,9 @@ class NetworkModel:
         self.lhd = LocalHealthDepartment(
             model = self,
             rng = self.rng,
-            discovery_prob = self.params.get("lhd_discovery_prob"),
-            employees = self.params.get("lhd_employees"),
-            workday_hrs = self.params.get("lhd_workday_hrs"),
+            discovery_prob = self.config.lhd.lhd_discovery_prob,
+            employees = self.config.lhd.lhd_employees,
+            workday_hrs = self.config.lhd.lhd_workday_hrs,
             register_defaults = lhd_register_defaults,
             algorithm_map = lhd_algorithm_map,
             action_factory_map = lhd_action_factory_map
@@ -195,60 +85,20 @@ class NetworkModel:
 
         #set-up result folder if not overriden by driver
         
-        self.results_folder = results_folder if results_folder is not None else os.path.join(os.getcwd(), "results", self.params.get("run_name", "run"))
-        if self.params["save_data_files"]:
+        self.results_folder = results_folder if results_folder is not None else os.path.join(os.getcwd(), "results", self.config.sim.run_name)
+        if self.config.sim.save_data_files:
                 os.makedirs(self.results_folder, exist_ok = True)
 
-    #Helper functions to convert between
-    #Name: an individual's number (index of contact_df/individual_lookup))
-    #Ind: the index of the individual's vertex in the model
-
-    #@profile
-    def _compute_network_structures(self):
-        """
-        Loads or builds an edge list from synthetic population data, then pre-computes computationally expensive network structures
-        """
-        #Get edge list from 
-        if getattr(self, "external_edge_list", None) is not None:
-            self.edge_list = self.external_edge_list.copy()
-        else:
-            edgefile_path = os.path.join(
-                os.getcwd(),
-                "data",
-                self.county,
-                (self.params.get("run_name", "run") + "_edgeList.parquet")
-            )
-            # if a cached edge-list exists and overwrite_edge_list is False, read it
-            if (not bool(self.params.get("overwrite_edge_list", False))) and os.path.isfile(edgefile_path):
-                self.edge_list = pd.read_parquet(edgefile_path)
-            else:
-                # build edge list (this may save the file if build_edge_list honors save flag)
-                self.edge_list = build_edge_list(
-                    contacts_df = self.contacts_df,
-                    params = self.params,
-                    rng = self.rng,
-                    save = bool(self.params.get("save_data_files", False)),
-                    county = self.county
-                )
-
-        
-        graphdata = build_graph_data(
-            edge_list = self.edge_list,
-            contacts_df = self.contacts_df,
-            params = self.params,
-            rng = self.rng,
-            N = self.N
-        )
-
-        #copy graphdata fields into model
+   
+    def _assign_graphdata_to_model(self, graphdata: GraphData):
+    # graphdata assumed to be a full GraphData object returned by build_graph_data
+        self.N = graphdata.N
         self.edge_list = graphdata.edge_list
         self.adj_matrix = graphdata.adj_matrix
         self.individual_lookup = graphdata.individual_lookup
         self.ages = graphdata.ages
         self.sexes = graphdata.sexes
-
-        self.compliances = graphdata.compliances
-
+        self.compliances = getattr(graphdata, "compliances", getattr(self, "compliances", None))
         self.neighbor_map = graphdata.neighbor_map
         self.fast_neighbor_map = graphdata.fast_neighbor_map
         self.csr_by_type = graphdata.csr_by_type
@@ -256,15 +106,10 @@ class NetworkModel:
         self.ct_to_id = graphdata.ct_to_id
         self.id_to_ct = graphdata.id_to_ct
         self.full_node_list = graphdata.full_node_list
-        
+        # reinitialize in/out multipliers
+        self.in_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
+        self.out_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
 
-        #Initialize multipliers for LHD interaction
-        self.in_multiplier = {
-            ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types
-            }  
-        self.out_multiplier = {
-            ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types
-            }  
 
     def _initialize_states(self):
         """
@@ -272,7 +117,7 @@ class NetworkModel:
         """
         self.current_time = 0
        #Set vaccinations
-        self.is_vaccinated = self.rng.random(self.N) < self.params["vax_uptake"]
+        self.is_vaccinated = self.rng.random(self.N) < self.config.epi.vax_uptake
 
         #State tracking variables; S = 0, E = 1, I = 2, R = 3
         self.state = np.zeros(self.N, dtype = np.int8) 
@@ -286,10 +131,10 @@ class NetworkModel:
         self.new_infections = []
 
         #pick random I0 if none provided
-        initial_infectious = self.params.get("I0", None)
+        initial_infectious = self.config.sim.I0
         if not initial_infectious:
             initial_infectious = [self.rng.integers(0,self.N)]
-            self.params["I0"] = initial_infectious
+            self.I0 = initial_infectious
         self.state[initial_infectious] = 2
         self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)
 
@@ -322,18 +167,18 @@ class NetworkModel:
         Take a list of newly-assigned exposed indices and assign an incubation period
         """
         inds = np.atleast_1d(inds)
-        mean_inc = np.where(self.is_vaccinated[inds], self.params["incubation_period_vax"], self.params["incubation_period"])/self.params["gamma_alpha"]
-        return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inc)
+        mean_inc = np.where(self.is_vaccinated[inds], self.config.epi.incubation_period_vax, self.config.epi.incubation_period)
+        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inc)
     
     def assign_infectious_period(self, inds):
         """
         Take a list of newly-assigned infectious indices and assign an infectious period
         """
         inds = np.atleast_1d(inds)
-        mean_inf = np.where(self.is_vaccinated[inds], self.params["infectious_period_vax"], self.params["infectious_period"])/self.params["gamma_alpha"]
+        mean_inf = np.where(self.is_vaccinated[inds], self.config.epi.infectious_period_vax, self.config.epi.infectious_period)
 
 
-        return self.rng.gamma(shape = self.params["gamma_alpha"], scale = mean_inf)
+        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf)
 
     #@profile
     def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
@@ -354,11 +199,11 @@ class NetworkModel:
             return np.array([], dtype = int)
 
         #gather factors affecting transmission probability
-        base_prob = self.params['base_transmission_prob']
-        vax_efficacy = self.params['vax_efficacy']
-        susc_mult_under5 = self.params['susceptibility_multiplier_under_five']
-        susc_mult_elderly = self.params["susceptibility_multiplier_elderly"]
-        rel_inf_vax = self.params['relative_infectiousness_vax']
+        base_prob = self.config.epi.base_transmission_prob
+        vax_efficacy = self.config.epi.vax_efficacy
+        susc_mult_under5 = self.config.epi.susceptibility_multiplier_under_five
+        susc_mult_elderly = self.config.epi.susceptibility_multiplier_elderly
+        rel_inf_vax = self.config.epi.relative_infectiousness_vax
 
         #local aliases
         csr_by_type = self.csr_by_type
@@ -465,7 +310,7 @@ class NetworkModel:
         self.time_in_state[recovered] += 1
 
          #R -> S with waning immunity
-        cid = self.params.get("conferred_immunity_duration", None)
+        cid = self.config.epi.conferred_immunity_duration
         if cid is not None:
             try:
                 cid_val = float(cid)
@@ -483,7 +328,7 @@ class NetworkModel:
                     self.incubation_periods[waned_nodes] = np.nan
                     self.infectious_periods[waned_nodes] = np.nan
                     #check if there is lasting immunity, and reduce in multiplier
-                    lasting = self.params.get("lasting_partial_immunity", None)
+                    lasting = self.config.epi.lasting_partial_immunity
                     if lasting:
                         lasting = np.clip(lasting, 0, 1)
                         reduced_sus = (1-lasting)
@@ -519,7 +364,7 @@ class NetworkModel:
                 t += 1 #day 0 is recorded in initialization
                 self.current_time = t
 
-                if self.params.get("record_exposure_events"):
+                if self.config.sim.record_exposure_events:
                     recorder = self.recorder_template
                     recorder.reset()
                 else:
@@ -612,7 +457,7 @@ class NetworkModel:
 
             # ensure day-0 includes I0 if empty
             if len(daily) > 0 and daily[0].size == 0:
-                daily[0] = np.array(self.params.get("I0", []), dtype = np.int32)
+                daily[0] = np.array(self.config.sim.I0, dtype = np.int32)
 
             # Flatten event-level exposures for run-level event counts and reinfection counts
             nonempty = [d for d in daily if d.size > 0]
@@ -924,14 +769,14 @@ class NetworkModel:
 
         exposures = self.all_new_exposures[run_number]
         counts = [len(exposed) for exposed in exposures]
-        counts[0] = len(self.params["I0"]) #add initial infections
+        counts[0] = len(self.config.sim.I0) #add initial infections
         plt.figure(figsize=((8,4)))
         plt.bar(range(len(counts)), counts, color = 'orange', label = "Infections Over Time")
         plt.xlabel("Timestep")
         plt.ylabel("Number of Infectious Contacts Made")
         plt.grid(axis = 'y', alpha = 0.5)
         plt.tight_layout()
-        if self.params["save_plots"]:
+        if self.config.sim.save_plots:
             plotpath = os.path.join(self.results_folder,"epi_curve")
             if suffix:
                 plotpath = plotpath + suffix
@@ -939,7 +784,7 @@ class NetworkModel:
 
             plt.savefig(f"{plotpath}.png")
 
-        if self.params["display_plots"]:
+        if self.config.sim.display_plots:
             plt.show()
         plt.close()
 
@@ -961,7 +806,7 @@ class NetworkModel:
         pop_size = self.N
         exposures = self.all_new_exposures[run_number]
         if len(exposures) > 0 and len(exposures[0]) == 0:
-            exposures[0] = list(self.params["I0"])
+            exposures[0] = list(self.config.sim.I0)
 
         if time is None: 
             max_time = len(exposures) - 1
@@ -1066,22 +911,22 @@ class NetworkModel:
         plt.xlabel("Time step (day)")
         plt.ylabel("Cumulative Incidence (fraction of population)")
         if strata:
-            plt.title(f"Cumulative Incidence (Stratified by {strata})\nRun {self.params['run_name']}")
+            plt.title(f"Cumulative Incidence (Stratified by {strata})\nRun {self.config.sim.run_name}")
             legend_handles = [Patch(color = strata_colors[i], label = str(label)) for i, label in enumerate(strata_labels)]
             plt.legend(handles = legend_handles, loc = "upper left")
         else:
-            plt.title(f"Cumulative Incidence Over Time for  {self.params['run_name']}")
+            plt.title(f"Cumulative Incidence Over Time for  {self.config.sim.run_name}")
         plt.grid(True, axis = "y", alpha = 0.5)
         plt.tight_layout()
         plotpath = os.path.join(self.results_folder, "cumulative_incidence")
         if suffix:
             plotpath = plotpath + suffix
-        if self.params["save_plots"]:
+        if self.config.sim.save_plots:
             if strata:
                 plt.savefig(f"{plotpath}_by{strata}.png")
             else: 
                 plt.savefig(f"{plotpath}.png")
-        if self.params["display_plots"]:
+        if self.config.sim.display_plots:
             plt.show()
         plt.close()
 
@@ -1138,9 +983,9 @@ class NetworkModel:
         plotpath = os.path.join(self.results_folder, "cumulative_incidence_spaghetti")
         if suffix:
             plotpath = plotpath + suffix
-        if self.params["save_plots"]:
+        if self.config.sim.save_plots:
             plt.savefig(f"{plotpath}.png")
-        if self.params["display_plots"]:
+        if self.config.sim.display_plots:
             plt.show()
         plt.close()
         
@@ -1227,7 +1072,7 @@ class NetworkModel:
             if suffix:
                 plotpath = plotpath + suffix
             plt.savefig(f"{plotpath}.png")
-        if show_plot and self.params["display_plots"]:
+        if show_plot and self.config.sim.display_plots:
             plt.show()
         plt.close()
     

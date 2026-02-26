@@ -1,12 +1,14 @@
 import numpy as np
-from typing import Dict, Optional, Any, Callable, List
+from typing import TYPE_CHECKING, Dict, Optional, Any, Callable, List
 import warnings
 from collections import defaultdict
 
 
 from new_scripts.lhd.actions import ActionBase, ActionToken, CallIndividualsAction
 from new_scripts.lhd.algorithms import AlgorithmBase, RandomPriority
-from scripts.network_model import NetworkModel
+
+if TYPE_CHECKING:
+    from new_scripts.simulation.outbreak_model import NetworkModel
 
 
 class LocalHealthDepartment:
@@ -24,11 +26,11 @@ class LocalHealthDepartment:
     #LHD settings
         self.model = model
         self.rng = rng if rng is not None else getattr(model, "rng", np.random.default_rng())
-        self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.params["lhd_discovery_prob"]
+        self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.config.lhd.lhd_discovery_prob
 
     #LHD Capacity
-        self.employees = employees if employees is not None else self.model.params["lhd_employees"]
-        self.hours_per_employee = float(workday_hrs) if workday_hrs is not None else self.model.params["lhd_workday_hrs"]
+        self.employees = employees if employees is not None else self.model.config.lhd.lhd_employees
+        self.hours_per_employee = float(workday_hrs) if workday_hrs is not None else self.model.config.lhd.lhd_workday_hrs
         self.daily_personhours = float(self.employees * self.hours_per_employee)
 
     #Algorithm -> algorithm instance
@@ -49,9 +51,9 @@ class LocalHealthDepartment:
         self.min_candidate_cost = 1e-4
 
     #Default action params
-        self.default_int_reduction = model.params.get("lhd_default_int_reduction", 0.8)
-        self.default_int_duration = model.params.get("lhd_default_int_duration", 7)
-        self.default_call_cost = model.params.get("lhd_default_call_duration", 0.083)
+        self.default_int_reduction = model.config.lhd.lhd_default_int_reduction
+        self.default_int_duration = model.config.lhd.lhd_default_int_reduction
+        self.default_call_cost = model.config.lhd.lhd_default_call_duration
 
 
         #Register default actions if requested:

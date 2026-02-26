@@ -1,8 +1,10 @@
 import numpy as np
-from typing import Optional, Dict, Any, List
+from typing import TYPE_CHECKING, Optional, Dict, Any, List
 import uuid
 from dataclasses import dataclass
-from scripts.network_model import NetworkModel
+
+if TYPE_CHECKING:
+    from new_scripts.simulation.outbreak_model import NetworkModel
 
 
 @dataclass

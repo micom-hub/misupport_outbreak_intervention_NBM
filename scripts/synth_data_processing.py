@@ -2,7 +2,9 @@ import os
 import zipfile
 import pandas as pd
 import numpy as np
+from itertools import combinations
 from numba import njit
+from new_scripts.config import ModelConfig
 
 #@profile
 def synthetic_data_process(county, save_files=True):
@@ -154,17 +156,18 @@ def build_individual_lookup(contact_df):
 #@profile
 def build_edge_list(
     contacts_df: pd.DataFrame,
-    params: dict,
+    config: ModelConfig,
     rng: np.random.Generator = None,
     save: bool = False, 
-    county: str = None
+    county: str = None,
+    master_casual_contacts: int = 100
 ):
     """
-    Take a contact dataframe output from synthetic_data_process, and produce an edge list with adjustible contact weights, sampling individual contacts from each location (school, workplace, group_quarters), and using all household contacts
+    Generate a master edge list of all possible contact combinations, to be sampled from in graph construction
 
     Args:
         contacts_df (pd.DataFrame): Output from synthetic_data_process
-        params (dict): Parameters dictionary which contains parameters describing contact weights and number of contacts to sample from workplace and school
+        config: a ModelConfig object
         rng (np.rng): a seeded rng for reproducibility
         save (Bool): if true, will save edge list to parquet
         county (str): if data is to be saved, direct to proper data file
@@ -177,167 +180,145 @@ def build_edge_list(
     #Re-index contacts_df
     contacts_df = contacts_df.reset_index(drop = True)
 
+    cfg = config
+
+
     if rng is None:
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(int(cfg.sim.seed))
 
     edge_list = []
 
-    #group lookup
-    for col in ['hh_id', 'wp_id', 'sch_id', 'gq_id']:
-        contacts_df[col] = contacts_df[col].astype(str)
-    
-    #Create edges between all individuals in a household
-    household_groups = contacts_df.groupby('hh_id').groups
 
-    hh_weight = params["hh_weight"]
-    for hh_id, indices in household_groups.items():
+    #helper function to add an unordered pair to edge list, deduplicated
+    def _add_pair(i,j,w,ct):
+        if i == j:
+            return
+        s, t = (int(i), int(j)) if int(i) < int(j) else (int(j), int(i))
+        edge_list.append((s, t, float(w), ct))
+
+    #add all hh, wp, sch, gq pairs
+    hh_weight = cfg.population.hh_weight
+    hh_groups = contacts_df.groupby('hh_id').groups
+    for hh_id, ind in hh_groups.items():
         if hh_id == 'nan' or hh_id == '':
             continue
-        ind_list = list(indices)
-        for i in range(len(ind_list)):
-            for j in range(i+1, len(ind_list)):
-                edge_list.append((min(ind_list[i], ind_list[j]), max(ind_list[i], ind_list[j]), hh_weight, "hh"))
-        
-    #Sample workplace contacts for each individual
-    wp_weight = params["wp_weight"]
+        ind_list = list(ind)
+        if len(ind_list) < 2:
+            continue
+        for i, j in combinations(ind_list, 2):
+            _add_pair(i, j, hh_weight, "hh")
+
+    wp_weight = cfg.population.wp_weight
     wp_groups = contacts_df.groupby('wp_id').groups
-    for wp_id, indices in wp_groups.items():
+    for wp_id, ind in wp_groups.items():
         if wp_id == 'nan' or wp_id == '':
             continue
-        ind_list = list(indices)
-        for i in ind_list:
-            contacts_to_sample = [ind for ind in ind_list if ind != i]
-            k = min(params["wp_contacts"], len(contacts_to_sample))
-            sampled = rng.choice(contacts_to_sample, size = k, replace = False) if k > 0 else []
-            for j in sampled:
-                edge_list.append((min(i, j), max(i,j), wp_weight, "wp"))
+        ind_list = list(ind)
+        if len(ind_list) < 2:
+            continue
+        for i, j in combinations(ind_list, 2):
+            _add_pair(i, j, wp_weight, "wp")
 
-
-    #School sampled contacts
-    sch_weight = params["sch_weight"]
+    sch_weight = cfg.population.sch_weight
     sch_groups = contacts_df.groupby('sch_id').groups
-    for sch_id, indices in sch_groups.items():
+    for sch_id, ind in sch_groups.items():
         if sch_id == 'nan' or sch_id == '':
             continue
-        ind_list = list(indices)
-        for i in ind_list:
-            contacts_to_sample = [ind for ind in ind_list if ind != i]
-            k = min(params["sch_contacts"], len(contacts_to_sample))
-            sampled = rng.choice(contacts_to_sample, size = k, replace = False) 
-            for j in sampled:
-                edge_list.append((min(i, j), max(i,j), sch_weight, "sch"))
+        ind_list = list(ind)
+        if len(ind_list) < 2:
+            continue
+        for i, j in combinations(ind_list, 2):
+            _add_pair(i, j, sch_weight, "sch")
 
-    #gq sampled contacts
-
-    gq_weight = params["gq_weight"]
+    gq_weight = cfg.population.gq_weight
     gq_groups = contacts_df.groupby('gq_id').groups
-    for gq_id, indices in gq_groups.items():
+    for gq_id, ind in gq_groups.items():
         if gq_id == 'nan' or gq_id == '':
             continue
-        ind_list = list(indices)
-        for i in ind_list:
-            contacts_to_sample = [ind for ind in ind_list if ind != i]
-            k = min(params["gq_contacts"], len(contacts_to_sample))
-            sampled = rng.choice(contacts_to_sample, size = k, replace = False) 
-            for j in sampled:
-                edge_list.append((min(i, j), max(i,j), gq_weight, "gq"))
+        ind_list = list(ind)
+        if len(ind_list) < 2:
+            continue
+        for i, j in combinations(ind_list, 2):
+            _add_pair(i, j, gq_weight, "gq")
 
-    #Numba magic to speed up the edge_list calculation
-    #Casual sampled contacts
-    num_cas = params["cas_contacts"]
-    cas_weight = params["cas_weight"]
-
-    # precompute non-gq indices and mapping 
+    #Casual contacts - sampled up to master_casual_contacts
+    cas_weight = cfg.population.cas_weight
     non_gq_mask = ~contacts_df["gq"].astype(bool).to_numpy()
-    non_gq_indices = contacts_df.index[non_gq_mask].to_numpy()   
+    non_gq_indices = contacts_df.index[non_gq_mask].to_numpy()
+    N_non_gq = non_gq_indices.size
 
-    N = len(non_gq_indices)
-
-    # map from original index -> compact 0..N-1 index
-    M_total = contacts_df.shape[0]
-    idx_map = np.full(M_total, -1, dtype=np.int32)
-    for pos in range(N):
-        idx_map[non_gq_indices[pos]] = pos
-
-    # Build dense boolean pair_mask for forbidden (hh/wp/sch) pairs among non-gq
-    pair_mask = np.zeros((N, N), dtype=np.bool_)
-    for a, b, _, ct in edge_list:
-        if ct in {"hh", "wp", "sch"}:
-            ia = idx_map[a]
-            ib = idx_map[b]
-            if ia != -1 and ib != -1:
-                pair_mask[ia, ib] = True
-                pair_mask[ib, ia] = True
-
-    # ----- Numba-accelerated sampler -----
-    @njit
-    def sample_casual_numba(pair_mask, num_cas):
-        Nloc = pair_mask.shape[0]
-        assigned = np.zeros((Nloc, Nloc), dtype=np.bool_)   # symmetric flags for chosen casual edges
-        temp = np.empty(Nloc, dtype=np.int32)  # reuse candidate buffer
-        for i in range(Nloc):
-            cnt = 0
-            # gather candidate j's
-            for j in range(Nloc):
-                if j != i and (not pair_mask[i, j]) and (not assigned[i, j]):
-                    temp[cnt] = j
-                    cnt += 1
-            if cnt == 0:
+    #build a set of pairs not allowed (share hh/wp/sch)
+    forbidden = set()
+    for (i, j, w, ct) in edge_list:
+        if i in non_gq_indices and j in non_gq_indices:
+            forbidden.add((min(int(i), int(j)), max(int(i), int(j))))
+        
+    #sample casual candidates
+    for i in non_gq_indices:
+        candidates = []
+        for j in non_gq_indices:
+            if int(i) == int(j):
                 continue
-            k = num_cas if num_cas < cnt else cnt
-            # Partial Fisher-Yates to select k unique without replacement
-            for t in range(k):
-                # pick r in [t, cnt-1]
-                r = np.random.randint(t, cnt)
-                # swap
-                tv = temp[t]
-                temp[t] = temp[r]
-                temp[r] = tv
-                jj = temp[t]
-                assigned[i, jj] = True
-                assigned[jj, i] = True
-        return assigned
+            a, b = (int(i), int(j)) if int(i) < int(j) else (int(j), int(i))
+            if (a,b) in forbidden:
+                continue
+            candidates.append(int(j))
+        if not candidates:
+            continue
+        k = min(master_casual_contacts, len(candidates))
+        sampled = rng.choice(candidates, size = k, replace = False)
+        for j in sampled:
+            _add_pair(i, j, cas_weight, "cas")
 
-    assigned = sample_casual_numba(pair_mask, num_cas)
+    #deduplicate any identical tuples (same s, t, ct)
+    unique = {}
+    for s, t, w, ct in edge_list:
+        key = (int(s), int(t), str(ct))
+        if key not in unique:
+            unique[key] = (int(s), int(t), float(w), str(ct))
+    rows = list(unique.values())
+    edges_df = pd.DataFrame(rows, columns=['source','target','weight','contact_type'])
 
-    # Add edges back to edge_list by mapping compact indices -> original indices
-    for ii in range(N):
-        for jj in range(ii + 1, N):
-            if assigned[ii, jj]:
-                a = non_gq_indices[ii]
-                b = non_gq_indices[jj]
-                edge_list.append((int(min(a, b)), int(max(a, b)), cas_weight, "cas"))
+    #aggregate any (s,t) pair with multiple ct, keeping the higher weighted ct
+    cts = ["hh", "sch", "wp", "gq", "cas"]
+    ct_ws = [hh_weight, sch_weight, wp_weight, gq_weight, cas_weight]
+    combined = sorted(zip(ct_ws, cts), reverse = True)
+    prioritized_cts = [x[1] for x in combined]
+    priority_map = {ct: i for i, ct in enumerate(prioritized_cts)}
 
-    #Build dataframe
-    edges_df = pd.DataFrame(edge_list, columns = ['source', 'target', 'weight', 'contact_type'])
-
-
-    max_weights = edges_df.groupby(['source','target'])['weight'].max().reset_index()
-
-    edges_max = pd.merge(edges_df, max_weights, on = ['source','target','weight'])
-
-    #if two contact weights are equal, set to aggregate
-    edges_df = edges_max.groupby(['source','target']).agg({
-        'weight':'first',
-        'contact_type': 'unique'}).reset_index()
-
-    edges_df['contact_type'] = edges_df['contact_type'].apply(lambda ct: '+'.join(sorted(ct)))
-
+    #correct datatypes
     
 
+#sort by weight, then drop duplicates and keep only the first 
+    edges_df = edges_df.sort_values(
+        by = ['source', 'target', 'weight', 'contact_type'],
+        ascending = [True, True, False, True],
+        kind = 'mergesort'
+    )
+    edges_unique = edges_df.drop_duplicates(subset=['source','target'],keep='first').copy().reset_index(drop=True)
+
+
+    edges_df = edges_unique
+
+    edges_df['source'] = edges_df['source'].astype(np.int32)
+    edges_df['target'] = edges_df['target'].astype(np.int32)
+    edges_df['weight'] = edges_df['weight'].astype(np.float32)
+    edges_df['contact_type'] = edges_df['contact_type'].astype(str)
+
+
+
+
+        
     if save:
         if not county:
-            raise Exception("Save was indicated, but no county name provided")
-
+            raise Exception("Save requested but no county provided")
         save_loc = os.path.join(os.getcwd(), "data", county)
-        out_file = os.path.join(save_loc, (params["run_name"] + "_edgeList.parquet"))
-        edges_df.to_parquet(out_file, index = False)
-        print(f"Network edge list saved to {out_file}")
+        os.makedirs(save_loc, exist_ok=True)
+        out_file = os.path.join(save_loc, (cfg.sim.run_name + "_master_edgeList.parquet"))
+        edges_df.to_parquet(out_file, index=False)
+        print(f"Master network edge list saved to {out_file}")
 
     return edges_df
-    
-
-
 
 
 

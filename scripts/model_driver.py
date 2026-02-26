@@ -30,71 +30,7 @@ from scripts.fred_fetch import downloadPopData
 from scripts.network_model import NetworkModel
 
 
-def prepare_contacts(county: str, state: str, data_dir: str = "data", overwrite_files: bool = True, save_files: bool = False):
-    """
-    Ensures contacts dataframe exists 'county'
-    - Looks for folder or zip under data_dir whos name starts with county
-    - If none found, uses downloadPopData
-    - If a .zip is found or produced by download, calls synthetic_data_process to make contacts.parquet
-    - If there is a directory, look for contacts.parquet and load it, otherwise call synthetic_data_process
 
-    """
-
-    county_name = county.lower().capitalize()
-    state_name = state.lower().capitalize() 
-
-    os.makedirs(data_dir, exist_ok=True)
-
-
-
-    #find any entries in data_dir that start with county_name
-    entries = [f for f in os.listdir(data_dir) if f.startswith(county_name)]
-    if not entries:
-        downloadPopData(state=state_name, county=county_name)
-        # re-list
-        entries = [f for f in os.listdir(data_dir) if f.startswith(county_name)]
-        if not entries:
-            raise RuntimeError(f"downloadPopData did not produce any data files for {county_name} in {data_dir}")
-
-    #prefer a directory if present, else take zip or folder
-    dir_entries = [e for e in entries if os.path.isdir(os.path.join(data_dir, e))]
-    if dir_entries:
-        countyfoldername = dir_entries[0]
-    else:
-        countyfoldername = entries[0]
-
-    countyfolder = os.path.join(data_dir, countyfoldername)
-
-    #If data is a zipfile, use synthetic_data_process to extract contact data
-    #delete zip file
-    if os.path.isfile(countyfolder) and countyfolder.lower().endswith(".zip"):
-        try:
-            contacts_df = synthetic_data_process(county)
-        except Exception as e:
-            raise RuntimeError(f"Failed to process synthetic data from zip for {county_name}: {e}")from e
-        
-        if save_files and os.path.exists(countyfolder):
-            try:
-                os.remove(countyfolder)
-            except OSError:
-                pass
-
-        return contacts_df
-
-    #if countyfolder is a directory, check for contacts.parquet, if not there, process synthetic data
-    if os.path.isdir(countyfolder):
-        parquet_path = os.path.join(countyfolder, "contacts.parquet")
-        #if overwrite_files, do not reread old contacts.parquet
-        if os.path.exists(parquet_path) and not overwrite_files:
-            return pd.read_parquet(parquet_path)
-        else:
-            try:
-                contacts_df = synthetic_data_process(county_name, save_files = save_files)
-                return contacts_df
-            except Exception as e:
-                raise RuntimeError(f"Could not find contacts.parquet in {countyfolder} and synthetic_data_process failed: {e}") from e
-
-    raise RuntimeError(f"Unhandled data entry for county {county_name}: {countyfolder}")
 
 
 def run_single_model(
