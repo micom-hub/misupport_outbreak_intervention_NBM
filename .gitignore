@@ -11,3 +11,5 @@ results/
 analyses
 analyses/*
 experiments/elderly_prioritization_experiment.py
+scratch.ipynb
+.vscode/
