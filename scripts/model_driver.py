@@ -27,7 +27,8 @@ import traceback
 
 from scripts.synth_data_processing import synthetic_data_process, build_edge_list
 from scripts.fred_fetch import downloadPopData
-from scripts.network_model import NetworkModel
+from scripts.network_model import NetworkModel, ModelParameters, \
+    DefaultModelParams
 
 
 def prepare_contacts(county: str, state: str, data_dir: str = "data", overwrite_files: bool = True, save_files: bool = False):
@@ -845,3 +846,7 @@ def clean_run_results(run_dir: Optional[str] = None, delete_variants: bool = Tru
                 print(f"[clean_run_results] Could not remove {d}: {exc}")
 
     return overall_df, timeseries_df
+
+if __name__ == "__main__":
+    contacts_df = prepare_contacts(county = "Keweenaw", state = "Michigan")
+    model = run_single_model(contacts_df, params = DefaultModelParams)
