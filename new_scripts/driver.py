@@ -376,4 +376,5 @@ if __name__ == "__main__":
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state)
     prepare_scenario(contacts, cfg)
-    model = run_single_model(contacts, cfg, results_dir="results/exp1")
+    model = run_single_model(contacts, cfg, results_dir="results/testing")
+    model.write_run_results()

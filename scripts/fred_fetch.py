@@ -4,6 +4,8 @@
 
 from selenium import webdriver 
 from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -37,7 +39,7 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
     }
     options.add_experimental_option("prefs", prefs)
 
-    driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
     driver.get("https://fred.publichealth.pitt.edu/syn_pops")
 
