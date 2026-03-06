@@ -134,9 +134,3 @@ class ModelConfig:
             raise ValueError("sim.n_runs must be >= 1")
         if self.lhd.lhd_employees < 0:
             raise ValueError("lhd.lhd_employees must be >= 0")
-
-# default convenience constant
-DEFAULT_MODEL_CONFIG = ModelConfig()
-
-
-#Helper function to build a ModelConfig object

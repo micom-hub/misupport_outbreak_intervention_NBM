@@ -15,7 +15,7 @@ from typing import Dict, Optional, Union
 import numpy as np
 import pandas as pd
 
-from scripts.config import ModelConfig, DEFAULT_MODEL_CONFIG
+from scripts.config import ModelConfig
 from scripts.graph.graph_utils import (
     build_minimal_graphdata_from_edge_list,
     build_graph_data,
@@ -259,6 +259,7 @@ def run_single_model(
     )
 
     # Run simulation
+    print("Running Model!")
     model.simulate()
 
     # Optional save exposures (legacy behavior)
@@ -280,7 +281,7 @@ def _validate_contacts_df(df: pd.DataFrame) -> None:
 
 
 if __name__ == "__main__":
-    cfg = DEFAULT_MODEL_CONFIG.copy_with(
+    cfg = ModelConfig().copy_with(
         {
             "sim": {"I0": [5, 10, 15], "display_plots": True},
             "epi": {"base_transmission_prob": 0.99},
@@ -288,4 +289,4 @@ if __name__ == "__main__":
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state)
     model = run_single_model(contacts, cfg, seed = 13)
-    model.write_run_results()
+    
