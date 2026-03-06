@@ -14,5 +14,5 @@ dependencies:
   - pytest
   - ipykernel
   - pyarrow
-  - filelock
+  - webdriver-manager
 prefix: /opt/miniconda3/envs/LHDsim

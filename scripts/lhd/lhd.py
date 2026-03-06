@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING, Dict, Optional, Any, Callable, List
 import warnings
 from collections import defaultdict
 
-
 from scripts.lhd.actions import ActionBase, ActionToken, CallIndividualsAction
 from scripts.lhd.algorithms import AlgorithmBase, RandomPriority
 
