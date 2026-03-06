@@ -6,19 +6,18 @@ import numpy as np
 import pandas as pd
 import igraph as ig
 from typing import Dict, Any, Optional, Callable
-from collections import defaultdict
-import warnings
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from numba import njit
 from numba.typed import List as NumbaList
 
 
-from new_scripts.config import ModelConfig
-from new_scripts.recorder.recorder import ExposureEventRecorder
-from new_scripts.lhd.lhd import LocalHealthDepartment
-from new_scripts.graph.graph_utils import GraphData 
+from scripts.config import ModelConfig
+from scripts.recorder.recorder import ExposureEventRecorder
+from scripts.lhd.lhd import LocalHealthDepartment
+from scripts.graph.graph_utils import GraphData 
 
+#Define numba loop outside of model, called by determine_new_exposures
 @njit
 def _determine_new_exposures_numba(
 state,           
@@ -88,18 +87,19 @@ rel_inf_vax
 
 #-----Outbreak Model-------
 class NetworkModel:
-    #@profile
+    #@profilesave_
     def __init__(
         self,  
-    config: ModelConfig,
-    graphdata: GraphData,
-    *,
-    rng = None,
-    seed: Optional[int] = None,
-    results_folder: Optional[str] = None,
-    lhd_register_defaults: bool = True,
-    lhd_algorithm_map: Optional[Dict[str, object]] = None,
-    lhd_action_factory_map: Optional[Dict[str, Callable[..., Any]]] = None):
+        config: ModelConfig,
+        graphdata: GraphData,
+        run_dir: str,
+        *,
+        rng = None,
+        seed: Optional[int] = None,
+        lhd_register_defaults: bool = True,
+        lhd_algorithm_map: Optional[Dict[str, object]] = None,
+        lhd_action_factory_map: Optional[Dict[str, Callable[..., Any]]] = None
+        ):
         """
         Unpack config and graphdata
         """
@@ -149,9 +149,9 @@ class NetworkModel:
             action_factory_map = lhd_action_factory_map
         )
 
-        #set-up result folder if not overriden by driver
-        
-        self.results_folder = results_folder if results_folder is not None else os.path.join(os.getcwd(), "results", self.config.sim.run_name)
+        #Results that are saved go to run_dir
+        self.results_folder = run_dir 
+        #Create if not created by driver
         if self.config.sim.save_data_files:
                 os.makedirs(self.results_folder, exist_ok = True)
 
@@ -172,6 +172,7 @@ class NetworkModel:
         self.ct_to_id = graphdata.ct_to_id
         self.id_to_ct = graphdata.id_to_ct
         self.full_node_list = graphdata.full_node_list
+        self.degrees_arr = graphdata.degrees_arr
         # reinitialize in/out multipliers
         self.in_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
         self.out_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}

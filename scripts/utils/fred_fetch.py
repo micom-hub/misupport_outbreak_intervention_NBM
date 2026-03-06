@@ -112,5 +112,5 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
 
 if __name__ == "__main__":
     state = "Michigan"
-    county = "Chippewa"
+    county = "Keweenaw"
     downloadPopData(state, county, os.getcwd())

@@ -1,8 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict, replace
 from typing import Optional, List, Dict, Any
+from datetime import datetime
 import json
-import hashlib
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,7 @@ class PopulationParams:
     wp_contacts: int = 10
     sch_contacts: int = 10
     gq_contacts: int = 10
-    cas_contacts: int = 50
+    cas_contacts: int = 10
     hh_weight: float = 1.0
     wp_weight: float = 0.5
     sch_weight: float = 0.6
@@ -49,8 +49,8 @@ class LHDParams:
 @dataclass(frozen=True)
 class SimulationParams:
     n_runs: int = 50
-    run_name: str = "test_run"
-    overwrite_edge_list: bool = True
+    run_name: str = "RUN" + str(datetime.now().strftime("%d-%m-%Y_%H-%M"))
+    overwrite_master: bool = True
     simulation_duration: int = 45
     I0: Optional[List[int]] = field(default_factory = list)
     seed: int = 2026
@@ -58,8 +58,7 @@ class SimulationParams:
     state: str = "Michigan"
     resample_network_per_run: bool = False
     master_casual_candidates: int = 100
-    master_cache_key: Optional[str] = None
-    graph_cache_dir: Optional[str] = None
+    save_master: bool = True
     record_exposure_events: bool = True
     save_plots: bool = True
     save_data_files: bool = True
@@ -75,6 +74,7 @@ class ModelConfig:
     sim: SimulationParams = field(default_factory=SimulationParams)
 
 
+    #Convert ModelConfig to dict
     def to_dict(self) -> Dict[str, Any]:
         return {"epi": asdict(self.epi), "population": asdict(self.population), "lhd": asdict(self.lhd), "sim": asdict(self.sim)}
 
@@ -82,12 +82,14 @@ class ModelConfig:
         with open(path, "w") as fh:
             json.dump(self.to_dict(), fh, indent=2, default=str)
 
+    #Build model config object from a json (saved by to_json)
     @classmethod
     def from_json(cls, path: str) -> "ModelConfig":
         with open(path, "r") as fh:
             d = json.load(fh)
         return cls.from_nested_dict(d)
 
+    #build from nested dict, also used by from_json
     @classmethod
     def from_nested_dict(cls, nested: Dict[str, Any]) -> "ModelConfig":
         """
@@ -133,14 +135,8 @@ class ModelConfig:
         if self.lhd.lhd_employees < 0:
             raise ValueError("lhd.lhd_employees must be >= 0")
 
-def derive_run_seed(base_seed: int, run_index: int) -> int:
-    """
-    Derive a unique seed for each run from the index and base seed
-    """
-    s = f"{int(base_seed)}:{int(run_index)}"
-    h = hashlib.sha256(s.encode("utf8")).hexdigest()
-    return int(h[:16], 16)
-
-
 # default convenience constant
 DEFAULT_MODEL_CONFIG = ModelConfig()
+
+
+#Helper function to build a ModelConfig object

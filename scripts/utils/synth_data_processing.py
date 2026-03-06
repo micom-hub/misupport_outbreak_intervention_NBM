@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from itertools import combinations
 from numba import njit
-from new_scripts.config import ModelConfig
+from scripts.config import ModelConfig
 
 #@profile
 def synthetic_data_process(county, save_files=True):

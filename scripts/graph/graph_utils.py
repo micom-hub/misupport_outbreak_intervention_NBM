@@ -4,24 +4,15 @@ Contains utility functions for building contact structure data, called in outbre
 """
 
 from dataclasses import dataclass
-from collections import defaultdict
-from typing import Dict, List, Tuple, Any, Optional, Tuple
+from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.stats import truncnorm
 import logging
-import hashlib
-import os
-import json
-import shutil
-import uuid
-from datetime import datetime
-from numba import njit, int64, uint64, int32, float32, int16
 
-from scripts.synth_data_processing import build_individual_lookup
-from new_scripts.config import ModelConfig
-from new_scripts.config import derive_run_seed
+from scripts.utils.synth_data_processing import build_individual_lookup
+from scripts.config import ModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +37,12 @@ class GraphData:
     ct_to_id: Dict[str, int]
     id_to_ct: Dict[int, str]
     full_node_list: List[int]
+    degrees_arr: np.ndarray
 
 def build_graph_data(
     edge_list: pd.DataFrame,
     contacts_df: pd.DataFrame,
-    params: Dict[str, Any],
+    config: ModelConfig,
     rng: Optional[np.random.Generator] = None,
     N: Optional[int] = None,
 ) -> GraphData:
@@ -60,7 +52,7 @@ def build_graph_data(
     Args:
         edge_list (pd.DataFrame): DataFrame with cols ['source', 'target', 'weight', 'contact_type']
         contacts_df (pd.DataFrame): contacts DataFrame from synth_data_processing
-        params (Dict[str, Any]): model parameter dict
+        config: ModelConfig object
         rng (Optional[np.random.Generator], optional): RNG object, created if not provided
         N (Optional[int], optional): Population Size
 
@@ -82,6 +74,8 @@ def build_graph_data(
     #Adjacency Matrix
     adj = _build_adj_matrix_from_edge_list(edge_list, N)
 
+    #Degrees (unweighted) tgts per src
+    degrees_arr = adj.getnnz(axis=1).astype(np.int32)
 
     #Individual Characteristics
     individual_lookup = build_individual_lookup(contacts_df)
@@ -90,7 +84,7 @@ def build_graph_data(
 
     sexes = individual_lookup["sex"].to_numpy()
 
-    avg_compliance = float(np.clip(params.get("mean_compliance", 1.0), 0.0, 1.0))
+    avg_compliance = float(np.clip(config.lhd.mean_compliance, 0.0, 1.0))
     sd = 0.15
     a = (0 - avg_compliance) / sd
     b = (1 - avg_compliance) / sd
@@ -124,176 +118,185 @@ def build_graph_data(
         contact_types=contact_types,
         ct_to_id=ct_to_id,
         id_to_ct=id_to_ct,
-        full_node_list=full_node_list
+        full_node_list=full_node_list,
+        degrees_arr=degrees_arr
     )
 
 
     
         
 def sample_from_master_graphdata(
-    graphdata: Dict[str, Any], #not a GraphData object
-    config: ModelConfig, 
-    base_run_seed: int,
-    run_index: int,
-    *,
-    rng: Optional[np.random.Generator] = None,
-    save_path: Optional[str] = None
+    minimal_master_dict: Dict,
+    config: ModelConfig,
+    rng: Optional[np.random.Generator] = None
 ) -> pd.DataFrame:
     """
-    Takes a GraphData object for the mastergraph and returns a sampled graph for model run
+    Samples contacts a minimal representation of a master edge list produced by build_minimal_graphdata_from_edge_list() according to provided ModelConfig object
+
+    Returns a sampled pandas.DataFrame with same columns as master_edgelist
     """
-    N = graphdata["N"]
-    contact_types = list(graphdata["contact_types"])
-    ct_to_id = graphdata["ct_to_id"]
-    run_seed = derive_run_seed(base_run_seed, run_index)
-    rng_local = rng if rng is not None else np.random.default_rng(int(run_seed))
+    if rng is None:
+        rng = np.random.default_rng(config.sim.seed)
+    elif isinstance(rng, np.random.Generator):
+        pass
+    else:
+        raise TypeError("rng must be none, or a numpy random generator")
 
+    N = int(minimal_master_dict["N"])
+    csr_by_type = minimal_master_dict["csr_by_type"]
+    ct_to_id = minimal_master_dict["ct_to_id"]
 
-    #helper to get the mean contact count for ct
-    def _get_mean_k(ct: str) -> float:
-        key_map = {
-            "wp": "wp_contacts",
-            "sch": "sch_contacts",
-            "cas": "cas_contacts",
-            "gq": "gq_contacts",
-            "hh": "hh_contacts"
-        }
-        key = key_map.get(ct)
+    #Mapping contact types to sample (not hh)
+    ct_to_popkey = { "wp": "wp_contacts", "sch": "sch_contacts", "cas": "cas_contacts", "gq": "gq_contacts"}
 
-        return float(getattr(config.population, key, 0) if hasattr(config.population, key) else 0.0)
+    pop = getattr(config, "population", None)
 
+    src_list = []
+    tgt_list = []
+    wt_list = []
+    ct_list = []
 
+    #Gather all household contacts
+    if "hh" in csr_by_type:
+        indptr_hh, indices_hh, weights_hh = csr_by_type["hh"]
+        indptr_hh = np.asarray(indptr_hh, dtype=np.int64)
+        indices_hh = np.asarray(indices_hh, dtype=np.int32)
+        weights_hh = np.asarray(weights_hh, dtype=np.float32) if weights_hh is not None else np.ones(indices_hh.shape[0], dtype=np.float32)
 
-    #make per-contact pick_count arrays 
-    pick_counts_by_ct: Dict[str, np.ndarray] = {}
-    for ct in contact_types:
-        mean_k = _get_mean_k(ct)
-        if ct == 'hh':
-            #take all household contacts
-            indptr, indices, weights = graphdata["csr_by_type"].get(ct, (None, None, None))
-            if indptr is None:
-                pick_counts_by_ct[ct] = np.zeros(N, dtype=np.int32)
-            else:
-                degs = (indptr[1:] - indptr[:-1]).astype(np.int32)
-                pick_counts_by_ct[ct] = degs
-            continue
-        if mean_k <= 0.0:
-            pick_counts_by_ct[ct] = np.zeros(N, dtype=np.int32)
-            continue
-
-        #Sample degree from poisson distribution
-        k_arr = rng_local.poisson(mean_k, size=N).astype(np.int32)
-        k_arr[k_arr < 0] = 0
-        indptr, indices, weights = graphdata["csr_by_type"].get(ct, (None, None, None))
-        if indptr is None:
-            k_arr[:] = 0
-        else:
-            degs = (indptr[1:] - indptr[:-1]).astype(np.int32)
-            if degs.shape[0] != N:
-                k_arr[:] = 0
-            else:
-                k_arr = np.minimum(k_arr, degs)
-        pick_counts_by_ct[ct] = k_arr
-
-
-    total_picks = 0
-    for ct in contact_types:
-        total_picks += int(pick_counts_by_ct[ct].sum())
-
-    if total_picks == 0:
-        rows = []
-        if  'hh' in graphdata["csr_by_type"]:
-            indptr, indices, weights = graphdata["csr_by_type"]['hh']
+        if indptr_hh.ndim != 1 or indptr_hh.shape[0] != N + 1:
+            # Fallback: if shapes are unexpected, collect via loop (robust fallback)
             for src in range(N):
-                for pos in range(indptr[src], indptr[src+1]):
-                    tgt = int(indices[pos])
-                    a, b = (src, tgt) if src < tgt else (tgt, src)
-                    # master aggregated assures unique pair weight
-                    rows.append((int(a), int(b), float(weights[pos]), 'hh'))
-        df_empty = pd.DataFrame(rows, columns=['source','target','weight','contact_type'])
-        if save_path:
-            df_empty.to_parquet(save_path, index=False)
-        return df_empty
+                s = int(indptr_hh[src]) if src + 1 < indptr_hh.shape[0] else 0
+                e = int(indptr_hh[src + 1]) if src + 1 < indptr_hh.shape[0] else s
+                for pos in range(s, e):
+                    tgt = int(indices_hh[pos])
+                    w = float(weights_hh[pos]) if weights_hh.size > 0 else 1.0
+                    a = min(src, tgt)
+                    b = max(src, tgt)
+                    src_list.append(a)
+                    tgt_list.append(b)
+                    wt_list.append(w)
+                    ct_list.append("hh")
+        else:
+            counts = (indptr_hh[1:] - indptr_hh[:-1]).astype(np.int32)
+            total = int(counts.sum())
+            if total > 0:
+                # srcs repeated according to counts aligns with indices_hh
+                srcs = np.repeat(np.arange(N, dtype=np.int32), counts)
+                tgts = indices_hh
+                wts = weights_hh
+                # a <= b for undirected canonicalization
+                i_hh = np.minimum(srcs, tgts).astype(np.int32)
+                j_hh = np.maximum(srcs, tgts).astype(np.int32)
+                # sort by (a,b) primary and -weight to keep highest-weight first within duplicates
+                neg_w = -wts.astype(np.float64)
+                order = np.lexsort((neg_w, j_hh, i_hh))  # primary a, then b, then -weight
+                i_s = i_hh[order]
+                j_s = j_hh[order]
+                w_s = wts[order]
+                # keep unique (a,b) first occurrence (which is highest weight)
+                keep_mask = np.ones(i_s.shape[0], dtype=bool)
+                if i_s.shape[0] > 1:
+                    dup = (i_s[1:] == i_s[:-1]) & (j_s[1:] == j_s[:-1])
+                    keep_mask[1:] = ~dup
+                a_u = i_s[keep_mask]
+                b_u = j_s[keep_mask]
+                w_u = w_s[keep_mask]
+                src_list.extend(a_u.tolist())
+                tgt_list.extend(b_u.tolist())
+                wt_list.extend(w_u.tolist())
+                ct_list.extend(["hh"] * len(a_u))
 
-    src_arr = np.empty(total_picks, dtype=np.int32)
-    tgt_arr = np.empty(total_picks, dtype=np.int32)
-    weight_arr = np.empty(total_picks, dtype=np.float32)
-    ct_id_arr = np.empty(total_picks, dtype=np.int16)
+    #Extract per-node information for contacts and degree by ct
+    for ct, popkey in ct_to_popkey.items():
+        #household gets special treatment and takes all contacts, otherwise sample
 
-    ptr = 0
-    run_seed_u64 = np.uint64(run_seed)
-    for ct in contact_types:
-        indptr, indices, weights = graphdata["csr_by_type"].get(ct, (None, None, None))
-        if indptr is None:
+        mean_deg = float(getattr(pop, popkey, 0.0)) if pop is not None else 0.0
+        if mean_deg <= 0.0:
             continue
-        pick_counts = pick_counts_by_ct[ct]
-        if pick_counts.sum() == 0:
+        if ct not in csr_by_type:
             continue
-        ct_id = int(ct_to_id.get(ct, 0))
-        ptr = _sample_ct_numba(indptr.astype(np.int64), indices.astype(np.int32), weights.astype(np.float32),
-                               pick_counts.astype(np.int32), run_seed_u64, int(ct_id),
-                               src_arr, tgt_arr, weight_arr, ct_id_arr, ptr)
+        indptr, indices, weights = csr_by_type[ct]
+        indptr = np.asarray(indptr, dtype=np.int64)
+        indices = np.asarray(indices, dtype=np.int32)
+        weights = np.asarray(weights, dtype=np.float32) if weights is not None else np.empty(indices.shape[0], dtype=np.float32)
 
 
+        if indptr.ndim != 1 or indptr.shape[0] < 2:
+            continue
+        degs = (indptr[1:] - indptr[:-1]).astype(np.int32)
+        if degs.shape[0] != N:
+            raise ValueError(f"Contact type '{ct}' degree array length {degs.shape[0]} != minimal_master_dict['N'] {N}")
 
-    # shorten arrays to actual size
-    src_arr = src_arr[:ptr]
-    tgt_arr = tgt_arr[:ptr]
-    weight_arr = weight_arr[:ptr]
-    ct_id_arr = ct_id_arr[:ptr]
+        #Sample degree per node from poisson, capped by availability
+        degrees_arr = rng.poisson(mean_deg, size = N).astype(np.int32)
+        degrees_arr = np.minimum(degs, degrees_arr)
 
-    if ptr == 0:
-        df_empty = pd.DataFrame(columns=['source','target','weight','contact_type'])
-        if save_path:
-            df_empty.to_parquet(save_path, index=False)
-        return df_empty
+        nonzero_nodes = np.nonzero(degrees_arr > 0)[0]
+        for src in nonzero_nodes:
+            k = int(degrees_arr[src])
+            start = int(indptr[src])
+            end = int(indptr[src+1])
+            m = end - start
+            if m <= 0 or k <= 0:
+                continue
+            if k >= m:
+                chosen_positions = np.arange(start, end, dtype = np.int64)
+            else:
+                choices = rng.choice(m, size = k, replace = False)
+                chosen_positions = start + np.asarray(choices, dtype = np.int64)
 
-    # make pairs unordered and deduplicate
-    a = np.minimum(src_arr, tgt_arr).astype(np.int32)
-    b = np.maximum(src_arr, tgt_arr).astype(np.int32)
-    ct_ids = ct_id_arr.astype(np.int16)
-    ws = weight_arr.astype(np.float32)
+            for pos in chosen_positions:
+                tgt = int(indices[pos])
+                w = float(weights[pos])
+                src_list.append(src)
+                tgt_list.append(tgt)
+                wt_list.append(w)
+                ct_list.append(ct)
 
-    neg_w = (-ws).astype(np.float64)  # higher weight first
-    order = np.lexsort((ct_ids, neg_w, b, a))
-    a_s = a[order]
-    b_s = b[order]
-    ct_s = ct_ids[order]
-    w_s = ws[order]
+    if len(src_list) == 0:
+        return pd.DataFrame(columns=["source","target","weight","contact_type"])
 
-    # boolean mask to keep unique (a,b) first occurrence
-    keep = np.ones(a_s.shape[0], dtype=np.bool_)
-    if a_s.shape[0] > 1:
-        dup = (a_s[1:] == a_s[:-1]) & (b_s[1:] == b_s[:-1])
+    
+    src_arr = np.array(src_list, dtype=np.int32)
+    tgt_arr = np.array(tgt_list, dtype=np.int32)
+    wt_arr = np.array(wt_list, dtype=np.float32)
+    ct_arr = np.array(ct_list, dtype=object)
+
+    #Make pairs unordered, sort by ct, and deduplicate if needed
+    i = np.minimum(src_arr, tgt_arr)
+    j = np.maximum(src_arr, tgt_arr)
+    ct_id_arr = np.array([ct_to_id.get(ct, 0) for ct in ct_arr], dtype=np.int16)
+
+    neg_w = -wt_arr.astype(np.float64)
+    order = np.lexsort((ct_id_arr, neg_w, j, i))
+
+    i_sorted = i[order]
+    j_sorted = j[order]
+    wt_sorted = wt_arr[order]
+    ct_sorted = ct_arr[order]
+
+    keep = np.ones(i_sorted.shape[0], dtype = bool)
+    if i_sorted.shape[0] > 1 :
+        dup = ((i_sorted[1:] == i_sorted[:-1]) & (j_sorted[1:] == j_sorted[:-1]))
         keep[1:] = ~dup
+    
+    i_final = i_sorted[keep]
+    j_final = j_sorted[keep]
+    wt_final = wt_sorted[keep]
+    ct_final = ct_sorted[keep]
 
-    a_u = a_s[keep]
-    b_u = b_s[keep]
-    ct_u = ct_s[keep]
-    w_u = w_s[keep]
-
-    # map ct_id back to name
-    id_to_ct = {int(v): str(k) for k, v in graphdata["ct_to_id"].items()}
-
-    # build df
-    contact_type_names = [id_to_ct[int(x)] for x in ct_u]
     df = pd.DataFrame({
-        'source': a_u.astype(np.int32),
-        'target': b_u.astype(np.int32),
-        'weight': w_u.astype(np.float32),
-        'contact_type': np.array(contact_type_names, dtype=object)
+        "source":i_final.astype(np.int32),
+        "target": j_final.astype(np.int32),
+        "weight": wt_final.astype(np.float32),
+        "contact_type": np.asarray(ct_final, dtype = object)
     })
 
-    df = df.sort_values(by=['contact_type', 'source', 'target']).reset_index(drop=True)
-
-    if save_path:
-        df.to_parquet(save_path, index=False)
+    df = df.sort_values(by = ["contact_type", "source", "target"]).reset_index(drop = True)
 
     return df
-
-
-
-
+    
 #Helpers for graph building
 def _build_adj_matrix_from_edge_list(edge_list: pd.DataFrame, N: int) -> csr_matrix:
     """
@@ -463,91 +466,6 @@ def build_minimal_graphdata_from_edge_list(edge_list: pd.DataFrame, N: int):
         "id_to_ct": id_to_ct,
         "full_node_list": full_node_list
     }
-
-
-@njit(uint64(uint64))
-def _splitmix64_numba(x: uint64) -> uint64:
-    # run splitmix64 algorithm
-    x = (x + uint64(0x9E3779B97F4A7C15)) & uint64(0xFFFFFFFFFFFFFFFF)
-    x = (x ^ (x >> uint64(30))) * uint64(0xBF58476D1CE4E5B9)
-    x = (x ^ (x >> uint64(27))) * uint64(0x94D049BB133111EB)
-    x = x ^ (x >> uint64(31))
-    return x
-
-#numba sampling routine for contact type
-@njit(int64(int64[:], int32[:], float32[:], int32[:], uint64, int32,
-            int32[:], int32[:], float32[:], int16[:], int64))
-def _sample_ct_numba(indptr, indices, weights, pick_counts, run_seed_u64, ct_id,
-                      out_src, out_tgt, out_weight, out_ct_id, start_ptr):
-    """
-    indptr: int64 array length N+1
-    indices: int32 array of neighbor targets
-    weights: float32 array of neighbor weights (aligned with indices)
-    pick_counts: int32 array length N = number to pick per node (already capped to deg)
-    run_seed_u64: uint64 run seed
-    ct_id: int32 contact-type id
-    out_src/out_tgt/out_weight/out_ct_id: preallocated arrays to write into
-    start_ptr: starting write index into out arrays
-    returns new write pointer
-    """
-    ptr = start_ptr
-    N = indptr.shape[0] - 1
-    for src in range(N):
-        start = indptr[src]
-        end = indptr[src + 1]
-        m = end - start
-        k = pick_counts[src]
-        if m == 0 or k <= 0:
-            continue
-        if k >= m:
-            for pos in range(start, end):
-                out_src[ptr] = src
-                out_tgt[ptr] = indices[pos]
-                out_weight[ptr] = weights[pos]
-                out_ct_id[ptr] = ct_id
-                ptr += 1
-            continue
-
-        tmp_neigh = np.empty(m, dtype=np.int32)
-        tmp_w = np.empty(m, dtype=np.float32)
-        for ii in range(m):
-            tmp_neigh[ii] = indices[start + ii]
-            tmp_w[ii] = weights[start + ii]
-
-        # partial Fisher-Yates with deterministic pseudo-random values via splitmix
-        # for t in [0..k-1]: swap tmp[t] with tmp[r] where r in [t, m-1] chosen by splitmix
-        for t in range(k):
-            # form a unique counter combining run_seed, ct_id, src and t
-            # Use additions to avoid overflow behavior (uint64 wraps naturally)
-            ctr = uint64(run_seed_u64 + uint64(ct_id) + uint64(src) + uint64(t))
-            rnd = _splitmix64_numba(ctr)
-            # range length = m - t > 0
-            rem = m - t
-            r = t + int(rnd % uint64(rem))
-            # swap neighbors and weights
-            tmp_n = tmp_neigh[t]
-            tmp_neigh[t] = tmp_neigh[r]
-            tmp_neigh[r] = tmp_n
-            tmp_wv = tmp_w[t]
-            tmp_w[t] = tmp_w[r]
-            tmp_w[r] = tmp_wv
-            # record selected (tmp_neigh[t])
-            out_src[ptr] = src
-            out_tgt[ptr] = tmp_neigh[t]
-            out_weight[ptr] = tmp_w[t]
-            out_ct_id[ptr] = ct_id
-            ptr += 1
-
-    return ptr
-
-
-
-    
-
-###################
-#Caching functions#
-###################
-
 
 
 

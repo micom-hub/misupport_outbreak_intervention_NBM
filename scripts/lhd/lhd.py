@@ -4,11 +4,11 @@ import warnings
 from collections import defaultdict
 
 
-from new_scripts.lhd.actions import ActionBase, ActionToken, CallIndividualsAction
-from new_scripts.lhd.algorithms import AlgorithmBase, RandomPriority
+from scripts.lhd.actions import ActionBase, ActionToken, CallIndividualsAction
+from scripts.lhd.algorithms import AlgorithmBase, RandomPriority
 
 if TYPE_CHECKING:
-    from new_scripts.simulation.outbreak_model import NetworkModel
+    from scripts.simulation.outbreak_model import NetworkModel
 
 
 class LocalHealthDepartment:

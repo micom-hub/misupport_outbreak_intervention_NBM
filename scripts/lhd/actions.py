@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 
 if TYPE_CHECKING:
-    from new_scripts.simulation.outbreak_model import NetworkModel
+    from scripts.simulation.outbreak_model import NetworkModel
 
 
 @dataclass
