@@ -116,7 +116,7 @@ def validate_variant_maps(algorithm_map: Dict[str, AlgorithmBase], action_factor
             raise TypeError(f"algorithm_map[{k}] is not an AlgorithmBase instance: {type(v)}")
     for k, fac in action_factory_map.items():
         if not callable(fac):
-            raise TypeError(f"action_factory_map[{k}] is not callable: {type(f)}")
+            raise TypeError(f"action_factory_map[{k}] is not callable: {type(fac)}")
 
 """
 To write variants:
