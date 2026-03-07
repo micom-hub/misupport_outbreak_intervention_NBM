@@ -201,8 +201,8 @@ class NetworkModel:
         #pick random I0 if none provided
         initial_infectious = self.config.sim.I0
         self.I0 = initial_infectious
-        if not initial_infectious:
-            initial_infectious = [self.rng.integers(0,self.N)]
+        if isinstance(initial_infectious, int):
+            initial_infectious = self.rng.integers(low = 0, high = self.N, size = initial_infectious).tolist()
             self.I0 = initial_infectious
         self.state[initial_infectious] = 2
         self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)

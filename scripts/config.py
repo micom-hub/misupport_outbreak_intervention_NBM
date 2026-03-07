@@ -135,3 +135,5 @@ class ModelConfig:
             raise ValueError("sim.n_replicates must be >= 1")
         if self.lhd.lhd_employees < 0:
             raise ValueError("lhd.lhd_employees must be >= 0")
+        if not isinstance(self.sim.I0, (int, List)):
+            raise ValueError("sim.I0 must be an integer or list")
