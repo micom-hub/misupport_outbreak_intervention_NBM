@@ -283,10 +283,11 @@ def _validate_contacts_df(df: pd.DataFrame) -> None:
 if __name__ == "__main__":
     cfg = ModelConfig().copy_with(
         {
-            "sim": {"I0": [5, 10, 15], "display_plots": True},
+            "sim": {"I0": None, "display_plots": True},
             "epi": {"base_transmission_prob": 0.99},
         }
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state)
     model = run_single_model(contacts, cfg, seed = 13)
+    print(model.results_to_df())
     

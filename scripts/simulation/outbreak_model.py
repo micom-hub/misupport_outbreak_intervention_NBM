@@ -5,11 +5,12 @@ import os
 import numpy as np
 import pandas as pd
 import igraph as ig
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from numba import njit
 from numba.typed import List as NumbaList
+import warnings
 
 
 from scripts.config import ModelConfig
@@ -199,6 +200,7 @@ class NetworkModel:
 
         #pick random I0 if none provided
         initial_infectious = self.config.sim.I0
+        self.I0 = initial_infectious
         if not initial_infectious:
             initial_infectious = [self.rng.integers(0,self.N)]
             self.I0 = initial_infectious
@@ -226,16 +228,15 @@ class NetworkModel:
             self.lhd.reset_for_run()
 
         return
-       
-
-        
+             
     def assign_incubation_period(self, inds):
         """
         Take a list of newly-assigned exposed indices and assign an incubation period
         """
         inds = np.atleast_1d(inds)
         mean_inc = np.where(self.is_vaccinated[inds], self.config.epi.incubation_period_vax, self.config.epi.incubation_period)
-        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inc)
+        #shape is gamma_alpha, scale is mean/shape
+        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inc/self.config.epi.gamma_alpha)
     
     def assign_infectious_period(self, inds):
         """
@@ -245,7 +246,7 @@ class NetworkModel:
         mean_inf = np.where(self.is_vaccinated[inds], self.config.epi.infectious_period_vax, self.config.epi.infectious_period)
 
 
-        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf)
+        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf/self.config.epi.gamma_alpha)
     
     def _prepare_numba_structures(self):
         """
@@ -293,10 +294,6 @@ class NetworkModel:
             self._numba_out_mat[j, :] = self.out_multiplier[ct].astype(np.float32)
             self._numba_in_mat[j, :] = self.in_multiplier[ct].astype(np.float32)
                     
-
-
-
-
     def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
         """
         Wrapper that prepares inputs, calls the numba compiled function to compute newly exposed,and optionally reconstructs per-event metadata for the recorder (if provided).
@@ -492,215 +489,138 @@ class NetworkModel:
             self.all_end_days[run] = self.simulation_end_day
             self.all_lhd_action_logs[run] = list(self.lhd.action_log)
 
-    def write_run_results(self, out_dir: Optional[str] = None, prefix: str = "run_results"):
-        #TODO NOT WORKING 
 
+    def results_to_df(self, metrics: List[str] = ["peakPrev", "peakTime", "outbreakSize"]) -> pd.DataFrame:
         """
-    Write three parquet files under out_dir (default self.results_folder):
-      - <prefix>_prevalence.parquet : per-run rows, columns t_0..t_{T-1} containing prevalence fraction
-      - <prefix>_incidence.parquet  : per-run rows, columns t_0..t_{T-1} containing incidence counts
-      - <prefix>_summary.parquet    : per-run rows, columns for scalar summary metrics (peak, time_of_peak, calls, SAR by ct, etc.)
-      """
+        Writes a dataframe of summary metrics for each run containing specified metrics
 
-        def _flatten_exposures_safe(exposures_list):
+        Args: metrics, a list of metrics to output, must match expected metrics allowed for. Currently supports:
+        - peakPrev (maximum fraction I/N)
+        - peakTime (time of peakPrev)
+        - outbreakSize (unique number of nodes infected, including I0)
+
+        Returns: pandas dataframe of summary outputs
+        """
+
+        #Check that metrics requested are supported
+        metrics_supported = {"peakPrev", "peakTime", "outbreakSize"}
+        unknown = [metric for metric in metrics if metric not in metrics_supported]
+
+        if unknown:
+            warnings.warn(f"Unknown metric requested: {unknown}. Please select one of {metrics_supported}")
+        
+        def _aggregate_exposures(exposures_list):
             """
-            Helper function to concatenate non-empty arrays 
+            helper to take a list of exposures and aggregated exposures
             """
             if not exposures_list:
                 return np.empty(0, dtype=np.int32)
-
-            parts = []
+            exposures = []
             for arr in exposures_list:
                 if arr is None:
                     continue
                 try:
-                    a = np.asarray(arr, dtype=np.int32)
+                    a = np.asarray(list(arr), dtype = np.int32)
                 except Exception:
-                    # fallback: try to coerce by converting to list first
                     try:
-                        a = np.asarray(list(arr), dtype=np.int32)
+                        a = np.asarray(list(arr), dtype = np.int32)
                     except Exception:
                         continue
                 if a.size > 0:
-                    parts.append(a)
-            if not parts:
-                return np.empty(0, dtype=np.int32)
-            if len(parts) == 1:
-                return parts[0]
-            return np.concatenate(parts)
+                    exposures.append(a)
+                
+            if not exposures:
+                return np.empty(0, dtype = np.int32)
+            if len(exposures) == 1:
+                return exposures[0]
+            return np.concatenate(exposures)
+        
+        rows = []
+        n_runs = self.n_replicates
+        for run in range(n_runs):
+            row = {"run_number": int(run)}
 
+            states_list = self.all_states_over_time[run]
+            
+            #Build prevalence time series
+            prevalences = []
+            for timestep in states_list:
+                if timestep is None:
+                    nI = 0
+                else:
+                    try:
+                        #Gather infectious nodes
+                        I_nodes = timestep[2]
+                        nI = int(len(I_nodes))
+                    except Exception:
+                        nI = 0
+                prevalences.append(float(nI) / float(self.N))
+            
+            #Metrics:
 
+            #peakPrev & peakTime
+            if "peakPrev" in metrics or "peakTime" in metrics:
+                if prevalences:
+                    arr = np.asarray(prevalences, dtype = float)
+                    ind_max = int(np.argmax(arr))
+                    peakPrev_val = float(arr[ind_max])
+                    peakTime_val = int(ind_max)
+                else:
+                    peakPrev_val = 0.0
+                    peakTime_val = pd.NA
+                if "peakPrev" in metrics:
+                    row["peakPrev"] = peakPrev_val
+                if "peakTime" in metrics:
+                    row["peakTime"] = peakTime_val
 
-        out_dir = out_dir or self.results_folder
-        os.makedirs(out_dir, exist_ok=True)
+            #Outbreak size -- unique infected nodes (I0 plus all ever exposed)
+            if "outbreakSize" in metrics:
+                exposures_list = self.all_new_exposures[run]
+
+                aggregate = _aggregate_exposures(exposures_list)
+
+                #Combine I0 with all exposures for outbreak size
+                init_I0 = np.array(self.I0, dtype = int)
+                
+                unique_infectious = np.unique(np.concatenate([init_I0, aggregate]))
+                outbreakSize = int(len(unique_infectious))
+                row["outbreakSize"] = outbreakSize
+
+            
+            #Add row to rows
+            rows.append(row)
 
         
-        T = 0
-        for sts in self.all_states_over_time:
-            if sts is not None:
-                if len(sts) > T:
-                    T = len(sts)
-        # Ensure we at least create columns t_0 .. t_{T-1}
-        t_cols = [f"t_{i}" for i in range(T)]
+        #Build and order dataframe, handle typing
+        cols = ["run_number"] + [metric for metric in metrics]
+        df = pd.DataFrame(rows)
+        if "peakTime" in metrics and "peakTime" in df.columns:
+            df["peakTime"] = df["peakTime"].astype("int64")
+        if "peakPrev" in metrics and "peakPrev" in df.columns:
+            df["peakPrev"] = df["peakPrev"].astype(float)
+        if "outbreakSize" in metrics and "outbreakSize" in df.columns:
+            df["outbreakSize"] = df["outbreakSize"].astype("int64")
+        #Put cols in order, NA if requested column wasn't calculated
+        for c in cols:
+            if c not in df.columns:
+                df[c] = pd.NA
+        return df[cols]
+        
 
-        # Build prevalence and incidence wide DataFrames: rows per run
-        prevalence_rows = []
-        incidence_rows = []
 
-        for run in range(self.n_replicates):
-            # states_over_time: list of [S,E,I,R] per time
-            states_list = self.all_states_over_time[run] or []
-            exposures_list = self.all_new_exposures[run] or []
-            flat = _flatten_exposures_safe(exposures_list)
 
-            total_infection_events = int(flat.size)
-            if flat.size > 0:
-                reinfection_counts = np.bincount(flat, minlength = self.N)
-                total_infections_unique = int((reinfection_counts > 0).sum())
+            
 
-            else:
-                reinfection_counts = np.zeros(self.N, dtype = int)
-                total_infections_unique = 0
+            
 
+
+        
+            
 
 
 
 
 
-            # prevalence: fraction I/N; incidence: counts of newly exposed per time
-            prevalences = []
-            incidences = []
-            for t in range(T):
-                # prevalence
-                if t < len(states_list) and states_list[t] is not None and len(states_list[t]) > 2:
-                    I_nodes = states_list[t][2]
-                    nI = int(len(I_nodes))
-                else:
-                    nI = 0
-                prevalences.append(float(nI) / float(self.N) if self.N > 0 else 0.0)
-
-                # incidence
-                if t < len(exposures_list):
-                    arr = exposures_list[t]
-                    try:
-                        cnt = int(arr.size) if hasattr(arr, "size") else int(len(arr))
-                    except Exception:
-                        cnt = int(len(arr)) if hasattr(arr, "__len__") else 0
-                    # special-case day-0: if empty but I0 available, use I0
-                    if t == 0 and cnt == 0:
-                        I0_val = getattr(self, "I0", None)
-                        if I0_val is None:
-                            I0_val = (self.config.sim.I0 or [])
-                        try:
-                            cnt = int(len(I0_val)) if I0_val is not None else 0
-                        except Exception:
-                            cnt = 0
-                else:
-                    cnt = 0
-                incidences.append(int(cnt))
-
-            prevalence_rows.append({"run_number": int(run), **{f"t_{i}": prevalences[i] for i in range(T)}})
-            incidence_rows.append({"run_number": int(run), **{f"t_{i}": incidences[i] for i in range(T)}})
-
-        prevalence_df = pd.DataFrame(prevalence_rows, columns=["run_number"] + t_cols)
-        incidence_df = pd.DataFrame(incidence_rows, columns=["run_number"] + t_cols)
-
-        # Build summary scalars per run (peak prevalence/time, calls, SAR by contact type, etc.)
-        summary_rows = []
-        contact_types = list(self.contact_types)
-
-        for run in range(self.n_replicates):
-            # compute peak prevalence & time
-            states_list = self.all_states_over_time[run] or []
-            peak_infections = 0
-            time_of_peak = None
-            for t, state in enumerate(states_list):
-                if state is None or len(state) <= 2:
-                    continue
-                nI = int(len(state[2]))
-                if nI > peak_infections:
-                    peak_infections = nI
-                    time_of_peak = int(t)
-            peak_prev_frac = (float(peak_infections) / float(self.N)) if self.N > 0 else 0.0
-
-            # Calls metrics from LHD action logs recorded per run
-            calls_log = (self.all_lhd_action_logs[run] or []) if hasattr(self, "all_lhd_action_logs") else []
-            call_entries = [e for e in calls_log if e.get("action_type") == "call"]
-            number_of_call_actions = len(call_entries)
-            people_called = sum(int(e.get("nodes_count", 0)) for e in call_entries)
-            if people_called > 0:
-                total_person_days = sum(int(e.get("duration", 0)) * int(e.get("nodes_count", 0)) for e in call_entries)
-                avg_days_quarantine = float(total_person_days) / float(people_called)
-            else:
-                avg_days_quarantine = None
-
-            # SAR: compute event-level secondary attack rates by contact type using exposure_event_log snapshots
-            # exposure_event_log[run] is list of snapshots (compact form) per timestep
-            snapshots = self.exposure_event_log[run] if run < len(self.exposure_event_log) else []
-            total_exposed_by_ct = {ct: 0 for ct in contact_types}
-            total_infected_events_by_ct = {ct: 0 for ct in contact_types}
-
-            for snap in (snapshots or []):
-                n_events = int(snap.get("event_time", np.empty(0)).shape[0])
-                if n_events == 0:
-                    continue
-                for ei in range(n_events):
-                    try:
-                        ct_id = int(snap["event_type"][ei]) if snap["event_type"].size > 0 else None
-                    except Exception:
-                        ct_id = None
-                    ct_name = self.id_to_ct.get(ct_id, "unknown") if ct_id is not None else "unknown"
-                    s = int(snap["event_nodes_start"][ei])
-                    L = int(snap["event_nodes_len"][ei])
-                    if L == 0:
-                        continue
-                    infs = snap["infections"][s : s + L]
-                    infected_events_count = int(np.sum(infs))
-                    total_exposed_by_ct[ct_name] = total_exposed_by_ct.get(ct_name, 0) + int(L)
-                    total_infected_events_by_ct[ct_name] = total_infected_events_by_ct.get(ct_name, 0) + infected_events_count
-
-            sar_by_ct = {}
-            for ct in contact_types:
-                exposed_ct = total_exposed_by_ct.get(ct, 0)
-                infected_ct = total_infected_events_by_ct.get(ct, 0)
-                sar_by_ct[f"sar_events_{ct}"] = float(infected_ct / exposed_ct) if exposed_ct > 0 else None
-                sar_by_ct[f"exposed_{ct}"] = int(exposed_ct)
-                sar_by_ct[f"infected_events_{ct}"] = int(infected_ct)
-
-            # assemble summary row
-            row = {
-                "run_number": int(run),
-                "peak_prevalence": float(peak_prev_frac),
-                "time_of_peak": int(time_of_peak) if time_of_peak is not None else None,
-                "number_of_call_actions": int(number_of_call_actions),
-                "people_called": int(people_called),
-                "avg_days_quarantine_imposed": float(avg_days_quarantine) if avg_days_quarantine is not None else None,
-                "stochastic_dieout": bool(self.all_stochastic_dieout[run]),
-                "epidemic_duration": int(self.all_end_days[run]) if self.all_end_days is not None else int(self.Tmax),
-                "total_infection_events": int(total_infection_events),
-                "total_infections_unique": int(total_infections_unique)
-            }
-            row.update(sar_by_ct)
-            summary_rows.append(row)
-
-        summary_df = pd.DataFrame(summary_rows)
-
-        # atomic writes to disk (tmp + replace)
-        def _atomic_write(df: pd.DataFrame, path: str):
-            tmp = path + ".tmp"
-            df.to_parquet(tmp, index=False)
-            os.replace(tmp, path)
-
-        preval_path = os.path.join(out_dir, f"{prefix}_prevalence.parquet")
-        inc_path = os.path.join(out_dir, f"{prefix}_incidence.parquet")
-        summ_path = os.path.join(out_dir, f"{prefix}_summary.parquet")
-
-        _atomic_write(prevalence_df, preval_path)
-        _atomic_write(incidence_df, inc_path)
-        _atomic_write(summary_df, summ_path)
-
-        return preval_path, inc_path, summ_path
-   
 
     def cumulative_incidence_plot(self, run_number = 0, strata:str = None, time: int = None, suffix: str = None) -> None:
         """

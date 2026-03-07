@@ -16,7 +16,7 @@ class EpiParams:
     relative_infectiousness_vax: float = 0.05
     conferred_immunity_duration: Optional[float] = None
     lasting_partial_immunity: Optional[float] = None
-    vax_efficacy: float = 0.997
+    vax_efficacy: float = 0.3
     vax_uptake: float = 0.85
     susceptibility_multiplier_under_five: float = 1.0
     susceptibility_multiplier_elderly: float = 1.0
@@ -51,7 +51,7 @@ class SimulationParams:
     n_replicates: int = 50 #Stochastic Replicates
     run_name: str = "RUN" + str(datetime.now().strftime("%d-%m-%Y_%H-%M"))
     overwrite_master: bool = True
-    simulation_duration: int = 45
+    simulation_duration: int = 100
     I0: Optional[List[int]] = field(default_factory = list)
     seed: int = 2026
     county: str = "Alcona"
@@ -64,6 +64,7 @@ class SimulationParams:
     save_data_files: bool = True
     make_movie: bool = False
     display_plots: bool = False
+    save_run_timeseries: bool = True
 
 
 @dataclass(frozen=True)
