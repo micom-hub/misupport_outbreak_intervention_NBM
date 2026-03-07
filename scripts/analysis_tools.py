@@ -208,7 +208,7 @@ def aggregate_variant_results(
         - combined_summary: if aggregated_summary True, a DataFrame of aggregated statistics grouped by:
             * if aggregate_sweeps and sweep params present: ['base_variant'] + sorted(sweep_param_keys)
             * else: ['variant_name']
-          combined_summary contains columns like '<metric>_mean', '<metric>_std', etc., plus 'n_runs'.
+          combined_summary contains columns like '<metric>_mean', '<metric>_std', etc., plus 'n_replicates'.
           If aggregated_summary is False, this return value is None.
 
     Notes:
@@ -282,8 +282,8 @@ def aggregate_variant_results(
         numeric_cols_to_agg = [c for c in numeric_cols if c not in exclude_set]
 
         if overall_df.empty or not numeric_cols_to_agg:
-            # Return an empty aggregated DataFrame with group_by columns + a 'n_runs' column
-            combined_summary = pd.DataFrame(columns=group_by_cols + ["n_runs"])
+            # Return an empty aggregated DataFrame with group_by columns + a 'n_replicates' column
+            combined_summary = pd.DataFrame(columns=group_by_cols + ["n_replicates"])
         else:
             # perform groupby aggregation
             grouped = overall_df.groupby(group_by_cols)[numeric_cols_to_agg].agg(numeric_aggs)
@@ -291,8 +291,8 @@ def aggregate_variant_results(
             # flatten multiindex columns -> "metric_agg"
             grouped.columns = [f"{metric}_{agg}" for metric, agg in grouped.columns.to_flat_index()]
 
-            # add n_runs (group size)
-            counts = overall_df.groupby(group_by_cols).size().rename("n_runs")
+            # add n_replicates (group size)
+            counts = overall_df.groupby(group_by_cols).size().rename("n_replicates")
             grouped = grouped.join(counts)
 
             combined_summary = grouped.reset_index()
@@ -583,7 +583,7 @@ def plot_epi_series(
             # nothing to plot (no series lengths); still return run count
             return 0.0, int(total_runs)
 
-        # Build numeric 2D array (n_runs x T_facet)
+        # Build numeric 2D array (n_replicates x T_facet)
         arr = np.full((total_runs, T_facet), np.nan, dtype=float)
         for i, e in enumerate(entries_for_facet):
             padded = _pad_series_to_len(e.get("raw_series", []), T_facet)

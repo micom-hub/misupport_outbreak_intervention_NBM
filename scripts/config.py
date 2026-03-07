@@ -48,13 +48,13 @@ class LHDParams:
 
 @dataclass(frozen=True)
 class SimulationParams:
-    n_runs: int = 50
+    n_replicates: int = 50 #Stochastic Replicates
     run_name: str = "RUN" + str(datetime.now().strftime("%d-%m-%Y_%H-%M"))
     overwrite_master: bool = True
     simulation_duration: int = 45
     I0: Optional[List[int]] = field(default_factory = list)
     seed: int = 2026
-    county: str = "Keweenaw"
+    county: str = "Alcona"
     state: str = "Michigan"
     resample_network_per_run: bool = False
     master_casual_candidates: int = 100
@@ -106,7 +106,7 @@ class ModelConfig:
     def copy_with(self, overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> "ModelConfig":
         """
         Return a new ModelConfig with nested overrides.
-        Example overrides: {"sim": {"n_runs": 30}, "population": {"wp_contacts": 20}}
+        Example overrides: {"sim": {"n_replicates": 30}, "population": {"wp_contacts": 20}}
         """
         if not overrides:
             return self
@@ -130,7 +130,7 @@ class ModelConfig:
             raise ValueError("epi.base_transmission_prob must be in [0,1]")
         if not (0.0 <= self.epi.vax_uptake <= 1.0):
             raise ValueError("epi.vax_uptake must be in [0,1]")
-        if self.sim.n_runs < 1:
-            raise ValueError("sim.n_runs must be >= 1")
+        if self.sim.n_replicates < 1:
+            raise ValueError("sim.n_replicates must be >= 1")
         if self.lhd.lhd_employees < 0:
             raise ValueError("lhd.lhd_employees must be >= 0")

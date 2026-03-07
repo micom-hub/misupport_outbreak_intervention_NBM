@@ -121,18 +121,18 @@ class NetworkModel:
 
         #run metadata:
         self.county = self.config.sim.county
-        self.n_runs = self.config.sim.n_runs
+        self.n_replicates = self.config.sim.n_replicates
 
 
         #Set up storage for full run
-        self.all_states_over_time = [None]*self.n_runs
-        self.all_new_exposures = [None]*self.n_runs
-        self.exposure_event_log = [[] for _ in range(self.n_runs)]
-        self.all_stochastic_dieout = np.zeros(self.n_runs, dtype = bool)
-        self.all_end_days = np.ones(self.n_runs, dtype = int)*self.Tmax
+        self.all_states_over_time = [None]*self.n_replicates
+        self.all_new_exposures = [None]*self.n_replicates
+        self.exposure_event_log = [[] for _ in range(self.n_replicates)]
+        self.all_stochastic_dieout = np.zeros(self.n_replicates, dtype = bool)
+        self.all_end_days = np.ones(self.n_replicates, dtype = int)*self.Tmax
 
-        self.all_vax_status = [None] * self.n_runs
-        self.all_lhd_action_logs = [None] * self.n_runs
+        self.all_vax_status = [None] * self.n_replicates
+        self.all_lhd_action_logs = [None] * self.n_replicates
 
         #Instantiate recorder and Local Health Department
         self.recorder_template = ExposureEventRecorder(init_event_cap = 1024, init_node_cap = 4096)
@@ -442,7 +442,7 @@ class NetworkModel:
     #@profile
     def simulate(self):
 
-        for run in range(self.n_runs):
+        for run in range(self.n_replicates):
             self._initialize_states()
             #store vaccination status for run
             self.all_vax_status[run] = self.is_vaccinated.copy()
@@ -547,7 +547,7 @@ class NetworkModel:
         prevalence_rows = []
         incidence_rows = []
 
-        for run in range(self.n_runs):
+        for run in range(self.n_replicates):
             # states_over_time: list of [S,E,I,R] per time
             states_list = self.all_states_over_time[run] or []
             exposures_list = self.all_new_exposures[run] or []
@@ -609,7 +609,7 @@ class NetworkModel:
         summary_rows = []
         contact_types = list(self.contact_types)
 
-        for run in range(self.n_runs):
+        for run in range(self.n_replicates):
             # compute peak prevalence & time
             states_list = self.all_states_over_time[run] or []
             peak_infections = 0
@@ -853,9 +853,9 @@ class NetworkModel:
         """
 
         pop_size = self.N
-        n_runs = self.n_runs
+        n_replicates = self.n_replicates
 
-        #TODO make alpha inversely proportional to n_runs
+        #TODO make alpha inversely proportional to n_replicates
         alpha = 0.5
 
         max_timesteps = max(len(run_exposures) for run_exposures in self.all_new_exposures)
@@ -863,7 +863,7 @@ class NetworkModel:
 
         #Calculate individual curves
         all_curves = []
-        for run in range(n_runs):
+        for run in range(n_replicates):
             exposures = self.all_new_exposures[run]
             ever_exposed = np.zeros(pop_size, dtype = bool)
             cumulative = []
@@ -888,7 +888,7 @@ class NetworkModel:
 
         plt.xlabel("Time step (day)")
         plt.ylabel("Cumulative Incidence (fraction of population)")
-        plt.title(f"Cumulative Incidence Spaghetti Plot\n{self.n_runs} runs, red = die-out")
+        plt.title(f"Cumulative Incidence Spaghetti Plot\n{self.n_replicates} runs, red = die-out")
         plt.grid(True, axis = "y", alpha = 0.5)
         plt.legend()
         plt.tight_layout()
