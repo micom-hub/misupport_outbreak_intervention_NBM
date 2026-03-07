@@ -606,8 +606,85 @@ class NetworkModel:
                 df[c] = pd.NA
         return df[cols]
         
+    def timeseries_to_df(self, type: str = "prevalence") -> pd.DataFrame:
+        """
+        Returns a wide pandas dataframe with a time eries for each run
+        
+        Args: 
+            type: "incidence" or "prevalence" to provide specified timeseries
+        """
+        series_type = str(type).strip().lower()
+        if series_type not in ("incidence", "prevalence"):
+            raise ValueError(f"type must be 'incidence' or 'prevalence' (got {type})")
+        n_runs = self.n_replicates
+
+        #Prebuild arrays - should be same either way
+        if series_type == "prevalence":
+            lengths = [len(self.all_states_over_time[run]) for run in range(n_runs)]
+        else:
+            lengths = [len(self.all_new_exposures[run]) for run in range(n_runs)]
+
+        T = max(lengths) if lengths else 0
+        if T == 0:
+            return pd.DataFrame({"run_number":np.arange(n_runs)})
+        
+        #Build prevalence arrays
+        if series_type == "prevalence":
+            data = np.zeros((n_runs, T), dtype = np.float32)
+            for run in range(n_runs):
+                states_list = self.all_states_over_time[run]
+                max_t = min(T, len(states_list))
+                for t in range(max_t):
+                    timestep = states_list[t]
+                    try:
+                        nI = int(len(timestep[2]))
+                    except Exception:
+                        #just in case they are saved as arrays
+                        try:
+                            nI = int(np.asarray(timestep[2]).size)
+                        except Exception:
+                            nI = 0
+                    data[run, t] = float(nI) / float(self.N)
+        #incidence arrays
+        else:
+            data = np.zeros((n_runs, T), dtype = np.float32)
+            for run in range(n_runs):
+                exposures_list = self.all_new_exposures[run]
+                max_t = min(T, len(exposures_list))
+                for t in range(max_t):
+                    arr = exposures_list[t]
+                    count=0
+                    try:
+                        if hasattr(arr, "size"):
+                            count = int(arr.size)
+                        else:
+                            count = int(len(arr))
+                    except Exception:
+                        count = 0
+                    if t == 0 and count == 0:
+                        I0 = getattr(self, "I0", None)
+                        count = len(I0)
+
+                    frac = count/self.N
+                    data[run, t] = frac
+        
+        #build dataframe
+        col_names = [f"t_{i}" for i in range(T)]
+        df = pd.DataFrame(data, columns = col_names)
+        df.insert(0, "run_number", np.arange(n_runs))
+
+        return df
+
+                        
 
 
+
+
+
+
+
+
+        
 
             
 

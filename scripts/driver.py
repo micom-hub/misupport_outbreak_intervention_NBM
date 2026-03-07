@@ -259,7 +259,6 @@ def run_single_model(
     )
 
     # Run simulation
-    print("Running Model!")
     model.simulate()
 
     # Optional save exposures (legacy behavior)
@@ -289,5 +288,5 @@ if __name__ == "__main__":
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state)
     model = run_single_model(contacts, cfg, seed = 13)
-    print(model.results_to_df())
+    x = model.timeseries_to_df()
     
