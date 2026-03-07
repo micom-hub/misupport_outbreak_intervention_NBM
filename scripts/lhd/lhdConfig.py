@@ -32,6 +32,15 @@ class LhdConfig:
     """
     variants: List[LhdVariant] = field(default_factory=list)
 
+    def __post_init__(self):
+        for var in self.variants:
+            try:
+                validate_variant(var)
+            except Exception as exc:
+                msg = f"Variant '{getattr(var, 'name', '<unknown>')}' invalid: {exc}"
+                raise ValueError(msg) from exc
+
+
     def add_variant(self, variant: LhdVariant) -> None:
         self.variants.append(variant)
 
@@ -107,13 +116,15 @@ def default_call_factory_builder(
 
     return factory
 
-def validate_variant_maps(algorithm_map: Dict[str, AlgorithmBase], action_factory_map: Dict[str, Callable[..., ActionBase]]) -> None:
+def validate_variant(variant: LhdVariant) -> None:
     """
     Helper to validate variant maps and fail if formatted incorrectly
     """
-    for k, v in algorithm_map.items():
-        if not isinstance(v, AlgorithmBase):
-            raise TypeError(f"algorithm_map[{k}] is not an AlgorithmBase instance: {type(v)}")
+    algorithm_map = variant.algorithm_map
+    action_factory_map=variant.action_factory_map
+    for k, map in algorithm_map.items():
+        if not isinstance(map, AlgorithmBase):
+            raise TypeError(f"algorithm_map[{k}] is not an AlgorithmBase instance: {type(map)}")
     for k, fac in action_factory_map.items():
         if not callable(fac):
             raise TypeError(f"action_factory_map[{k}] is not callable: {type(fac)}")
@@ -127,12 +138,14 @@ To write variants:
 """
 
 
-baseline_alg_map = {"call": RandomPriority()}
-baseline_fac_map = {"call": default_call_factory_builder(reduction=0.5, duration=7, call_cost=0.1)}
-baseline = LhdVariant(name="baseline", algorithm_map=baseline_alg_map, action_factory_map=baseline_fac_map, description="random priority, 50% reduction")
+
+random_alg_map = {"call": RandomPriority()}
+random_fac_map = {"call": default_call_factory_builder(reduction = 0.5, duration = 7, call_cost = 0.1)}
+random = LhdVariant(name="random_priority", algorithm_map = random_alg_map, action_factory_map = random_fac_map, description="random priority, 50% reduction")
 
 elder_alg_map = {"call": PrioritizeElders(base_priority=1.0, elder_boost=5.0, elder_cost=0.15)}
-elder_fac_map = {"call": default_call_factory_builder(reduction=0.6, duration=10, call_cost=0.15)}
-elder = LhdVariant(name="elder_priority", algorithm_map=elder_alg_map, action_factory_map=elder_fac_map)
+elder_fac_map = {"call": default_call_factory_builder(reduction = 0.6, duration = 10, call_cost = 0.15)}
+elder = LhdVariant(name="elder_priority", algorithm_map = elder_alg_map, action_factory_map = elder_fac_map)
 
-cfg = LhdConfig(variants=[baseline, elder])
+
+cfg = LhdConfig(variants=[random, elder])
