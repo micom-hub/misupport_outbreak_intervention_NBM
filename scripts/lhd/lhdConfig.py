@@ -129,15 +129,8 @@ def validate_variant(variant: LhdVariant) -> None:
         if not callable(fac):
             raise TypeError(f"action_factory_map[{k}] is not callable: {type(fac)}")
 
-"""
-To write variants:
 
-- Select algorithms 
-- Select an action factory (default call for calling, etc.) and call params
-- 
-"""
-
-
+#Building LHD configs
 
 random_alg_map = {"call": RandomPriority()}
 random_fac_map = {"call": default_call_factory_builder(reduction = 0.5, duration = 7, call_cost = 0.1)}
