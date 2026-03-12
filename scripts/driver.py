@@ -106,6 +106,7 @@ def read_or_build_master(
     cfg: ModelConfig,
     run_dir: str,
     rng: Optional[np.random.Generator] = None,
+    variant: Optional[bool] = False,
 ) -> pd.DataFrame:
     """
     Trys to read in a master edge list if it exists in the run directory, otherwise builds one
@@ -118,20 +119,17 @@ def read_or_build_master(
 
     master_path = run_dir / "MasterEdgelist.parquet"
     config_path = run_dir / "ModelConfig.json"
-
-    try:
-        cfg.to_json(str(config_path))
-    except Exception:
-        pass
+    if not variant:
+        try:
+            cfg.to_json(str(config_path))
+        except Exception:
+            pass
 
     #If master already exists and we aren't overwriting, read in
     if master_path.exists() and not bool(cfg.sim.overwrite_master):
         return pd.read_parquet(str(master_path))
 
     rng_for_master = rng if rng is not None else np.random.default_rng(cfg.sim.seed)
-
-
-
 
     master_df = build_edge_list(
         contacts_df=contacts_df,

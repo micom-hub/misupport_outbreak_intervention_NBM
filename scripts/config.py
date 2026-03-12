@@ -27,7 +27,7 @@ class PopulationParams:
     wp_contacts: int = 10
     sch_contacts: int = 10
     gq_contacts: int = 10
-    cas_contacts: int = 10
+    cas_contacts: int = 10  #up to master_casual_contacts
     hh_weight: float = 1.0
     wp_weight: float = 0.5
     sch_weight: float = 0.6
@@ -137,3 +137,5 @@ class ModelConfig:
             raise ValueError("lhd.lhd_employees must be >= 0")
         if not isinstance(self.sim.I0, (int, List)):
             raise ValueError("sim.I0 must be an integer or list")
+
+DEFAULT_MODEL_CONFIG = ModelConfig()
