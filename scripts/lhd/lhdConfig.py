@@ -122,8 +122,10 @@ def validate_variant(variant: LhdVariant) -> None:
     """
     algorithm_map = variant.algorithm_map
     action_factory_map=variant.action_factory_map
-    for k, map in algorithm_map.items():
-        if not isinstance(map, AlgorithmBase):
+    for k, algo in algorithm_map.items():
+        if isinstance(algo, type) and issubclass(algo, AlgorithmBase):
+            algorithm_map[k] = algo()
+        elif not not isinstance(map, AlgorithmBase):
             raise TypeError(f"algorithm_map[{k}] is not an AlgorithmBase instance: {type(map)}")
     for k, fac in action_factory_map.items():
         if not callable(fac):
@@ -141,4 +143,4 @@ elder_fac_map = {"call": default_call_factory_builder(reduction = 0.6, duration 
 elder = LhdVariant(name="elder_priority", algorithm_map = elder_alg_map, action_factory_map = elder_fac_map)
 
 
-cfg = LhdConfig(variants=[random, elder])
+LHD_CONFIGURATION = LhdConfig(variants=[random, elder])

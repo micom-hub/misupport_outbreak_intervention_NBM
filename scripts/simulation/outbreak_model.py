@@ -501,6 +501,8 @@ class NetworkModel:
 
         Returns: pandas dataframe of summary outputs
         """
+        if metrics is None:
+            metrics = ["peakPrev", "peakTime", "outbreakSize"]
 
         #Check that metrics requested are supported
         metrics_supported = {"peakPrev", "peakTime", "outbreakSize"}
@@ -604,6 +606,7 @@ class NetworkModel:
         for c in cols:
             if c not in df.columns:
                 df[c] = pd.NA
+
         return df[cols]
         
     def timeseries_to_df(self, type: str = "prevalence") -> pd.DataFrame:

@@ -4,7 +4,7 @@ import pandas as pd
 from typing import Tuple, Dict, Optional, Any, List
 from pathlib import Path
 
-from scripts.config import ModelConfig, DEFAULT_MODEL_CONFIG
+from scripts.config import ModelConfig
 
 
 def csv_to_LHS(
@@ -118,7 +118,7 @@ def csv_to_LHS(
         out = Path(output_dir).expanduser().resolve()
         out.mkdir(parents=True, exist_ok = True)
 
-        lhs_df.to_csv(str(out / "LHS.csv"))
+        lhs_df.to_csv(str(out / "LHS.csv"), index=False)
         
     return lhs_df
 
@@ -133,7 +133,7 @@ def LHS_to_cfg(
 
     Args: 
         lhs_df: pandas dataframe produced by csv_to_LHS
-        base_cfg: ModelConfig as base to vary from (defaults to DEFAULT_MODEL_CONFIG)
+        base_cfg: ModelConfig as base to vary from (defaults to EL_CONFIG)
 
 
     -Assumes lhs_df columns are dotted paths to ModelConfig (epi.vax_uptake)
@@ -142,7 +142,7 @@ def LHS_to_cfg(
     """
 
     if base_cfg is None:
-        base_cfg = DEFAULT_MODEL_CONFIG
+        base_cfg = ModelConfig()
 
     if not isinstance(lhs_df, pd.DataFrame):
         raise TypeError("lhs_df must be a pandas DataFrame")

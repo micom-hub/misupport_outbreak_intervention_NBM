@@ -16,11 +16,12 @@ Status-quo is to prioritize reaching out to exposured individuals chronologicall
 
 Findings from these simulations will be used to design an optimized LHD calling algorithm to efficiently allocate limited employee resources towards maximally reducing outbreak size, outbreak rapidity, or both.
 
-**Model Assumptions**
-* Reinfection is not possible
 
 #### Environment setup
 To set up the environment from the portable environment file, run:
 conda env create -f environment.yml
+
+### Quick Run Guide
+For a single and straightforward run of the model, simply navegate to [driver.py](./scripts/driver.py)
 
 For FredFetch, your device must have a compatible chromedriver. As a workaround, you can download the synthetic population zip files from the FRED website linked in FredFetch, store it in a directory ./data/ and rename the file to {County}.zip

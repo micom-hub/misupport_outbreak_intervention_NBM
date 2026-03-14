@@ -53,7 +53,7 @@ class EqualPriority(AlgorithmBase):
         cts_list = []
         costs_list = []
 
-        default_cost = float(model.params.get('lhd_default_call_duration', 0.083))
+        default_cost = float(model.config.lhd.lhd_default_call_duration)
         for event in discovered_event_ind:
             s = int(recorder_snapshot['event_nodes_start'][event])
             L = int(recorder_snapshot["event_nodes_len"][event])
@@ -102,7 +102,7 @@ class RandomPriority(AlgorithmBase):
         prios_list = []
         cts_list = []
         costs_list = []
-        default_cost = float(model.params.get('lhd_default_call_duration', 0.083))
+        default_cost = float(model.config.lhd.lhd_default_call_duration)
         for event in discovered_event_ind:
             s = int(recorder_snapshot['event_nodes_start'][event])
             L = int(recorder_snapshot["event_nodes_len"][event])
@@ -161,7 +161,7 @@ class PrioritizeElders(AlgorithmBase):
         cts_list = []
         costs_list = []
 
-        default_cost = float(model.params.get('lhd_default_call_duration', 0.083))
+        default_cost = float(model.config.lhd.lhd_default_call_duration)
         for event in discovered_event_ind:
             s = int(recorder_snapshot['event_nodes_start'][event])
             L = int(recorder_snapshot["event_nodes_len"][event])

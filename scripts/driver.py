@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Dict, Optional, Union
 import numpy as np
 import pandas as pd
+from datetime import datetime
+
 
 from scripts.config import ModelConfig
 from scripts.graph.graph_utils import (
@@ -280,11 +282,12 @@ def _validate_contacts_df(df: pd.DataFrame) -> None:
 if __name__ == "__main__":
     cfg = ModelConfig().copy_with(
         {
-            "sim": {"I0": 10, "display_plots": True},
-            "epi": {"base_transmission_prob": 0.99},
+            "sim": {"county": "Keweenaw", "display_plots": True ,
+            "I0":3 }
         }
     )
-    contacts = prepare_contacts(cfg.sim.county, cfg.sim.state)
-    model = run_single_model(contacts, cfg, seed = 13)
+    contacts = prepare_contacts(cfg.sim.county, cfg.sim.state, save_files = True)
+    model = run_single_model(contacts, cfg, seed = 13 )
+    model.results_to_df().to_csv("testingresults.csv", index=False)
     
     

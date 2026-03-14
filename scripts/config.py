@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict, replace
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 import json
 
@@ -49,10 +49,10 @@ class LHDParams:
 @dataclass(frozen=True)
 class SimulationParams:
     n_replicates: int = 50 #Stochastic Replicates
-    run_name: str = "RUN" + str(datetime.now().strftime("%d-%m-%Y_%H-%M"))
+    run_name: str = field(default_factory=lambda: "RUN_" + datetime.now().strftime("%m-%d-%Y_%H-%M-%S"))
     overwrite_master: bool = True
     simulation_duration: int = 100
-    I0: Optional[List[int]] = field(default_factory = list)
+    I0: Union[List[int],int] = 5
     seed: int = 2026
     county: str = "Keweenaw"
     state: str = "Michigan"
@@ -135,7 +135,6 @@ class ModelConfig:
             raise ValueError("sim.n_replicates must be >= 1")
         if self.lhd.lhd_employees < 0:
             raise ValueError("lhd.lhd_employees must be >= 0")
-        if not isinstance(self.sim.I0, (int, List)):
+        if not isinstance(self.sim.I0, (list, int)):
             raise ValueError("sim.I0 must be an integer or list")
 
-DEFAULT_MODEL_CONFIG = ModelConfig()
