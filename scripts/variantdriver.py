@@ -1,13 +1,13 @@
 #scripts/variantdriver.py
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union
 import json
 import os
 import traceback
 import concurrent.futures
 import multiprocessing as mp
-import time
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -34,7 +34,8 @@ def run_experiment(
     save_incidence: bool = False,
     save_prevalence: bool = False,
     summary_metrics: Optional[List[str]] = None,
-    overwrite_runs: bool = True #Run results
+    overwrite_runs: bool = True,#Run results
+    clean_dir: bool = False
 ) -> Dict[str, Any]:
     """
     Runs the whole shebang for LHDsim variants
@@ -43,11 +44,16 @@ def run_experiment(
     2) Runs run_parameter_set for each parameter-set
         - Sequential or in parallel if workers > 1 (if None, uses max available)
     3) Aggregate results across each run into a 
-        #TODO -Optionally clears files from individual runs
+        #if clean_dir, deletes variant subdirectories
     """
-
     out_base = Path(output_dir).expanduser().resolve()
+
+    if out_base.is_dir() and overwrite_runs:
+        shutil.rmtree(str(out_base))
+
     out_base.mkdir(parents = True, exist_ok = True)
+
+
 
     #1) Prepare run
     print("[run_experiment] Initializing run data... ")
@@ -221,6 +227,14 @@ def run_experiment(
             _atomic_write_parquet(df_all, outp)
             aggregated_paths["prevalence"] = str(outp)
 
+    if clean_dir:
+        print("[run_experiment] cleaning per-model run directories...")
+        for i in indices:
+            run_dir = out_base / f"model_{int(i):04d}"
+            if run_dir.exists() and run_dir.is_dir():
+                    shutil.rmtree(run_dir)
+
+
     return {
         "run_dir": str(out_base),
         "n_parameter_sets": n_configs,
@@ -243,12 +257,13 @@ if __name__ == "__main__":
         csv_path="testLHS.csv",
         n_samples=3,
         lhd_config=LHD_CONFIGURATION,
-        output_dir="model_runs/experiment_001",
+        output_dir="model_runs/experiment_002",
         base_cfg=None,
         seed=2026,
         workers=1,
         save_summary=True,
-        save_incidence=False,
+        save_incidence=True,
         save_prevalence=False,
+        clean_dir=True
     )
     print("Done. aggregated:", result["aggregated_paths"])
