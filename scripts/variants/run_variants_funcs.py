@@ -8,6 +8,7 @@ import traceback
 import concurrent.futures
 import multiprocessing
 import time
+from line_profiler import profile
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from scripts.driver import prepare_contacts, read_or_build_master
 from scripts.config import ModelConfig
 from scripts.lhd.lhdConfig import LhdConfig, validate_variant
 from scripts.simulation.outbreak_model import NetworkModel
+
 
 def prepare_run(
     csv_path: str,
@@ -84,6 +86,7 @@ def prepare_run(
         )
 
     return (contacts_df, configs_list, master_gd)
+
 
 def run_variants(
     lhd_config: LhdConfig,
@@ -237,7 +240,7 @@ def run_parameter_set(
         Variants create model_{i:04d} under output_dir which detail model configurations and results summaries
 
     """
-    #1) Set up output and RNG
+    #1) Set up output and RNG - each run a different seed
     out_base = Path(output_dir).expanduser().resolve()
     out_base.mkdir(parents=True, exist_ok=True)
 

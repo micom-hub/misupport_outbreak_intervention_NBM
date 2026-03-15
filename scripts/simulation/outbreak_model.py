@@ -11,6 +11,7 @@ from matplotlib.patches import Patch
 from numba import njit
 from numba.typed import List as NumbaList
 import warnings
+from line_profiler import profile
 
 
 from scripts.config import ModelConfig
@@ -88,7 +89,6 @@ rel_inf_vax
 
 #-----Outbreak Model-------
 class NetworkModel:
-    #@profilesave_
     def __init__(
         self,  
         config: ModelConfig,
@@ -436,7 +436,7 @@ class NetworkModel:
         self.new_infections.append(to_infectious)
 
 
-    #@profile
+    @profile
     def simulate(self):
 
         for run in range(self.n_replicates):
@@ -678,229 +678,6 @@ class NetworkModel:
 
         return df
 
-                        
-
-
-
-
-
-
-
-
-        
-
-            
-
-            
-
-
-        
-            
-
-
-
-
-
-
-    def cumulative_incidence_plot(self, run_number = 0, strata:str = None, time: int = None, suffix: str = None) -> None:
-        """
-        Plots cumulative incidence over time, optionally stratified
-        Currently supports stratification by age, sex, vaccination status
-
-        Args:
-            time (int): time range for plot, 0-t, defaults to full timespan
-            run_number (int): If model run multiple times, specify which to viz
-            strata (str )  stratification factor for plot
-
-        Creates a matplotlib plot
-        """
-
-        pop_size = self.N
-        exposures = self.all_new_exposures[run_number]
-        if len(exposures) > 0 and len(exposures[0]) == 0:
-            exposures[0] = list(self.config.sim.I0)
-
-        if time is None: 
-            max_time = len(exposures) - 1
-        else:
-            #don't let time input overshoot
-            max_time = min(time - 1, len(exposures) - 1) 
-        x_vals = range(max_time + 1)
-
-        if isinstance(strata, str):
-            strata = strata.lower()
-
-
-
-        #Track cumulatively infections
-        ever_exposed = np.zeros(pop_size, dtype = bool)
-        overall_cumulative = []
-        for t in x_vals:
-            ever_exposed[np.array(exposures[t], dtype = int)] = True
-            overall_cumulative.append(ever_exposed.sum() / pop_size)
-        
-        #Stratification Logic
-        strata_labels, strata_members, strata_colors, strata_cumulative = None, None, None, None
-
-        if strata in ("age", "sex", "vaccination"):
-            
-
-            if strata == "age":
-                strata_attr = self.individual_lookup[strata]
-                #Age bins directly input here, change as needed
-                bins = [0, 6, 19, 35, 65, 200]
-                labels = ["0-5", "6-18", "19-34", "35-64", "65+"]
-                strata_labels = labels
-                strata_vals = pd.cut(strata_attr, bins, right = False, labels = labels)
-                strata_colors = [
-        "#e41a1c",  # Red for 0-5
-        "#377eb8",  # Blue for 6-18
-        "#4daf4a",  # Green for 19-34
-        "#984ea3",  # Purple for 35-64
-        "#ff7f00",  # Orange for 65+
-    ]
-
-            elif strata == "sex":
-                strata_attr = self.individual_lookup[strata]
-                strata_vals = strata_attr
-                labels = sorted(strata_attr.unique())
-                strata_labels = labels
-                label_to_color = {lab: ("red" if lab == "F" else "blue") for lab in labels}
-                strata_colors = [label_to_color[lab] for lab in labels]
-
-            elif strata == "vaccination":
-                if not hasattr(self, "is_vaccinated"):
-                    raise ValueError("vaccination stratification requested but vaccination status not initialized")
-
-                strata_attr = self.is_vaccinated
-                strata_labels = ["Vaccinated", "Unvaccinated"]
-                strata_vals = np.where(strata_attr, "Vaccinated", "Unvaccinated")
-                strata_colors = ["#377eb8", "#e41a1c"] #Blue vax, red unvax
-
-
-
-        elif strata and (strata not in self.individual_lookup.columns):
-            raise ValueError(f"stratifying factor {strata} is not an attribute of this graph. Check spelling and try again")
-        
-        else:
-             strata = None
-
-        if strata_labels is not None:
-            strata_members = {label: np.where(strata_vals == label)[0] for label in strata_labels}
-            strata_cumulative = {label: [] for label in strata_labels}
-            ever_exposed_stratum = {label: np.zeros(len(strata_members[label]), dtype = bool) for label in strata_labels}
-
-            #update ever_exposed_stratums for each label
-            for t in x_vals:
-                newly_exposed = np.array(exposures[t], dtype = int)
-                for label in strata_labels:
-                    members = strata_members[label]
-                    #check which belong to this stratum
-                    mask = np.isin(members, newly_exposed)
-                    ever_exposed_stratum[label][mask] = True
-                    group_size = len(members)
-                    if group_size > 0:
-                        strata_cumulative[label].append(ever_exposed_stratum[label].sum() / group_size)
-                    else:
-                        strata_cumulative[label].append(0.0)
-
-
-
-        
-        plt.figure(figsize = (8, 5))
-        plt.plot(x_vals, overall_cumulative, color = "black", label = "Total", linewidth = 2, zorder = 3)
-
-        if strata_cumulative:
-            bottom = np.zeros(len(x_vals))
-            for i, label in enumerate(strata_labels):
-                pop_fraction = len(strata_members[label]) / pop_size
-                plt.fill_between(x_vals, bottom,
-                np.array(bottom) + np.array(strata_cumulative[label])*pop_fraction,
-                step = None, color = strata_colors[i], alpha = 0.5, label = str(label))
-                bottom += np.array(strata_cumulative[label]) * pop_fraction
-
-
-        plt.xlabel("Time step (day)")
-        plt.ylabel("Cumulative Incidence (fraction of population)")
-        if strata:
-            plt.title(f"Cumulative Incidence (Stratified by {strata})\nRun {self.config.sim.run_name}")
-            legend_handles = [Patch(color = strata_colors[i], label = str(label)) for i, label in enumerate(strata_labels)]
-            plt.legend(handles = legend_handles, loc = "upper left")
-        else:
-            plt.title(f"Cumulative Incidence Over Time for  {self.config.sim.run_name}")
-        plt.grid(True, axis = "y", alpha = 0.5)
-        plt.tight_layout()
-        plotpath = os.path.join(self.results_folder, "cumulative_incidence")
-        if suffix:
-            plotpath = plotpath + suffix
-        if self.config.sim.save_plots:
-            if strata:
-                plt.savefig(f"{plotpath}_by{strata}.png")
-            else: 
-                plt.savefig(f"{plotpath}.png")
-        if self.config.sim.display_plots:
-            plt.show()
-        plt.close()
-
-    def cumulative_incidence_spaghetti(self, suffix: str = None):
-        """
-        Plots cumulative incidence trajectory for every run. Runs with stochastic-dieout are red, others blue.
-
-        Args:
-            suffix (str): An optional suffix for the figure filepath
-        Returns:
-            Nothing
-        """
-
-        pop_size = self.N
-        n_replicates = self.n_replicates
-
-        #TODO make alpha inversely proportional to n_replicates
-        alpha = 0.5
-
-        max_timesteps = max(len(run_exposures) for run_exposures in self.all_new_exposures)
-        plt.figure(figsize = (10, 6))
-
-        #Calculate individual curves
-        all_curves = []
-        for run in range(n_replicates):
-            exposures = self.all_new_exposures[run]
-            ever_exposed = np.zeros(pop_size, dtype = bool)
-            cumulative = []
-            for t in range(len(exposures)):
-                newly_exposed = np.array(exposures[t], dtype = int)
-                ever_exposed[newly_exposed] = True
-                cumulative.append(ever_exposed.sum() / pop_size)
-            if len(cumulative) < max_timesteps:
-                cumulative += [cumulative[-1]] * (max_timesteps - len(cumulative))
-            all_curves.append(cumulative)
-
-        #plot spaghetti curves
-        for run, curve in enumerate(all_curves):
-            color = "red" if self.all_stochastic_dieout[run] else "#3333ff"
-            plt.plot(range(max_timesteps), curve, 
-            color = color, alpha = alpha, lw = 1)
-
-        #plot mean curve
-        mean_curve = np.mean(all_curves, axis = 0)
-        plt.plot(range(max_timesteps), mean_curve, 
-        color = "black", lw = 2, label = "Mean Trajectory")
-
-        plt.xlabel("Time step (day)")
-        plt.ylabel("Cumulative Incidence (fraction of population)")
-        plt.title(f"Cumulative Incidence Spaghetti Plot\n{self.n_replicates} runs, red = die-out")
-        plt.grid(True, axis = "y", alpha = 0.5)
-        plt.legend()
-        plt.tight_layout()
-        plotpath = os.path.join(self.results_folder, "cumulative_incidence_spaghetti")
-        if suffix:
-            plotpath = plotpath + suffix
-        if self.config.sim.save_plots:
-            plt.savefig(f"{plotpath}.png")
-        if self.config.sim.display_plots:
-            plt.show()
-        plt.close()
-        
     def draw_network(self, t: int, run_number = 0, ax=None, clear: bool =True, saveFile: bool = False, suffix: str = None):
         """
         Draws a network containing outbreak-involved nodes (E,I,R) + neighbors at time t

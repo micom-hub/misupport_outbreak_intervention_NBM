@@ -15,6 +15,7 @@ from typing import Dict, Optional, Union
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from line_profiler import profile
 
 
 from scripts.config import ModelConfig
@@ -30,6 +31,8 @@ from scripts.utils.fred_fetch import downloadPopData
 
 
 # Prepare and structure contact data
+
+
 def prepare_contacts(
     county: str,
     state: str,
@@ -103,6 +106,7 @@ def prepare_contacts(
 
 
 # Read or build master edge list for county population
+@profile
 def read_or_build_master(
     contacts_df: pd.DataFrame,
     cfg: ModelConfig,

@@ -10,6 +10,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.stats import truncnorm
 import logging
+from line_profiler import profile
 
 from scripts.utils.synth_data_processing import build_individual_lookup
 from scripts.config import ModelConfig
@@ -124,7 +125,7 @@ def build_graph_data(
 
 
     
-        
+
 def sample_from_master_graphdata(
     minimal_master_dict: Dict,
     config: ModelConfig,

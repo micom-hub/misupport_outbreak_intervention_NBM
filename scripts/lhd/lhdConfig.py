@@ -4,6 +4,7 @@ import json
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, List, Callable, Tuple, Type
+from functools import partial
 
 from scripts.lhd.algorithms import (AlgorithmBase, RandomPriority, EqualPriority, PrioritizeElders
 )
@@ -73,48 +74,16 @@ class LhdConfig:
 
 
 
-def default_call_factory_builder(
-    reduction: Optional[float] = None,    
-    duration: Optional[int] = None,    
-    call_cost: Optional[float] = None,    
-    min_factor: float = 1e-6,) -> Callable[..., ActionBase]: 
-    """
-    Returns a factory callable with signature:      
-        factory(nodes, contact_type, prio, cost, params) -> ActionBase
-    """
+def default_call_factory_builder(reduction: Optional[float] = None,
+                                 duration: Optional[int] = None,
+                                 call_cost: Optional[float] = None,
+                                 min_factor: float = 1e-6) -> Callable[..., ActionBase]:
+    return partial(_default_call_factory_impl,
+                   reduction=reduction,
+                   duration=duration,
+                   call_cost=call_cost,
+                   min_factor=min_factor)
 
-    def factory(nodes, contact_type, prio, cost, params=None):
-        # Use provided parameters if any, otherwise, use builder params
-        red = None
-        dur = None
-        ccost = None
-        if params and isinstance(params, dict):
-            red = params.get("reduction", reduction)
-            dur = params.get("duration", duration)
-            ccost = params.get("call_cost", call_cost)
-        else:
-            red = reduction
-            dur = duration
-            ccost = call_cost
-
-        reduction_val = float(red) if red is not None else 0.0
-        duration_val = int(dur) if dur is not None else 0
-        # choose cost: candidate cost (cost arg) preferred, otherwise ccost, otherwise small default
-        call_cost_final = float(cost) if (cost is not None and not (isinstance(cost, float) and (np.isnan(cost)))) else (float(ccost) if ccost is not None else 0.1)
-
-        # If contact_type is None, default to casual+school+workplace as used elsewhere
-        contact_types_list = [contact_type] if contact_type is not None else ["cas", "sch", "wp"]
-
-        return CallIndividualsAction(
-            nodes=nodes,
-            contact_types=contact_types_list,
-            reduction=reduction_val,
-            duration=duration_val,
-            call_cost=call_cost_final,
-            min_factor=min_factor,
-        )
-
-    return factory
 
 def validate_variant(variant: LhdVariant) -> None:
     """
@@ -130,6 +99,33 @@ def validate_variant(variant: LhdVariant) -> None:
     for k, fac in action_factory_map.items():
         if not callable(fac):
             raise TypeError(f"action_factory_map[{k}] is not callable: {type(fac)}")
+
+def _default_call_factory_impl(nodes, contact_type, prio, cost, params,
+                               reduction=None, duration=None, call_cost=None, min_factor=1e-6):
+    """
+    Helper function to register register partial call factory objects, enabling parallelization
+    """
+    # merge params (per-candidate) with builder defaults
+    red = (params.get("reduction") if (params and isinstance(params, dict) and "reduction" in params) else reduction)
+    dur = (params.get("duration") if (params and isinstance(params, dict) and "duration" in params) else duration)
+    ccost = (params.get("call_cost") if (params and isinstance(params, dict) and "call_cost" in params) else call_cost)
+
+    reduction_val = float(red) if red is not None else 0.0
+    duration_val = int(dur) if dur is not None else 0
+
+    call_cost_final = float(cost) if (cost is not None and not (isinstance(cost, float) and np.isnan(cost))) else (float(ccost) if ccost is not None else 0.1)
+
+    contact_types_list = [contact_type] if contact_type is not None else ["cas", "sch", "wp"]
+
+    return CallIndividualsAction(
+        nodes=np.asarray(nodes, dtype=np.int32),
+        contact_types=contact_types_list,
+        reduction=reduction_val,
+        duration=duration_val,
+        call_cost=call_cost_final,
+        min_factor=float(min_factor),
+    )
+
 
 
 #Building LHD configs

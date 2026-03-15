@@ -8,14 +8,15 @@ import traceback
 import concurrent.futures
 import multiprocessing as mp
 import shutil
+from line_profiler import profile
 
-import numpy as np
 import pandas as pd
 
 # imports from your codebase
 from scripts.variants.run_variants_funcs import prepare_run, run_parameter_set
 from scripts.lhd.lhdConfig import LhdConfig, LHD_CONFIGURATION
 from scripts.config import ModelConfig
+
 
 def run_experiment(
     csv_path: str,
@@ -68,7 +69,7 @@ def run_experiment(
         seed = seed
     )
     n_configs = len(configs_list)
-    print(f"[run_experiment] {n_configs} configs prepared")
+    print(f"[run_experiment] {n_configs} Models Initialized")
 
     #2) Execute individual runs
     indices = list(range(n_configs))
@@ -255,7 +256,7 @@ if __name__ == "__main__":
     #Uses LHD_CONFIGURATION defined in scripts/lhd/lhdConfig.py
     result = run_experiment(
         csv_path="testLHS.csv",
-        n_samples=3,
+        n_samples=2,
         lhd_config=LHD_CONFIGURATION,
         output_dir="model_runs/experiment_002",
         base_cfg=None,

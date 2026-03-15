@@ -15,4 +15,5 @@ dependencies:
   - ipykernel
   - pyarrow
   - webdriver-manager
+  - line_profiler
 prefix: /opt/miniconda3/envs/LHDsim

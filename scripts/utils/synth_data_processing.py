@@ -5,6 +5,7 @@ import numpy as np
 from itertools import combinations
 from numba import njit
 from scripts.config import ModelConfig
+from line_profiler import profile
 
 #@profile
 def synthetic_data_process(county, save_files=True):
@@ -153,7 +154,7 @@ def build_individual_lookup(contact_df):
 
     return lookup_df
 
-#@profile
+@profile
 def build_edge_list(
     contacts_df: pd.DataFrame,
     config: ModelConfig,
