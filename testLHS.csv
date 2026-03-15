@@ -1,0 +1,4 @@
+﻿Parameter,Minimum,Maximum,Integer
+epi.base_transmission_prob,0.1,0.9,0
+epi.gamma_alpha,5,20,0
+lhd.mean_compliance,0.1,1,0
