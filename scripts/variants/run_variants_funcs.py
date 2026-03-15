@@ -68,10 +68,9 @@ def prepare_run(
     if seed is None:
         seed = base_cfg.sim.seed
     base_seed = int(seed)
-    rng_master = np.random.default_rng(int(base_seed))
 
     master_df = read_or_build_master(contacts_df = contacts_df, cfg = base_cfg, 
-    run_dir = str(out_base), rng = rng_master, variant = True) 
+    run_dir = str(out_base), seed = base_seed, variant = True) 
 
     #3) Create minimal graph data object with master
     master_gd = build_minimal_graphdata_from_edge_list(master_df, N = contacts_df.shape[0])

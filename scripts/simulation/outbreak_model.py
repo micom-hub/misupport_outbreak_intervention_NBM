@@ -293,7 +293,8 @@ class NetworkModel:
             # in-place copy to avoid reallocations
             self._numba_out_mat[j, :] = self.out_multiplier[ct].astype(np.float32)
             self._numba_in_mat[j, :] = self.in_multiplier[ct].astype(np.float32)
-                    
+
+    @profile     
     def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
         """
         Wrapper that prepares inputs, calls the numba compiled function to compute newly exposed,and optionally reconstructs per-event metadata for the recorder (if provided).
@@ -356,7 +357,7 @@ class NetworkModel:
                         recorder.append_event(self.current_time, int(src), int(type_id), sus_neighbors, infected_mask)
         return newly_exposed
 
-    #@profile
+    @profile
     def step(self, recorder: ExposureEventRecorder = None):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
@@ -435,8 +436,6 @@ class NetworkModel:
         self.new_exposures.append(newly_exposed)
         self.new_infections.append(to_infectious)
 
-
-    @profile
     def simulate(self):
 
         for run in range(self.n_replicates):

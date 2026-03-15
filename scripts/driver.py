@@ -111,7 +111,7 @@ def read_or_build_master(
     contacts_df: pd.DataFrame,
     cfg: ModelConfig,
     run_dir: str,
-    rng: Optional[np.random.Generator] = None,
+    seed: Optional[int] = None,
     variant: Optional[bool] = False,
 ) -> pd.DataFrame:
     """
@@ -135,12 +135,10 @@ def read_or_build_master(
     if master_path.exists() and not bool(cfg.sim.overwrite_master):
         return pd.read_parquet(str(master_path))
 
-    rng_for_master = rng if rng is not None else np.random.default_rng(cfg.sim.seed)
-
     master_df = build_edge_list(
         contacts_df=contacts_df,
         config=cfg,
-        rng=rng_for_master,
+        seed= cfg.sim.seed,
         save=False,
         county=cfg.sim.county,
         master_casual_contacts=int(cfg.sim.master_casual_candidates)
@@ -227,8 +225,8 @@ def run_single_model(
     master_df = read_or_build_master(
         contacts_df,
         cfg, 
-        run_dir = run_dir, 
-        rng= run_rng
+        run_dir = run_dir,
+        seed = cfg.sim.seed
         )
 
     # Build minimal graphdata from master that can be sampled from 

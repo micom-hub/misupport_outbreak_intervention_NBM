@@ -7,7 +7,7 @@ import json
 
 @dataclass(frozen=True)
 class EpiParams:
-    base_transmission_prob: float = .99
+    base_transmission_prob: float = 0.5
     incubation_period: float = 10.5
     infectious_period: float = 5.0
     gamma_alpha: float = 20.0
@@ -54,7 +54,7 @@ class SimulationParams:
     simulation_duration: int = 100
     I0: Union[List[int],int] = 5
     seed: int = 2026
-    county: str = "Keweenaw"
+    county: str = "Alcona"
     state: str = "Michigan"
     resample_network_per_run: bool = False
     master_casual_candidates: int = 100
@@ -75,7 +75,7 @@ class ModelConfig:
     sim: SimulationParams = field(default_factory=SimulationParams)
 
 
-    #Convert ModelConfig to dict
+    #convert ModelConfig to dict
     def to_dict(self) -> Dict[str, Any]:
         return {"epi": asdict(self.epi), "population": asdict(self.population), "lhd": asdict(self.lhd), "sim": asdict(self.sim)}
 
@@ -137,4 +137,6 @@ class ModelConfig:
             raise ValueError("lhd.lhd_employees must be >= 0")
         if not isinstance(self.sim.I0, (list, int)):
             raise ValueError("sim.I0 must be an integer or list")
+        if not (self.sim.master_casual_candidates >= self.population.cas_contacts):
+            raise ValueError("sim.master_casual_candidates must exceed population.cas_contacts for sampling purposes")
 
