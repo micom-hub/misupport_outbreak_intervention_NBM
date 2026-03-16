@@ -63,7 +63,7 @@ def test_build_graph_data_basic(tmp_path):
     # disable vaccination to make exposures easier to reason about if needed
     cfg = cfg.copy_with({"epi": {"vax_uptake": 0.0, "vax_efficacy": 0.0}})
 
-    gd = build_graph_data(edge_list=edges, contacts_df=contacts, config=cfg, rng=np.random.default_rng(1), N=N)
+    gd = build_graph_data(edge_list=edges, contacts_df=contacts, config=cfg, seed=1, N=N)
 
     # GraphData fields
     assert gd.N == N
@@ -106,8 +106,8 @@ def test_sample_from_master_graphdata_includes_household_and_samples():
         "epi": {"vax_uptake": 0.0, "vax_efficacy": 0.0}  # disable vax so no reductions
     })
 
-    rng = np.random.default_rng(12345)
-    sampled = sample_from_master_graphdata(minimal, cfg, rng=rng)
+    seed = 12345
+    sampled = sample_from_master_graphdata(minimal, cfg, seed=seed)
 
     # schema ok
     assert set(sampled.columns) == {"source", "target", "weight", "contact_type"}

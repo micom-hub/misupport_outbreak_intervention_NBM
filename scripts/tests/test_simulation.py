@@ -126,8 +126,8 @@ def test_initialize_states_int_count(tmp_path):
     gd = make_small_graphdata()
     cfg = make_base_config().copy_with({"sim": {"I0": 2, "n_replicates": 1}})
     run_dir = str(tmp_path / "run")
-    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, rng=np.random.default_rng(42), lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
-    model._initialize_states()
+    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, seed=42, lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
+    model._initialize_states(0)
     # I0 normalized to a list of length 2
     assert isinstance(model.I0, list)
     assert len(model.I0) == 2
@@ -139,8 +139,8 @@ def test_initialize_states_list(tmp_path):
     gd = make_small_graphdata()
     cfg = make_base_config().copy_with({"sim": {"I0": [0, 2], "n_replicates": 1}})
     run_dir = str(tmp_path / "run2")
-    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, rng=np.random.default_rng(123), lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
-    model._initialize_states()
+    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, seed = 42, lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
+    model._initialize_states(0)
     assert isinstance(model.I0, list)
     assert set(model.I0) == {0, 2}
     assert (model.state[0] == 2) and (model.state[2] == 2)
@@ -149,8 +149,9 @@ def test_initialize_states_list(tmp_path):
 def test_assign_periods_return_length():
     gd = make_small_graphdata()
     cfg = make_base_config()
-    model = NetworkModel(config=cfg, graphdata=gd, run_dir=".", rng=np.random.default_rng(1), lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
+    model = NetworkModel(config=cfg, graphdata=gd, run_dir=".", seed = 42, lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
     inds = [0, 1, 2]
+    model._initialize_states(0)
     inc = model.assign_incubation_period(inds)
     inf = model.assign_infectious_period(inds)
     assert len(inc) == len(inds)
@@ -165,8 +166,8 @@ def test_determine_new_exposures_prob_one():
     # set base transmission prob to 1 and disable vaccination
     cfg = make_base_config().copy_with({"epi": {"base_transmission_prob": 1.0, "vax_uptake": 0.0}, "sim": {"I0": [0], "n_replicates": 1}})
     run_dir = "."
-    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, rng=np.random.default_rng(2), lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
-    model._initialize_states()
+    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, seed=2, lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
+    model._initialize_states(0)
     newly = model.determine_new_exposures(recorder=None)
     # node 0 connected to node 1 by hh in our small graph -> 1 should be exposed
     assert 1 in newly.tolist()
@@ -176,7 +177,7 @@ def test_simulate_and_results_to_df(tmp_path):
     gd = make_small_graphdata()
     cfg = make_base_config().copy_with({"sim": {"I0": 1, "n_replicates": 2, "simulation_duration": 5, "seed": 7}})
     run_dir = str(tmp_path / "run_sim")
-    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, rng=np.random.default_rng(7), lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
+    model = NetworkModel(config=cfg, graphdata=gd, run_dir=run_dir, seed=7, lhd_register_defaults=False, lhd_algorithm_map={}, lhd_action_factory_map={})
     model.simulate()
     df = model.results_to_df(["peakPrev", "peakTime", "outbreakSize"])
     assert isinstance(df, pd.DataFrame)
