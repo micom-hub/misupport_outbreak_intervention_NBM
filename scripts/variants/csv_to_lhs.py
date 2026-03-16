@@ -11,7 +11,7 @@ def csv_to_LHS(
     csv_path: str, 
     n_samples: int, 
     output_dir: Optional[str] = None,
-    seed: Optional[int] = None) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    seed: Optional[int] = None) -> pd.DataFrame:
     """
     Reads a CSV containing a column for:
          Parameters (named after ModelConfig, ex) epi.base_transmission_prob)
@@ -38,14 +38,14 @@ def csv_to_LHS(
     expected_columns = ["parameter", "minimum", "maximum", "integer"]
     actual_columns = list(df_raw.columns)
     if not (actual_columns == expected_columns):
-        ValueError(f"Error in csv for LHS, expected columns: '{expected_columns}', got: '{actual_columns}'")
+        raise ValueError(f"Error in csv for LHS, expected columns: '{expected_columns}', got: '{actual_columns}'")
     else:
         df = df_raw
 
     #Handle parameter names
     df["parameter"] = df["parameter"].astype(str).str.strip()
     if df["parameter"].duplicated().any():
-        duped = df["Parameter"][df["Parameter"].duplicated()].unique().tolist()
+        duped = df["parameter"][df["parameter"].duplicated()].unique().tolist()
         raise ValueError(f"Duplicate Parameters listed for LHS: {duped}")
     
     mins = pd.to_numeric(df["minimum"]).astype(float).to_numpy()

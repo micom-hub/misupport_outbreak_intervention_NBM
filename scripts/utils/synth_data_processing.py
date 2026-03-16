@@ -3,7 +3,6 @@ import zipfile
 import pandas as pd
 import numpy as np
 from itertools import combinations
-from numba import njit
 from scripts.config import ModelConfig
 from line_profiler import profile
 from typing import Dict, Any
@@ -152,11 +151,16 @@ def build_individual_lookup(contact_df):
         Args: contact_df, an integrated pandas dataframe of FRED synthetic population data (produced by SyntheticDataProcess)
     """
     lookup_df = contact_df.reset_index(drop = True)
+    if "age" not in lookup_df.columns:
+        lookup_df["age"] = np.nan
+    if "race" not in lookup_df.columns:
+        lookup_df["race"] = pd.NA
+    if "sex" not in lookup_df.columns:
+        lookup_df["sex"] = pd.NA
     lookup_df = lookup_df[["age", "race", "sex"]]
 
     return lookup_df
 
-@profile
 def build_edge_list(
     contacts_df: pd.DataFrame,
     config: ModelConfig,
@@ -344,13 +348,16 @@ def allowed_mask(a, b, hh, wp, sch):
     #Helper to check if a and b share an hh, wp, or sch
     ok = np.ones(a.size, dtype=bool)
 
-    ha = hh[a]; hb = hh[b]
+    ha = hh[a]
+    hb = hh[b]
     ok &= ~((ha != -1) & (hb != -1) & (ha == hb))
 
-    wa = wp[a]; wb = wp[b]
+    wa = wp[a]
+    wb = wp[b]
     ok &= ~((wa != -1) & (wb != -1) & (wa == wb))
 
-    sa = sch[a]; sb = sch[b]
+    sa = sch[a]
+    sb = sch[b]
     ok &= ~((sa != -1) & (sb != -1) & (sa == sb))
 
     return ok
@@ -425,7 +432,6 @@ def sample_casual_edges_bulk(
             break
 
         need = (k_min - deg[deficient]).astype(np.int64, copy=False)
-        total_need= int(need.sum())
 
         sources_pos = np.repeat(deficient, need).astype(np.int32, copy=False)
 

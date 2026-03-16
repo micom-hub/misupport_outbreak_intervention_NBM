@@ -52,7 +52,7 @@ class LocalHealthDepartment:
 
     #Default action params
         self.default_int_reduction = model.config.lhd.lhd_default_int_reduction
-        self.default_int_duration = model.config.lhd.lhd_default_int_reduction
+        self.default_int_duration = model.config.lhd.lhd_default_int_duration
         self.default_call_cost = model.config.lhd.lhd_default_call_duration
 
 

@@ -1,5 +1,4 @@
-
-
+#scripts/simulation/outbreak_model.py
 from __future__ import annotations
 import os
 import numpy as np
@@ -7,7 +6,6 @@ import pandas as pd
 import igraph as ig
 from typing import Dict, Any, Optional, Callable, List
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 from numba import njit
 from numba.typed import List as NumbaList
 import warnings
@@ -202,7 +200,7 @@ class NetworkModel:
         initial_infectious = self.config.sim.I0
         self.I0 = initial_infectious
         if isinstance(initial_infectious, int):
-            initial_infectious = self.rng.integers(low = 0, high = self.N, size = initial_infectious).tolist()
+            initial_infectious = self.rng.choice(self.N, size = initial_infectious, replace = False).tolist()
             self.I0 = initial_infectious
         self.state[initial_infectious] = 2
         self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)
@@ -234,7 +232,12 @@ class NetworkModel:
         Take a list of newly-assigned exposed indices and assign an incubation period
         """
         inds = np.atleast_1d(inds)
-        mean_inc = np.where(self.is_vaccinated[inds], self.config.epi.incubation_period_vax, self.config.epi.incubation_period)
+        if hasattr(self, "is_vaccinated") and self.is_vaccinated is not None:
+            is_vax_inds = np.asarray(self.is_vaccinated)[inds]
+        else:
+            is_vax_inds = np.zeros(inds.shape, dtype=bool)
+        mean_inc = np.where(is_vax_inds, float(self.config.epi.incubation_period_vax), float(self.config.epi.incubation_period))
+       
         #shape is gamma_alpha, scale is mean/shape
         return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inc/self.config.epi.gamma_alpha)
     
@@ -243,7 +246,11 @@ class NetworkModel:
         Take a list of newly-assigned infectious indices and assign an infectious period
         """
         inds = np.atleast_1d(inds)
-        mean_inf = np.where(self.is_vaccinated[inds], self.config.epi.infectious_period_vax, self.config.epi.infectious_period)
+        if hasattr(self, "is_vaccinated") and self.is_vaccinated is not None:
+            is_vax_inds = np.asarray(self.is_vaccinated)[inds]
+        else:
+            is_vax_inds = np.zeros(inds.shape, dtype=bool)
+        mean_inf = np.where(is_vax_inds, float(self.config.epi.infectious_period_vax), float(self.config.epi.infectious_period))
 
 
         return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf/self.config.epi.gamma_alpha)
