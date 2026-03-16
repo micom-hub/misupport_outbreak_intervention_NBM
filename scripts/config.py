@@ -37,11 +37,10 @@ class PopulationParams:
 
 @dataclass(frozen=True)
 class LHDParams:
+    lhd_daily_capacity: int = 100
     mean_compliance: float = 1.0
-    lhd_employees: int = 10
     lhd_discovery_prob: float = 0.25
-    lhd_workday_hrs: int = 8
-    lhd_default_call_duration: float = 0.1
+    lhd_default_call_cost: float = 1
     lhd_default_int_reduction: float = 0.8
     lhd_default_int_duration: int = 10
 

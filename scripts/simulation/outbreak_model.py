@@ -14,39 +14,47 @@ from line_profiler import profile
 
 from scripts.utils.rng_utility import derive_seed_from_base
 from scripts.config import ModelConfig
-from scripts.recorder.recorder import ExposureEventRecorder
 from scripts.lhd.lhd import LocalHealthDepartment
 from scripts.graph.graph_utils import GraphData 
 
 #Define numba loop outside of model, called by determine_new_exposures
 @njit
-def _determine_new_exposures_numba(
-state,           
-infectious_indices,
-indptr_list,
-indices_list,             
-weights_list,            
-out_mat,                   
-in_mat,                    
-is_vax,             
-ages,                      
-base_prob,
-vax_efficacy,
-susc_under5,
-susc_elderly,
-rel_inf_vax,
-legacy_seed
+def _determine_transmissions_numba(
+    state,
+    infectious_indices,
+    indptr_list,
+    indices_list,
+    weights_list,
+    out_mat,
+    in_mat,
+    is_vax,
+    ages,
+    base_prob,
+    vax_efficacy,
+    susc_under5,
+    susc_elderly,
+    rel_inf_vax,
+    infected_stamp,
+    stamp_value,
+    ct_ids,              
+    trans_src_buf, 
+    trans_tgt_buf, 
+    trans_ct_buf,  
+    legacy_seed
 ):
     #Seed legacy RNG 
     np.random.seed(int(legacy_seed))
 
-    N = state.shape[0]
-    newly_exposed = np.zeros(N, dtype = np.bool_)
     n_ct = len(indptr_list)
+    out_n = 0
+    buf_cap = trans_src_buf.shape[0]
 
-    #loop over infectious nodes
-    for infected_ind in range(infectious_indices.shape[0]):
-        src = infectious_indices[infected_ind]
+    for ii in range(infectious_indices.shape[0]):
+        src = infectious_indices[ii]
+
+        #compute per-src factors
+        src_inf_mult = rel_inf_vax if is_vax[src] else 1.0
+
         for ct_ind in range(n_ct):
             indptr = indptr_list[ct_ind]
             indices = indices_list[ct_ind]
@@ -58,35 +66,59 @@ legacy_seed
                 continue
 
             out_mult_src = out_mat[ct_ind, src]
+            if out_mult_src <= 0.0:
+                continue
 
-            #calculate effective transmission weight
+            ct_id = ct_ids[ct_ind]
+
             for k in range(start, end):
-                nbr = indices[k]
-                if state[nbr] != 0:
+                neighbor = indices[k]
+
+                #ensure neighbor is susceptible
+                if state[neighbor] != 0:
                     continue
+                
+                #ensure neighbor wasn't already infected this step 
+                if infected_stamp[neighbor] == stamp_value:
+                    continue
+
                 w = weights[k]
-                in_mult_nbr = in_mat[ct_ind, nbr]
-                effective_w = w*out_mult_src*in_mult_nbr
+                in_mult_neighbor = in_mat[ct_ind, neighbor]
+                effective_w = w * out_mult_src * in_mult_neighbor
+                if effective_w <= 0.0:
+                    continue
 
-                prob = base_prob*effective_w
-                if is_vax[src]:
-                    prob = prob*rel_inf_vax
-                if vax_efficacy != 0.0:
-                    if is_vax[nbr]:
-                        prob = prob*(1.0-vax_efficacy)
-                if ages[nbr] <= 5:
+                prob = base_prob * effective_w * src_inf_mult
+
+                if vax_efficacy != 0.0 and is_vax[neighbor]:
+                    prob = prob * (1.0 - vax_efficacy)
+                
+                a = ages[neighbor]
+                if a <= 5:
                     prob = prob * susc_under5
-                elif ages[nbr] >= 65:
+                elif a >= 65:
                     prob = prob * susc_elderly
-
+                
                 if prob <= 0.0:
                     continue
-                if prob > 1.0:
+                if prob >=1.0:
                     prob = 1.0
-                
+
                 if np.random.random() < prob:
-                    newly_exposed[nbr] = True
-    return newly_exposed
+                    infected_stamp[neighbor] = stamp_value
+
+                    trans_src_buf[out_n] = src
+                    trans_tgt_buf[out_n] = neighbor
+                    trans_ct_buf[out_n] = ct_id
+                    out_n += 1
+
+                    if out_n >= buf_cap:
+                        return out_n
+    return out_n
+
+
+
+
 
 
 
@@ -113,7 +145,7 @@ class NetworkModel:
         self._assign_graphdata_to_model(graphdata)
         self.Tmax = self.config.sim.simulation_duration
 
-        #Handle RNGs, seeds derived and assigned in _initialize_states
+        #Handle RNGs, seeds derived and assigned in _initialize_replicate
         if seed is not None:
             self._base_seed = int(seed)
         else:
@@ -134,32 +166,22 @@ class NetworkModel:
         #Set up storage for full run
         self.all_states_over_time = [None]*self.n_replicates
         self.all_new_exposures = [None]*self.n_replicates
-        self.exposure_event_log = [[] for _ in range(self.n_replicates)]
+        self.all_transmissions = [None]*self.n_replicates
         self.all_stochastic_dieout = np.zeros(self.n_replicates, dtype = bool)
         self.all_end_days = np.ones(self.n_replicates, dtype = int)*self.Tmax
 
         self.all_vax_status = [None] * self.n_replicates
-        self.all_lhd_action_logs = [None] * self.n_replicates
-
-        #Instantiate recorder and Local Health Department
-        self.recorder_template = ExposureEventRecorder(init_event_cap = 1024, init_node_cap = 4096)
-
-        #model caller sets lhd mappings 
-        self.lhd = LocalHealthDepartment(
-            model = self,
-            discovery_prob = self.config.lhd.lhd_discovery_prob,
-            employees = self.config.lhd.lhd_employees,
-            workday_hrs = self.config.lhd.lhd_workday_hrs,
-            register_defaults = lhd_register_defaults,
-            algorithm_map = lhd_algorithm_map,
-            action_factory_map = lhd_action_factory_map
-        )
 
         #Results that are saved go to run_dir
         self.results_folder = run_dir 
         #Create if not created by driver
         if self.config.sim.save_data_files:
                 os.makedirs(self.results_folder, exist_ok = True)
+
+        #Unpack LHD specs
+        self.lhd_register_defaults = lhd_register_defaults
+        self.lhd_algorithm_map = lhd_algorithm_map
+        self.lhd_action_factory_map = lhd_action_factory_map
 
    
     def _assign_graphdata_to_model(self, graphdata: GraphData):
@@ -168,7 +190,7 @@ class NetworkModel:
         self.edge_list = graphdata.edge_list
         self.adj_matrix = graphdata.adj_matrix
         self.individual_lookup = graphdata.individual_lookup
-        self.ages = graphdata.ages
+        self.ages = graphdata.ages.astype(np.int32)
         self.sexes = graphdata.sexes
         self.compliances = getattr(graphdata, "compliances", getattr(self, "compliances", None))
         self.neighbor_map = graphdata.neighbor_map
@@ -184,9 +206,9 @@ class NetworkModel:
         self.out_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
 
 
-    def _initialize_states(self, run: int):
+    def _initialize_replicate(self, run: int):
         """
-        Set up new SEIR arrays and seed initial infectious individuals
+        Set up new SEIR arrays and seed initial infectious individuals for each stochastic replicate
         """
         self.current_time = 0
         self.replicate_ind = int(run)
@@ -194,19 +216,18 @@ class NetworkModel:
         #Set run seed for the replicate, update RNGs
         self.replicate_seed = int(derive_seed_from_base(self._base_seed, self.replicate_ind))
         self.rng = np.random.default_rng(self.replicate_seed)
-
-        lhd_seed = int(derive_seed_from_base(self.replicate_seed, "lhd"))
-        self.lhd.rng = np.random.default_rng(lhd_seed)
+        self.lhd_seed = int(derive_seed_from_base(self.replicate_seed, "lhd"))
+        self.surv_seed = int(derive_seed_from_base(self.replicate_seed, "surveillance"))
 
         #store seeds for reproducibility
         self._seed_metadata = {
             "base_seed":int(self._base_seed),
             "replicate_ind": int(self.replicate_ind),
             "replicate_seed": int(self.replicate_seed),
-            "lhd_seed": int(lhd_seed)
+            "lhd_seed": int(self.lhd_seed),
+            "surveillance_seed":int(self.surv_seed)
         }
         self._numba_legacy_seed_base = int(derive_seed_from_base(self.replicate_seed, "numba"))
-        self._numba_ready = False #updated once initialized
         
 
 
@@ -250,8 +271,29 @@ class NetworkModel:
         self.in_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
         self.out_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
 
-        if hasattr(self, "lhd"):
-            self.lhd.reset_for_run()
+        #Pre-allocate transmission event space
+        if not hasattr(self, "_trans_src_buf") or self._trans_src_buf.shape[0] != self.N:
+            self._trans_src_buf = np.empty(self.N, dtype=np.int32)
+            self._trans_tgt_buf = np.empty(self.N, dtype=np.int32)
+            self._trans_ct_buf = np.empty(self.N, dtype=np.int16)
+        if not hasattr(self, "_infected_stamp") or self._infected_stamp.shape[0] != self.N:
+            self._infected_stamp = np.zeros(self.N, dtype=np.int32)
+        self._infected_stamp.fill(0)
+
+
+
+        #Set-up LHD
+        self.lhd = LocalHealthDepartment(
+            model = self,
+            seed = self.lhd_seed,
+            discovery_prob = self.config.lhd.lhd_discovery_prob,
+            capacity = self.config.lhd.lhd_daily_capacity,
+            register_defaults = self.lhd_register_defaults,
+            algorithm_map = self.lhd_algorithm_map,
+            action_factory_map = self.lhd_action_factory_map
+        )
+
+        self.lhd.reset_for_run()
 
         return
              
@@ -288,8 +330,9 @@ class NetworkModel:
         Convert self.csr_by_type and multiplier dicts into Numba-friendly structures
         (typed lists and contiguous arrays). Called once (or at first use).
         """
-        contact_types = list(self.contact_types)
+        contact_types = sorted(self.contact_types)
         self._numba_contact_types = contact_types
+        self._numba_ct_ids = np.array([self.ct_to_id[ct] for ct in contact_types], dtype=np.int16)
         n_ct = len(contact_types)
         N = self.N
 
@@ -330,14 +373,15 @@ class NetworkModel:
             self._numba_in_mat[j, :] = self.in_multiplier[ct].astype(np.float32)
 
     @profile     
-    def determine_new_exposures(self, recorder: ExposureEventRecorder = None):
+    def determine_transmissions(self):
         """
-        Wrapper that prepares inputs, calls the numba compiled function to compute newly exposed,and optionally reconstructs per-event metadata for the recorder (if provided).
+        Wrapper for _determine_transmissions_numba that calls the numba compiled function, and returns newly-exposed individuals
+
         """
         infectious_indices = np.where(self.state == 2)[0]
         if infectious_indices.size == 0:
-            return np.array([], dtype=np.int32)
-
+            return (np.empty(0, np.int32), np.empty(0, np.int32), np.empty(0, np.int16))
+        
         base_prob = float(self.config.epi.base_transmission_prob)
         vax_efficacy = float(self.config.epi.vax_efficacy)
         susc_under5 = float(self.config.epi.susceptibility_multiplier_under_five)
@@ -347,70 +391,54 @@ class NetworkModel:
         if not getattr(self, "_numba_ready", False):
             self._prepare_numba_structures()
 
-        # If there are no contact types, there are no exposures to compute
         if not getattr(self, "_numba_contact_types", None) or len(self._numba_contact_types) == 0:
-            return np.array([], dtype=np.int32)
-
-        # update multipliers in-place from dictionaries 
+            return (np.empty(0, np.int32), np.empty(0, np.int32), np.empty(0, np.int16))
+        
         self._update_multiplier_matrices()
 
-       
-       #Set legacy numpy RNG each timestep for numba determinism
-        legacy_seed = int(derive_seed_from_base(self._numba_legacy_seed_base, int(self.current_time)))
-        np.random.seed(legacy_seed)
+        stamp_value = np.int32(self.current_time) #check for same-day inf
 
-        newly_bool = _determine_new_exposures_numba(
-            self.state.astype(np.int8),
-            infectious_indices.astype(np.int64),
+        legacy_seed = int(derive_seed_from_base(self._numba_legacy_seed_base, int(self.current_time)))
+
+        tot = _determine_transmissions_numba(
+            self.state,                      
+            infectious_indices,
             self._numba_indptr_list,
             self._numba_indices_list,
             self._numba_weights_list,
             self._numba_out_mat,
             self._numba_in_mat,
             self.is_vaccinated,
-            self.ages.astype(np.int32),
+            self.ages,    
             base_prob,
             vax_efficacy,
             susc_under5,
             susc_elderly,
             rel_inf_vax,
+            self._infected_stamp,
+            stamp_value,
+            self._numba_ct_ids,
+            self._trans_src_buf,
+            self._trans_tgt_buf,
+            self._trans_ct_buf,
             legacy_seed
         )
 
+        # Gather new transmission info  
+        src = self._trans_src_buf[:tot]
+        tgt = self._trans_tgt_buf[:tot]
+        ct  = self._trans_ct_buf[:tot]
+        return src, tgt, ct
         
-        newly_exposed = np.where(newly_bool)[0].astype(np.int32)
-
-
-        if recorder is not None:
-            contact_types = self._numba_contact_types
-            for src in infectious_indices:
-                for j, ct in enumerate(contact_types):
-                    indptr = self._numba_indptr_list[j]
-                    indices = self._numba_indices_list[j]
-                    start = indptr[src]
-                    end = indptr[src + 1]
-                    if end <= start:
-                        continue
-                    neighbors = indices[start:end]
-                    sus_mask = (self.state[neighbors] == 0)
-                    if not sus_mask.any():
-                        continue
-                    sus_neighbors = neighbors[sus_mask]
-                    infected_mask = newly_bool[sus_neighbors]
-                    if infected_mask.any():
-                        type_id = self.ct_to_id[ct]
-                        recorder.append_event(self.current_time, int(src), int(type_id), sus_neighbors, infected_mask)
-        return newly_exposed
 
     @profile
-    def step(self, recorder: ExposureEventRecorder = None):
+    def step(self):
         """
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
         """
 
         #S -> E
-        self.exposure_events = [] #record exposure events
-        newly_exposed = self.determine_new_exposures(recorder = recorder)
+        trans_src, newly_exposed, trans_ct = self.determine_transmissions()
 
         if newly_exposed.size > 0:
             self.state[newly_exposed] = 1
@@ -466,25 +494,23 @@ class NetworkModel:
                         for ct in self.contact_types:
                             self.in_multiplier[ct][waned_nodes] *= reduced_sus
 
-                            
-
-
-
-
-
         #Save timestep data
         S = list(np.where(self.state == 0)[0])
         E = list(np.where(self.state == 1)[0])
         I = list(np.where(self.state == 2)[0])  # noqa: E741
         R = list(np.where(self.state == 3)[0])
         self.states_over_time.append([S,E,I,R])
-        self.new_exposures.append(newly_exposed)
+        self.new_exposures.append(newly_exposed.copy())
         self.new_infections.append(to_infectious)
+
+        return trans_src, newly_exposed, trans_ct
+
 
     def simulate(self):
 
         for run in range(self.n_replicates):
-            self._initialize_states(run)
+            transmissions_over_time = []
+            self._initialize_replicate(run)
             #store vaccination status for run
             self.all_vax_status[run] = self.is_vaccinated.copy()
 
@@ -493,32 +519,18 @@ class NetworkModel:
                 t += 1 #day 0 is recorded in initialization
                 self.current_time = t
 
-                if self.config.sim.record_exposure_events:
-                    recorder = self.recorder_template
-                    recorder.reset()
-                else:
-                    recorder = None
-
                 #advance SEIR and record
-                self.step(recorder)
+                trans_src, trans_tgt, trans_ct = self.step()
 
-                #either log an exposure event or make a false empty one
-                if recorder is not None:
-                    snapshot = recorder.snapshot_compact(copy = True) 
-                    self.exposure_event_log[run].append(snapshot)
-                else:
-                    snapshot = {
-                        'event_time': np.empty(0, dtype = np.int32),
-                        'event_source': np.empty(0, dtype = np.int32),
-                        'event_type': np.empty(0, dtype = np.int16),
-                        'event_nodes_start': np.empty(0, dtype = np.int64),
-                        'event_nodes_len': np.empty(0, dtype = np.int32),
-                        'nodes': np.empty(0, dtype = np.int32),
-                        'infections': np.empty(0, dtype = bool)
-                    }
+                transmissions_over_time.append({
+                    "time":np.int32(self.current_time),
+                    "src":trans_src.copy(),
+                    "tgt": trans_tgt.copy(),
+                    "ct": trans_ct.copy()
+                })
 
                 #Run LHD step once
-                self.lhd.step(self.current_time, snapshot)
+                # self.lhd.step(self.current_time, snapshot)
 
                 S, E, I, R = self.states_over_time[-1]  # noqa: E741
                 if not E and not I:
@@ -527,11 +539,12 @@ class NetworkModel:
                     break
                 
             #save per run data
+            self.all_transmissions[run] = transmissions_over_time
             self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
-            self.all_new_exposures[run] = [ne.copy() if hasattr(ne, "copy") else list(ne) for ne in self.new_exposures]
             self.all_stochastic_dieout[run] = self.stochastic_dieout
             self.all_end_days[run] = self.simulation_end_day
-            self.all_lhd_action_logs[run] = list(self.lhd.action_log)
+            self.all_new_exposures[run] = [ne.copy() for ne in self.new_exposures]
+
 
 
     def results_to_df(self, metrics: List[str] = ["peakPrev", "peakTime", "outbreakSize"]) -> pd.DataFrame:

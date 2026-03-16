@@ -14,24 +14,24 @@ if TYPE_CHECKING:
 class LocalHealthDepartment:
     def __init__(
         self, 
+        seed: int,
         model: NetworkModel, 
+        capacity: Optional[int] = None,
         discovery_prob: float = None,  
-        employees: int = None, 
-        workday_hrs: float = None,
         register_defaults: bool = True,
         algorithm_map: Optional[Dict[str, object]] = None,
         action_factory_map: Optional[Dict[str, Callable[..., ActionBase]]] = None
     ):
     #LHD settings
         self.model = model
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
 
-
+        self.daily_capacity = int(capacity) if capacity is not None else int(self.model.config.lhd.lhd_daily_capacity)
+        
         self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.config.lhd.lhd_discovery_prob
 
-    #LHD Capacity
-        self.employees = employees if employees is not None else self.model.config.lhd.lhd_employees
-        self.hours_per_employee = float(workday_hrs) if workday_hrs is not None else self.model.config.lhd.lhd_workday_hrs
-        self.daily_personhours = float(self.employees * self.hours_per_employee)
+
 
     #Algorithm -> algorithm instance
         self.algorithms: Dict[str, AlgorithmBase] = {}
@@ -48,12 +48,12 @@ class LocalHealthDepartment:
         self._action_token_counts: Dict[str, int] = {}
 
         self.min_factor = 1e-6 #to prevent div 0 errors
-        self.min_candidate_cost = 1e-4
+        self.min_candidate_cost = 1
 
     #Default action params
         self.default_int_reduction = model.config.lhd.lhd_default_int_reduction
         self.default_int_duration = model.config.lhd.lhd_default_int_duration
-        self.default_call_cost = model.config.lhd.lhd_default_call_duration
+        self.default_call_cost = model.config.lhd.lhd_default_call_cost
 
 
         #Register default actions if requested:
@@ -67,7 +67,7 @@ class LocalHealthDepartment:
             ['cas', 'sch', 'wp'],
             reduction = params.get('reduction', self.default_int_reduction) if params else self.default_int_reduction,
             duration = int(params.get('duration', self.default_int_duration)) if params else self.default_int_duration,
-            call_cost = float(cost) if cost is not None else self.default_call_cost,
+            call_cost = int(cost) if cost is not None else self.default_call_cost,
             min_factor = self.min_factor
         )
             self.register_action_factory('call', default_call_factory)
@@ -152,10 +152,11 @@ class LocalHealthDepartment:
                     else:
                         raise ValueError("contact_types must be scalar or match nodes length")
             
-            #costs must be a single float or array of size len(nodes)
+            #costs must be a single int or array of size len(nodes)
             costs = out.get('costs', None)
             if costs is None:
-                costs = np.full(nodes.shape[0], np.nan, dtype = np.float32)
+                costs = np.full(nodes.shape[0], self.min_candidate_cost, dtype = np.int32)
+
             else:
                 costs = np.asarray(costs, dtype = object)
                 if costs.shape[0] != nodes.shape[0]:
@@ -170,13 +171,13 @@ class LocalHealthDepartment:
                 unique_nodes, inverse = np.unique(nodes, return_inverse = True)
                 best_prios = np.full(unique_nodes.shape[0], -np.inf, dtype = np.float32)
                 best_cts = np.empty(unique_nodes.shape[0], dtype = object)
-                best_costs = np.full(unique_nodes.shape[0], np.inf, dtype = np.float32)
+                best_costs = np.full(unique_nodes.shape[0], 99999, dtype = np.int32)
                 best_params = [None] * unique_nodes.shape[0]
 
                 for occ in range(nodes.shape[0]):
                     uid = inverse[occ]
                     p = float(prios[occ])
-                    c = float(costs[occ])
+                    c = int(costs[occ])
                     #keep highest priority, or lowest cost if tie
                     if p > best_prios[uid] or (p==best_prios[uid] and c < best_costs[uid]):
                         best_prios[uid] = p
@@ -214,12 +215,12 @@ class LocalHealthDepartment:
         nodes_arr = np.array(nodes_list, dtype = np.int32)
         prios_arr = np.array(prios_list, dtype = np.float32)
         contact_types_arr = np.array(cts_list, dtype = object)
-        costs_arr = np.array(costs_list, dtype = np.float32)
+        costs_arr = np.array(costs_list, dtype = np.int32)
         params_arr = params_list
 
         return action_types_arr, nodes_arr, prios_arr, contact_types_arr, costs_arr, params_arr
 
-    def schedule_action(self, action: ActionBase, current_time: int, resource_cost: float):
+    def schedule_action(self, action: ActionBase, current_time: int, cost_units: int):
         """
         Apply action and schedule tokens for expiry if duration > 0.
         Registers Action instance for process_expirations to call reversion
@@ -257,7 +258,7 @@ class LocalHealthDepartment:
             'action_type': action.action_type,
             'kind': getattr(action, "kind", action.action_type),
             'nodes_count': int(getattr(action, "nodes", np.empty(0)).size),
-            'hours_used': float(resource_cost),
+            'capacity_used': int(cost_units),
             'duration': int(action.duration),
             'reversible_tokens': len(reversible_tokens),
             'nonreversible_tokens': len(nonreversible_tokens)
@@ -304,31 +305,31 @@ class LocalHealthDepartment:
 
         #4 select actions maximizing value/hour (prio / cost)
         costs_arr = np.maximum(costs_arr, self.min_candidate_cost)
-        value_per_hour = prios_arr/costs_arr
-        order = np.argsort(-value_per_hour)
+        value_per_cost = prios_arr/costs_arr
+        order = np.argsort(-value_per_cost)
 
         #allocate actions by value until hours are exhausted 
-        hours_available = float(self.daily_personhours)
-        hours_spent = 0.0
+        capacity_available = int(self.daily_capacity)
+        capacity_spent = 0
         selected_indices = []
         for ind in order:
-            c = float(costs_arr[ind])
-            if hours_spent + c <= hours_available:
-                hours_spent += c
+            c = int(costs_arr[ind])
+            if capacity_spent + c <= capacity_available:
+                capacity_spent += c
                 selected_indices.append(ind)
             else:
                 continue
 
         #5 group selected actions by action_type, contact_type and schedule
         grouped = defaultdict(list)
-        grouped_costs = defaultdict(float)
+        grouped_costs = defaultdict(int)
         grouped_params = defaultdict(list)
         for ind in selected_indices:
             atype = action_types_arr[ind]
             ctype = contact_types_arr[ind]
             key = (atype, ctype)
             grouped[key].append(int(nodes_arr[ind]))
-            grouped_costs[key] += float(costs_arr[ind])
+            grouped_costs[key] += int(costs_arr[ind])
             grouped_params[key].append(params_arr[ind] if params_arr is not None else None)
 
         #create an action for each group and schedule
@@ -350,7 +351,7 @@ class LocalHealthDepartment:
             group_cost = grouped_costs[(atype, ctype)]
             group_prio = float(np.mean([prios_arr[ind] for ind in selected_indices if action_types_arr[ind] == atype and contact_types_arr[ind] == ctype]))
             action = factory(np.asarray(nodes, dtype = np.int32), ctype, group_prio, group_cost, merged_params)
-            self.schedule_action(action, current_time, resource_cost = group_cost)
+            self.schedule_action(action, current_time, cost_units = group_cost)
 
         return
     def reset_for_run(self):
