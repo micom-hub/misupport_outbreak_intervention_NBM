@@ -131,11 +131,11 @@ def _default_call_factory_impl(nodes, contact_type, prio, cost, params,
 #Building LHD configs
 
 random_alg_map = {"call": RandomPriority()}
-random_fac_map = {"call": default_call_factory_builder(reduction = 0.5, duration = 7, call_cost = 0.1)}
+random_fac_map = {"call": default_call_factory_builder(reduction = 0.3, duration = 7, call_cost = 0.1)}
 random = LhdVariant(name="random_priority", algorithm_map = random_alg_map, action_factory_map = random_fac_map, description="random priority, 50% reduction")
 
 elder_alg_map = {"call": PrioritizeElders(base_priority=1.0, elder_boost=5.0, elder_cost=0.15)}
-elder_fac_map = {"call": default_call_factory_builder(reduction = 0.6, duration = 10, call_cost = 0.15)}
+elder_fac_map = {"call": default_call_factory_builder(reduction = 0.99, duration = 10, call_cost = 0.15)}
 elder = LhdVariant(name="elder_priority", algorithm_map = elder_alg_map, action_factory_map = elder_fac_map)
 
 

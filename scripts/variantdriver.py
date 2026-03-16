@@ -9,6 +9,7 @@ import concurrent.futures
 import multiprocessing as mp
 import shutil
 from line_profiler import profile
+import matplotlib.pyplot as plt
 
 import pandas as pd
 
@@ -17,6 +18,11 @@ from scripts.variants.run_variants_funcs import prepare_run, run_parameter_set
 from scripts.lhd.lhdConfig import LhdConfig, LHD_CONFIGURATION
 from scripts.config import ModelConfig
 
+from scripts.visualization.viz import (
+    plot_metric_boxplot,
+    plot_trajectories_by_variant,
+    plot_paired_difference_trajectory,
+)
 
 def run_experiment(
     csv_path: str,
@@ -268,3 +274,12 @@ if __name__ == "__main__":
         clean_dir=True
     )
     print("Done. aggregated:", result["aggregated_paths"])
+
+    # summary = pd.read_parquet("model_runs/experiment_002/aggregated_summary.parquet")
+    # inc = pd.read_parquet("model_runs/experiment_002/aggregated_incidence.parquet")
+
+    # fig, ax = plot_metric_boxplot(summary, metric="outbreakSize", variant_col="variant")
+    # plt.show()
+
+    # fig, axes = plot_trajectories_by_variant(inc, variant_col="variant")
+    # plt.show()
