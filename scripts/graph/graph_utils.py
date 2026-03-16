@@ -44,7 +44,7 @@ def build_graph_data(
     edge_list: pd.DataFrame,
     contacts_df: pd.DataFrame,
     config: ModelConfig,
-    rng: Optional[np.random.Generator] = None,
+    seed: int,
     N: Optional[int] = None,
 ) -> GraphData:
     """
@@ -54,14 +54,15 @@ def build_graph_data(
         edge_list (pd.DataFrame): DataFrame with cols ['source', 'target', 'weight', 'contact_type']
         contacts_df (pd.DataFrame): contacts DataFrame from synth_data_processing
         config: ModelConfig object
-        rng (Optional[np.random.Generator], optional): RNG object, created if not provided
         N (Optional[int], optional): Population Size
 
     Returns:
         GraphData: GraphData object 
     """
-    if rng is None:
-        rng = np.random.default_rng()
+    if seed is not None:
+        rng = np.random.default_rng(int(seed))
+    else:
+        raise TypeError("No seed provided to build graph data")
 
     if N is None:
         N = int(contacts_df.shape[0])
@@ -89,7 +90,7 @@ def build_graph_data(
     sd = 0.15
     a = (0 - avg_compliance) / sd
     b = (1 - avg_compliance) / sd
-    compliances = truncnorm.rvs(a, b, loc=avg_compliance, scale=sd, size=N, random_state=rng).astype(np.float32)
+    compliances = truncnorm.rvs(a, b, loc=avg_compliance, scale=sd, size=N, random_state=np.random.RandomState(int(seed))).astype(np.float32)
 
     #Neighbor Map
     neighbor_map = _build_neighbor_map(edge_list)
@@ -129,19 +130,17 @@ def build_graph_data(
 def sample_from_master_graphdata(
     minimal_master_dict: Dict,
     config: ModelConfig,
-    rng: Optional[np.random.Generator] = None
+    seed: int
 ) -> pd.DataFrame:
     """
     Samples contacts a minimal representation of a master edge list produced by build_minimal_graphdata_from_edge_list() according to provided ModelConfig object
 
     Returns a sampled pandas.DataFrame with same columns as master_edgelist
     """
-    if rng is None:
-        rng = np.random.default_rng(config.sim.seed)
-    elif isinstance(rng, np.random.Generator):
-        pass
+    if seed is not None:
+        rng = np.random.default_rng(int(seed))
     else:
-        raise TypeError("rng must be none, or a numpy random generator")
+        raise TypeError("No seed provided to sample master graphdata")
 
     N = int(minimal_master_dict["N"])
     csr_by_type = minimal_master_dict["csr_by_type"]
