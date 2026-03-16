@@ -3,7 +3,7 @@ __pycache__
 .pytest_cache
 *.prof
 *.lprof
-
+scratch.ipynb
 ref/
 data
 writing/
