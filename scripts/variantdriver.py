@@ -9,7 +9,6 @@ import concurrent.futures
 import multiprocessing as mp
 import shutil
 from line_profiler import profile
-import matplotlib.pyplot as plt
 
 import pandas as pd
 
@@ -266,7 +265,7 @@ if __name__ == "__main__":
         lhd_config=LHD_CONFIGURATION,
         output_dir="model_runs/experiment_002",
         base_cfg=None,
-        seed=2026,
+        seed=3,
         workers=1,
         save_summary=True,
         save_incidence=True,

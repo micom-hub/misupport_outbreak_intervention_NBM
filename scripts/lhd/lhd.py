@@ -15,7 +15,6 @@ class LocalHealthDepartment:
     def __init__(
         self, 
         model: NetworkModel, 
-        rng = None, 
         discovery_prob: float = None,  
         employees: int = None, 
         workday_hrs: float = None,
@@ -25,7 +24,8 @@ class LocalHealthDepartment:
     ):
     #LHD settings
         self.model = model
-        self.rng = rng if rng is not None else getattr(model, "rng", np.random.default_rng())
+
+
         self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.config.lhd.lhd_discovery_prob
 
     #LHD Capacity

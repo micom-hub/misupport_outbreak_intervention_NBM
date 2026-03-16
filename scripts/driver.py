@@ -237,7 +237,7 @@ def run_single_model(
     sampled_edges_df = sample_from_master_graphdata(
         minimal_graphdata, 
         cfg, 
-        run_rng
+        seed = cfg.sim.seed
     )
 
     # Build full run GraphData (this is the heavy step)
@@ -245,7 +245,7 @@ def run_single_model(
         edge_list=sampled_edges_df, 
         contacts_df=contacts_df, 
         config = cfg, 
-        rng=np.random.default_rng(int(cfg.sim.seed)), 
+        seed = cfg.sim.seed, 
         N=int(contacts_df.shape[0])
     )
 
@@ -254,7 +254,7 @@ def run_single_model(
         config = cfg,
         graphdata = run_graphdata, 
         run_dir = str(run_dir),
-        rng = run_rng,
+        seed = cfg.sim.seed,
         lhd_register_defaults = False,
         lhd_algorithm_map = algorithm_map,
         lhd_action_factory_map = factory_map

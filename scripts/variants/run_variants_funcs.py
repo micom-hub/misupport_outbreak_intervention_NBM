@@ -8,11 +8,13 @@ import traceback
 import concurrent.futures
 import multiprocessing
 import time
+import copy
 from line_profiler import profile
+import hashlib
 
 import numpy as np
 import pandas as pd
-
+from scripts.utils.rng_utility import derive_seed_from_base
 from scripts.variants.csv_to_lhs import csv_to_cfg
 from scripts.graph.graph_utils import (GraphData,
     build_minimal_graphdata_from_edge_list,
@@ -69,8 +71,10 @@ def prepare_run(
         seed = base_cfg.sim.seed
     base_seed = int(seed)
 
+    prep_seed = derive_seed_from_base(base_seed, "preparation")
+
     master_df = read_or_build_master(contacts_df = contacts_df, cfg = base_cfg, 
-    run_dir = str(out_base), seed = base_seed, variant = True) 
+    run_dir = str(out_base), seed = prep_seed, variant = True) 
 
     #3) Create minimal graph data object with master
     master_gd = build_minimal_graphdata_from_edge_list(master_df, N = contacts_df.shape[0])
@@ -81,7 +85,7 @@ def prepare_run(
         N = n_samples, 
         output_dir = str(out_base),
         default_config = base_cfg,
-        seed = base_seed
+        seed = prep_seed
         )
 
     return (contacts_df, configs_list, master_gd)
@@ -104,6 +108,8 @@ def run_variants(
 ) -> List[NetworkModel]:
     """
     Runs all variants in lhd_config on the same model configuration, contact structure, and rng, producing a run directory under output_dir which contains ModelConfig.json, and specified results files. 
+
+    Seed is passed by run_parameter_set, and is unique for each replicate
 
     Args:
         save_summary saves a run summary output containing metrics in summary_metrics (see outbreak_model.results_to_df for compatible metrics)
@@ -131,7 +137,6 @@ def run_variants(
     if seed is not None:
         cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
     seed = cfg.sim.seed
-    rng_iteration = np.random.default_rng(seed)
 
     metrics = summary_metrics
 
@@ -147,18 +152,25 @@ def run_variants(
     incidence_dfs = []
     prevalence_dfs = []
 
+
     #Loop across each variant, instantiate and simulate model, run, write result
     for variant in lhd_config.variants:
+
         validate_variant(variant)
+
+        #Create clean copy of algorithms/actions to pass
+        alg_map_copy = {k: copy.deepcopy(v) for k, v in variant.algorithm_map.items()}
+        act_map_copy = {k: copy.deepcopy(v) for k, v in variant.action_factory_map.items()}
+
 
         model = NetworkModel(
             config = cfg,
             graphdata = graphdata,
             run_dir = str(run_dir),
-            rng = rng_iteration,
+            seed = seed,
             lhd_register_defaults = register_defaults,
-            lhd_algorithm_map = dict(variant.algorithm_map),
-            lhd_action_factory_map = dict(variant.action_factory_map)
+            lhd_algorithm_map = dict(alg_map_copy),
+            lhd_action_factory_map = dict(act_map_copy)
         )
 
         try:
@@ -244,22 +256,22 @@ def run_parameter_set(
     out_base.mkdir(parents=True, exist_ok=True)
 
     base_seed = int(seed) if seed is not None else int(cfg.sim.seed)
-    run_seed = base_seed + int(i)
-    rng_for_sampling = np.random.default_rng(run_seed)
+    run_seed = base_seed + int(i) #increment seed for each run
 
+    run_graphdata_seed = derive_seed_from_base(run_seed)
 
     #2) Sample master graphdata and build run graphdata
     sampled_edges_df = sample_from_master_graphdata(
         master_gd,
         cfg,
-        rng=rng_for_sampling
+        seed=run_graphdata_seed
     )
 
     run_graphdata = build_graph_data(
         edge_list = sampled_edges_df,
         contacts_df = contacts_df,
         config = cfg,
-        rng = rng_for_sampling,
+        seed = run_graphdata_seed,
         N = int(contacts_df.shape[0])
     )
 
@@ -287,7 +299,6 @@ def run_parameter_set(
         "success":True,
         "models_run": len(models)
     }
-
 
 
 

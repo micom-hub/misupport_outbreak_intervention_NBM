@@ -54,7 +54,7 @@ class SimulationParams:
     simulation_duration: int = 100
     I0: Union[List[int],int] = 5
     seed: int = 2026
-    county: str = "Alcona"
+    county: str = "Keweenaw"
     state: str = "Michigan"
     resample_network_per_run: bool = False
     master_casual_candidates: int = 100

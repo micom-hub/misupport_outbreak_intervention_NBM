@@ -12,6 +12,7 @@ import warnings
 from line_profiler import profile
 
 
+from scripts.utils.rng_utility import derive_seed_from_base
 from scripts.config import ModelConfig
 from scripts.recorder.recorder import ExposureEventRecorder
 from scripts.lhd.lhd import LocalHealthDepartment
@@ -33,8 +34,12 @@ base_prob,
 vax_efficacy,
 susc_under5,
 susc_elderly,
-rel_inf_vax
+rel_inf_vax,
+legacy_seed
 ):
+    #Seed legacy RNG 
+    np.random.seed(int(legacy_seed))
+
     N = state.shape[0]
     newly_exposed = np.zeros(N, dtype = np.bool_)
     n_ct = len(indptr_list)
@@ -93,7 +98,6 @@ class NetworkModel:
         graphdata: GraphData,
         run_dir: str,
         *,
-        rng = None,
         seed: Optional[int] = None,
         lhd_register_defaults: bool = True,
         lhd_algorithm_map: Optional[Dict[str, object]] = None,
@@ -109,14 +113,18 @@ class NetworkModel:
         self._assign_graphdata_to_model(graphdata)
         self.Tmax = self.config.sim.simulation_duration
 
-        #choose RNG: explicit rng > seed arg > params['seed] 
-        if rng is not None:
-            self.rng = rng
-        elif seed is not None:
-            self.rng = np.random.default_rng(int(seed))
+        #Handle RNGs, seeds derived and assigned in _initialize_states
+        if seed is not None:
+            self._base_seed = int(seed)
         else:
+            print("No seed passed to model, using configuration default")
             seed_from_params = self.config.sim.seed
-            self.rng = np.random.default_rng(int(seed_from_params))
+            self._base_seed = int(seed_from_params)
+        self.rng = None
+        self.replicate_ind = None
+        self.replicate_seed = None
+        self._numba_legacy_seed_base = None
+        self._seed_metadata = {}
 
         #run metadata:
         self.county = self.config.sim.county
@@ -139,7 +147,6 @@ class NetworkModel:
         #model caller sets lhd mappings 
         self.lhd = LocalHealthDepartment(
             model = self,
-            rng = self.rng,
             discovery_prob = self.config.lhd.lhd_discovery_prob,
             employees = self.config.lhd.lhd_employees,
             workday_hrs = self.config.lhd.lhd_workday_hrs,
@@ -177,11 +184,32 @@ class NetworkModel:
         self.out_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
 
 
-    def _initialize_states(self):
+    def _initialize_states(self, run: int):
         """
         Set up new SEIR arrays and seed initial infectious individuals
         """
         self.current_time = 0
+        self.replicate_ind = int(run)
+
+        #Set run seed for the replicate, update RNGs
+        self.replicate_seed = int(derive_seed_from_base(self._base_seed, self.replicate_ind))
+        self.rng = np.random.default_rng(self.replicate_seed)
+
+        lhd_seed = int(derive_seed_from_base(self.replicate_seed, "lhd"))
+        self.lhd.rng = np.random.default_rng(lhd_seed)
+
+        #store seeds for reproducibility
+        self._seed_metadata = {
+            "base_seed":int(self._base_seed),
+            "replicate_ind": int(self.replicate_ind),
+            "replicate_seed": int(self.replicate_seed),
+            "lhd_seed": int(lhd_seed)
+        }
+        self._numba_legacy_seed_base = int(derive_seed_from_base(self.replicate_seed, "numba"))
+        self._numba_ready = False #updated once initialized
+        
+
+
        #Set vaccinations
         self.is_vaccinated = self.rng.random(self.N) < self.config.epi.vax_uptake
 
@@ -319,8 +347,17 @@ class NetworkModel:
         if not getattr(self, "_numba_ready", False):
             self._prepare_numba_structures()
 
+        # If there are no contact types, there are no exposures to compute
+        if not getattr(self, "_numba_contact_types", None) or len(self._numba_contact_types) == 0:
+            return np.array([], dtype=np.int32)
+
         # update multipliers in-place from dictionaries 
         self._update_multiplier_matrices()
+
+       
+       #Set legacy numpy RNG each timestep for numba determinism
+        legacy_seed = int(derive_seed_from_base(self._numba_legacy_seed_base, int(self.current_time)))
+        np.random.seed(legacy_seed)
 
         newly_bool = _determine_new_exposures_numba(
             self.state.astype(np.int8),
@@ -336,7 +373,8 @@ class NetworkModel:
             vax_efficacy,
             susc_under5,
             susc_elderly,
-            rel_inf_vax
+            rel_inf_vax,
+            legacy_seed
         )
 
         
@@ -446,7 +484,7 @@ class NetworkModel:
     def simulate(self):
 
         for run in range(self.n_replicates):
-            self._initialize_states()
+            self._initialize_states(run)
             #store vaccination status for run
             self.all_vax_status[run] = self.is_vaccinated.copy()
 
@@ -775,9 +813,3 @@ class NetworkModel:
         return
 
     
-
-
-
-
-
-
