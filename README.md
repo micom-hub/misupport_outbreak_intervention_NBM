@@ -23,3 +23,6 @@ conda env create -f environment.yml
 
 ### Quick Run Guide
 For a single and straightforward run of the model, simply navegate to [driver.py](./scripts/driver.py)
+
+### Compatibility
+For FredFetch, your device must have a compatible chromedriver. As a workaround, you can download the synthetic population zip files from the FRED website linked in FredFetch, store it in a directory ./data/ and rename the file to {County}.zip
