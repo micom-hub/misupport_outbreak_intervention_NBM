@@ -11,7 +11,6 @@ from numba.typed import List as NumbaList
 import warnings
 from line_profiler import profile
 
-
 from scripts.utils.rng_utility import derive_seed_from_base
 from scripts.config import ModelConfig
 from scripts.lhd.lhd import LocalHealthDepartment
@@ -167,6 +166,7 @@ class NetworkModel:
         self.all_states_over_time = [None]*self.n_replicates
         self.all_new_exposures = [None]*self.n_replicates
         self.all_transmissions = [None]*self.n_replicates
+        self.all_surveillance_batches = [None] * self.n_replicates
         self.all_stochastic_dieout = np.zeros(self.n_replicates, dtype = bool)
         self.all_end_days = np.ones(self.n_replicates, dtype = int)*self.Tmax
 
@@ -233,6 +233,7 @@ class NetworkModel:
 
        #Set vaccinations
         self.is_vaccinated = self.rng.random(self.N) < self.config.epi.vax_uptake
+        
 
         #State tracking variables; S = 0, E = 1, I = 2, R = 3
         self.state = np.zeros(self.N, dtype = np.int8) 
@@ -286,7 +287,7 @@ class NetworkModel:
         self.lhd = LocalHealthDepartment(
             model = self,
             seed = self.lhd_seed,
-            discovery_prob = self.config.lhd.lhd_discovery_prob,
+            surv_seed = self.surv_seed,
             capacity = self.config.lhd.lhd_daily_capacity,
             register_defaults = self.lhd_register_defaults,
             algorithm_map = self.lhd_algorithm_map,
@@ -503,13 +504,22 @@ class NetworkModel:
         self.new_exposures.append(newly_exposed.copy())
         self.new_infections.append(to_infectious)
 
-        return trans_src, newly_exposed, trans_ct
+        epi_state = {
+            "new_pre_ids": newly_exposed.copy(), #Newly exposed/pre-infectious
+            "new_inf_ids": to_infectious.astype(np.int32, copy=False), #New I
+            "pre_ids": np.array(E, dtype = np.int32), #all E
+            "inf_ids": np.array(I, dtype = np.int32) #all I
+        }
+
+
+        return trans_src, newly_exposed, trans_ct, epi_state
 
 
     def simulate(self):
 
         for run in range(self.n_replicates):
             transmissions_over_time = []
+            surv_over_time = []
             self._initialize_replicate(run)
             #store vaccination status for run
             self.all_vax_status[run] = self.is_vaccinated.copy()
@@ -519,15 +529,21 @@ class NetworkModel:
                 t += 1 #day 0 is recorded in initialization
                 self.current_time = t
 
-                #advance SEIR and record
-                trans_src, trans_tgt, trans_ct = self.step()
-
+                #advance SEIR 
+                trans_src, trans_tgt, trans_ct, epi_state = self.step()
+                
+                #Update transmission tracking
                 transmissions_over_time.append({
                     "time":np.int32(self.current_time),
                     "src":trans_src.copy(),
                     "tgt": trans_tgt.copy(),
                     "ct": trans_ct.copy()
                 })
+
+                #Pass updated epidemiological states to surveillance
+                batch = batch = self.lhd.step(t=self.current_time, epi_state=epi_state)
+
+                surv_over_time.append(batch)
 
                 #Run LHD step once
                 # self.lhd.step(self.current_time, snapshot)
@@ -544,6 +560,7 @@ class NetworkModel:
             self.all_stochastic_dieout[run] = self.stochastic_dieout
             self.all_end_days[run] = self.simulation_end_day
             self.all_new_exposures[run] = [ne.copy() for ne in self.new_exposures]
+            self.all_surveillance_batches[run] = surv_over_time
 
 
 

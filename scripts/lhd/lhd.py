@@ -6,6 +6,8 @@ from collections import defaultdict
 
 from scripts.lhd.actions import ActionBase, ActionToken, CallIndividualsAction
 from scripts.lhd.algorithms import AlgorithmBase, RandomPriority
+from scripts.lhd.surveillance import SurveillanceModel
+
 
 if TYPE_CHECKING:
     from scripts.simulation.outbreak_model import NetworkModel
@@ -15,9 +17,9 @@ class LocalHealthDepartment:
     def __init__(
         self, 
         seed: int,
+        surv_seed: int,
         model: NetworkModel, 
         capacity: Optional[int] = None,
-        discovery_prob: float = None,  
         register_defaults: bool = True,
         algorithm_map: Optional[Dict[str, object]] = None,
         action_factory_map: Optional[Dict[str, Callable[..., ActionBase]]] = None
@@ -25,14 +27,14 @@ class LocalHealthDepartment:
     #LHD settings
         self.model = model
         self.seed = seed
+        self.surv_seed = surv_seed
         self.rng = np.random.default_rng(seed)
+        self.p_detect_inf = self.model.config.lhd.p_detect_inf
+        self.capacity = capacity
+        self.report_delay_days = self.model.config.lhd.report_delay_days
 
         self.daily_capacity = int(capacity) if capacity is not None else int(self.model.config.lhd.lhd_daily_capacity)
         
-        self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.config.lhd.lhd_discovery_prob
-
-
-
     #Algorithm -> algorithm instance
         self.algorithms: Dict[str, AlgorithmBase] = {}
     #action factories: action_type -> callable to return ActionBase
@@ -79,9 +81,17 @@ class LocalHealthDepartment:
         if action_factory_map:
             for atype, factory in action_factory_map.items():
                 self.register_action_factory(atype, factory, overwrite = True)
+
+        #Set-up surveillance object
+        self.surveillance = SurveillanceModel(
+            seed = surv_seed,
+            N = self.model.N,
+            ages = self.model.ages,
+            is_vax = self.model.is_vaccinated,
+            p_detect_inf= self.p_detect_inf,
+            report_delay_days = self.report_delay_days
+        )
             
-
-
     ##registration helpers
     # map algorithms action_type -> algorithm
     def register_algorithm(self, action_type: str, algorithm: AlgorithmBase, overwrite: bool = False) -> None:
@@ -104,18 +114,9 @@ class LocalHealthDepartment:
             warnings.warn(f"Overwriting existing action factory for action '{action_type}'")
         self.action_factories[action_type] = factory
 
-    def discover_exposures(self, recorder_snapshot):
-        """
-        Given recorder snapshot dict, select which events the LHD discovers
-        Random based on LHD discovery probability
-        """
-        n_events = recorder_snapshot['event_time'].shape[0]
-        if n_events == 0:
-            return np.empty(0, dtype = int)
-        
-        #bernoulli sample each event
-        mask = self.rng.random(n_events) < self.discovery_prob
-        return np.where(mask)[0]
+    def observe(self, t: int, epi_state: Dict[str, np.ndarray], scheduled_actions: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
+        return self.surveillance.step(t=t, epi_state=epi_state, scheduled_actions=scheduled_actions)
+
 
     def gather_candidates(self, recorder_snapshot, discovered_event_ind):
         """
@@ -287,73 +288,23 @@ class LocalHealthDepartment:
             else:
                 warnings.warn(f"No registered action object for token.action_id {token.action_id}")
 
-    def step(self, current_time: int, recorder_snapshot: Dict[str, np.ndarray]):
+    def step(self, *, t: int, epi_state: Dict[str, np.ndarray], scheduled_surv_actions: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
+
         """
-        One step for the LHD where it discovers events, builds candidates, selects calls, and applies interventions
+        One step for the LHD where it:
+        1) Processes old interventions
+        2) Observes reported cases through surveillance 
         """
+
 
         #1 expire old interventions
-        self.process_expirations(current_time)
+        self.process_expirations(t)
 
-        #2 discover new events
-        discovered_event_ind = self.discover_exposures(recorder_snapshot)
+       #2) Observe events through surveillance
+        batch = self.observe(t=t, epi_state = epi_state, scheduled_actions = scheduled_surv_actions) 
 
-        #3 gather action candidates through algorithms
-        (action_types_arr, nodes_arr, prios_arr, contact_types_arr, costs_arr, params_arr) = self.gather_candidates(recorder_snapshot, discovered_event_ind)
-        if nodes_arr.size == 0:
-            return
+        return batch
 
-        #4 select actions maximizing value/hour (prio / cost)
-        costs_arr = np.maximum(costs_arr, self.min_candidate_cost)
-        value_per_cost = prios_arr/costs_arr
-        order = np.argsort(-value_per_cost)
-
-        #allocate actions by value until hours are exhausted 
-        capacity_available = int(self.daily_capacity)
-        capacity_spent = 0
-        selected_indices = []
-        for ind in order:
-            c = int(costs_arr[ind])
-            if capacity_spent + c <= capacity_available:
-                capacity_spent += c
-                selected_indices.append(ind)
-            else:
-                continue
-
-        #5 group selected actions by action_type, contact_type and schedule
-        grouped = defaultdict(list)
-        grouped_costs = defaultdict(int)
-        grouped_params = defaultdict(list)
-        for ind in selected_indices:
-            atype = action_types_arr[ind]
-            ctype = contact_types_arr[ind]
-            key = (atype, ctype)
-            grouped[key].append(int(nodes_arr[ind]))
-            grouped_costs[key] += int(costs_arr[ind])
-            grouped_params[key].append(params_arr[ind] if params_arr is not None else None)
-
-        #create an action for each group and schedule
-        for (atype, ctype), nodes in grouped.items():
-            factory = self.action_factories.get(atype)
-            if factory is None:
-                #skip if no action factory registered
-                continue
-            #choose params and pass merged dict or None
-            params_list_group = grouped_params[(atype, ctype)]
-            merged_params = None
-            for p in params_list_group:
-                if isinstance(p, dict):
-                    merged_params = merged_params or {}
-                    merged_params.update(p)
-
-            #create action instance 
-            #use sum of costs or average priority for group
-            group_cost = grouped_costs[(atype, ctype)]
-            group_prio = float(np.mean([prios_arr[ind] for ind in selected_indices if action_types_arr[ind] == atype and contact_types_arr[ind] == ctype]))
-            action = factory(np.asarray(nodes, dtype = np.int32), ctype, group_prio, group_cost, merged_params)
-            self.schedule_action(action, current_time, cost_units = group_cost)
-
-        return
     def reset_for_run(self):
         """
         Reset LHD state for new model run 
@@ -362,3 +313,5 @@ class LocalHealthDepartment:
         self.action_log = []
         self._active_actions = {}
         self._action_token_counts = {}
+        if hasattr(self, "surveillance") and self.surveillance is not None:
+            self.surveillance.reset_for_run(seed=self.surveillance.seed, is_vax = self.model.is_vaccinated)

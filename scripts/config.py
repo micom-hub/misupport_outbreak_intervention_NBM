@@ -39,10 +39,11 @@ class PopulationParams:
 class LHDParams:
     lhd_daily_capacity: int = 100
     mean_compliance: float = 1.0
-    lhd_discovery_prob: float = 0.25
     lhd_default_call_cost: float = 1
     lhd_default_int_reduction: float = 0.8
     lhd_default_int_duration: int = 10
+    p_detect_inf: float = 0.25
+    report_delay_days: int = 1
 
 
 @dataclass(frozen=True)
