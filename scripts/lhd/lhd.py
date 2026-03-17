@@ -5,6 +5,7 @@ import warnings
 from collections import defaultdict
 
 from scripts.lhd.actions import ActionBase, ActionToken, CallIndividualsAction
+from scripts.lhd.state import LHDState
 from scripts.lhd.algorithms import AlgorithmBase, RandomPriority
 from scripts.lhd.surveillance import SurveillanceModel
 
@@ -24,15 +25,13 @@ class LocalHealthDepartment:
         algorithm_map: Optional[Dict[str, object]] = None,
         action_factory_map: Optional[Dict[str, Callable[..., ActionBase]]] = None
     ):
-    #LHD settings
+    #Unpack LHD settings
         self.model = model
         self.seed = seed
         self.surv_seed = surv_seed
         self.rng = np.random.default_rng(seed)
         self.p_detect_inf = self.model.config.lhd.p_detect_inf
-        self.capacity = capacity
         self.report_delay_days = self.model.config.lhd.report_delay_days
-
         self.daily_capacity = int(capacity) if capacity is not None else int(self.model.config.lhd.lhd_daily_capacity)
         
     #Algorithm -> algorithm instance
@@ -91,6 +90,10 @@ class LocalHealthDepartment:
             p_detect_inf= self.p_detect_inf,
             report_delay_days = self.report_delay_days
         )
+
+        #Set-up LHD knowledge state
+        self.state = LHDState(N = self.model.N)
+
             
     ##registration helpers
     # map algorithms action_type -> algorithm
@@ -300,10 +303,25 @@ class LocalHealthDepartment:
         #1 expire old interventions
         self.process_expirations(t)
 
-       #2) Observe events through surveillance
+        #2) Observe events through surveillance
         batch = self.observe(t=t, epi_state = epi_state, scheduled_actions = scheduled_surv_actions) 
 
+        #3 Update knowledge based on observed batch
+        self.state.process_batch(batch)
+
         return batch
+
+
+
+    def respond(self, *, t: int, batch: Dict[str, np.ndarray]) -> None:
+        """
+        Will generate candidates from self.state + batch & schedule actions
+        """
+
+
+
+
+        return 
 
     def reset_for_run(self):
         """
@@ -315,3 +333,5 @@ class LocalHealthDepartment:
         self._action_token_counts = {}
         if hasattr(self, "surveillance") and self.surveillance is not None:
             self.surveillance.reset_for_run(seed=self.surveillance.seed, is_vax = self.model.is_vaccinated)
+        if hasattr(self, "state") and self.state is not None:
+            self.state.reset_for_run()
