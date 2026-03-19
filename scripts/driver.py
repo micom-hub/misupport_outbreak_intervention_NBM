@@ -157,8 +157,6 @@ def run_single_model(
     cfg: Union[ModelConfig, str, Path],
     output_dir: Optional[str] = None,
     *,
-    algorithm_map: Optional[Dict[str, object]] = None,
-    factory_map: Optional[Dict[str, callable]] = None,
     seed: Optional[int] = None
     ) -> NetworkModel:
     """
@@ -186,8 +184,6 @@ def run_single_model(
     #Overwrite seed if one is provided 
     if seed is not None:
         cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
-
-    run_rng = np.random.default_rng(int(cfg.sim.seed))
 
 
     #Figure out what contacts_src is, and normalize
@@ -255,17 +251,10 @@ def run_single_model(
         graphdata = run_graphdata, 
         run_dir = str(run_dir),
         seed = cfg.sim.seed,
-        lhd_register_defaults = False,
-        lhd_algorithm_map = algorithm_map,
-        lhd_action_factory_map = factory_map
     )
 
     # Run simulation
     model.simulate()
-
-    # Optional save exposures (legacy behavior)
-    if cfg.sim.record_exposure_events and run_dir:
-        np.savez_compressed(str(run_dir / "exposure_event_log.npz"), *model.exposure_event_log)
 
     return model
 

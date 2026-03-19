@@ -14,7 +14,7 @@ import pandas as pd
 
 # imports from your codebase
 from scripts.variants.run_variants_funcs import prepare_run, run_parameter_set
-from scripts.lhd.lhdConfig import LhdConfig, LHD_CONFIGURATION
+from scripts.lhd.policy_config import PolicyConfig, POLICY_CONFIGURATION
 from scripts.config import ModelConfig
 
 from scripts.visualization.viz import (
@@ -26,7 +26,7 @@ from scripts.visualization.viz import (
 def run_experiment(
     csv_path: str,
     n_samples: int,
-    lhd_config: LhdConfig,
+    policy_config: PolicyConfig,
     output_dir: Union[str, Path],
     *,
     base_cfg: Optional[ModelConfig] = None,
@@ -39,6 +39,7 @@ def run_experiment(
     save_summary: bool = True,
     save_incidence: bool = False,
     save_prevalence: bool = False,
+    save_lhd_results: bool = True,
     summary_metrics: Optional[List[str]] = None,
     overwrite_runs: bool = True,#Run results
     clean_dir: bool = False
@@ -94,7 +95,7 @@ def run_experiment(
                     exe.submit(
                         run_parameter_set,
                         contacts_df,
-                        lhd_config,
+                        policy_config,
                         configs_list[i],
                         master_gd,
                         str(out_base),
@@ -104,6 +105,7 @@ def run_experiment(
                         save_summary=save_summary,
                         save_incidence=save_incidence,
                         save_prevalence=save_prevalence,
+                        save_lhd_results = save_lhd_results,
                         summary_metrics=summary_metrics,
                         overwrite=overwrite_runs,
                     ): i
@@ -130,7 +132,7 @@ def run_experiment(
             for i in indices:
                 res = run_parameter_set(
                     contacts_df,
-                    lhd_config,
+                    policy_config,
                     configs_list[i],
                     master_gd,
                     str(out_base),
@@ -140,6 +142,7 @@ def run_experiment(
                     save_summary=save_summary,
                     save_incidence=save_incidence,
                     save_prevalence=save_prevalence,
+                    save_lhd_results = save_lhd_results,
                     summary_metrics=summary_metrics,
                     overwrite=overwrite_runs,
                 )
@@ -152,7 +155,7 @@ def run_experiment(
         for i in indices:
             res = run_parameter_set(
                 contacts_df,
-                lhd_config,
+                policy_config,
                 configs_list[i],
                 master_gd,
                 str(out_base),
@@ -162,6 +165,7 @@ def run_experiment(
                 save_summary=save_summary,
                 save_incidence=save_incidence,
                 save_prevalence=save_prevalence,
+                save_lhd_results = save_lhd_results,
                 summary_metrics=summary_metrics,
                 overwrite=overwrite_runs
             )
@@ -232,6 +236,13 @@ def run_experiment(
             outp = out_base / "aggregated_prevalence.parquet"
             _atomic_write_parquet(df_all, outp)
             aggregated_paths["prevalence"] = str(outp)
+            
+    if save_lhd_results:
+        df_all = _collect_and_concat("lhd_results.parquet")
+        if df_all is not None:
+            outp = out_base / "aggregated_prevalence.parquet"
+            _atomic_write_parquet(df_all, outp)
+            aggregated_paths["prevalence"] = str(outp)
 
     if clean_dir:
         print("[run_experiment] cleaning per-model run directories...")
@@ -258,11 +269,11 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
 
 if __name__ == "__main__":
 
-    #Uses LHD_CONFIGURATION defined in scripts/lhd/lhdConfig.py
+    #Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
     result = run_experiment(
         csv_path="testLHS.csv",
         n_samples=2,
-        lhd_config=LHD_CONFIGURATION,
+        policy_config=POLICY_CONFIGURATION,
         output_dir="model_runs/experiment_002",
         base_cfg=None,
         seed=3,

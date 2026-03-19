@@ -2,17 +2,9 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any, Union
-import json
-import os
-import traceback
-import concurrent.futures
-import multiprocessing
-import time
-import copy
-from line_profiler import profile
-import hashlib
 
-import numpy as np
+from line_profiler import profile
+
 import pandas as pd
 from scripts.utils.rng_utility import derive_seed_from_base
 from scripts.variants.csv_to_lhs import csv_to_cfg
@@ -23,7 +15,7 @@ from scripts.graph.graph_utils import (GraphData,
 )
 from scripts.driver import prepare_contacts, read_or_build_master
 from scripts.config import ModelConfig
-from scripts.lhd.lhdConfig import LhdConfig, validate_variant
+from scripts.lhd.policy_config import PolicyConfig, validate_variant
 from scripts.simulation.outbreak_model import NetworkModel
 
 
@@ -92,7 +84,7 @@ def prepare_run(
 
 
 def run_variants(
-    lhd_config: LhdConfig,
+    policy_config: PolicyConfig,
     cfg: ModelConfig,
     graphdata: GraphData,
     output_dir: Union[str, Path],
@@ -104,6 +96,7 @@ def run_variants(
     save_summary: bool = True,
     save_incidence: bool = False,
     save_prevalence: bool = False,
+    save_lhd_results: bool = True,
     summary_metrics: Optional[List[str]] = None
 ) -> List[NetworkModel]:
     """
@@ -151,26 +144,21 @@ def run_variants(
     summary_dfs = []
     incidence_dfs = []
     prevalence_dfs = []
+    lhd_daily_dfs = []
 
 
     #Loop across each variant, instantiate and simulate model, run, write result
-    for variant in lhd_config.variants:
-
+    for variant in policy_config.variants:
         validate_variant(variant)
 
-        #Create clean copy of algorithms/actions to pass
-        alg_map_copy = {k: copy.deepcopy(v) for k, v in variant.algorithm_map.items()}
-        act_map_copy = {k: copy.deepcopy(v) for k, v in variant.action_factory_map.items()}
+        cfg_var = _cfg_with_policy_variant(cfg, variant)
 
 
         model = NetworkModel(
-            config = cfg,
+            config = cfg_var,
             graphdata = graphdata,
             run_dir = str(run_dir),
-            seed = seed,
-            lhd_register_defaults = register_defaults,
-            lhd_algorithm_map = dict(alg_map_copy),
-            lhd_action_factory_map = dict(act_map_copy)
+            seed = seed
         )
 
         try:
@@ -193,6 +181,31 @@ def run_variants(
             df_prevalence.insert(0, "variant_name", variant.name)
             prevalence_dfs.append(df_prevalence)
 
+        if save_lhd_results:
+            parts = []
+            all_lhd = getattr(model, "all_lhd_results", None)
+            if all_lhd is not None:
+                for run_number, df in enumerate(all_lhd):
+                    if df is None:
+                        continue
+                    d = df.copy()
+                    if "run_number" not in d.columns:
+                        d.insert(0, "run_number", int(run_number))
+                    d.insert(0, "variant_name", variant.name)
+                    parts.append(d)
+            else:
+                # fallback: if only the last replicate exists
+                lhd_obj = getattr(model, "lhd", None)
+                if lhd_obj is not None and hasattr(lhd_obj, "results_to_df"):
+                    d = lhd_obj.results_to_df().copy()
+                    d.insert(0, "run_number", 0)
+                    d.insert(0, "variant_name", variant.name)
+                    parts.append(d)
+
+            if parts:
+                lhd_daily_dfs.append(pd.concat(parts, ignore_index=True, sort=False))
+
+
         models.append(model)
 
     #Write all results into an aggregated file under run_dir
@@ -207,6 +220,9 @@ def run_variants(
         df_overall_prevalence = pd.concat(prevalence_dfs, ignore_index=True, sort = False)
         df_overall_prevalence.to_parquet(str(run_dir / "prevalence.parquet"))
 
+    if save_lhd_results and lhd_daily_dfs:
+        pd.concat(lhd_daily_dfs, ignore_index=True, sort=False).to_parquet(str(run_dir / "lhd_results.parquet"))
+
 
     return models
 
@@ -214,7 +230,7 @@ def run_variants(
 
 def run_parameter_set(
     contacts_df: pd.DataFrame,
-    lhd_config: LhdConfig,
+    policy_config: PolicyConfig,
     cfg: ModelConfig,
     master_gd: Dict,
     output_dir: Union[str, Path],
@@ -225,6 +241,7 @@ def run_parameter_set(
     save_summary: bool = False,
     save_incidence: bool = False,
     save_prevalence: bool = False,
+    save_lhd_results: bool = True,
     summary_metrics: Optional[List[str]] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -233,7 +250,7 @@ def run_parameter_set(
 
     Args:
         contacts_df: Contact dataframe
-        lhd_config: LhdConfig object detailing variants to run
+        policy_config: PolicyConfig object detailing variants to run
         cfg: ModelConfig for given parameter set (derived from a row of LHS)
         master_gd: minimal graphdata object
         output_dir: base experiment output directory
@@ -277,7 +294,7 @@ def run_parameter_set(
 
     #3) Initialize and simulate model
     models = run_variants(
-        lhd_config,
+        policy_config,
         cfg,
         graphdata = run_graphdata,
         output_dir = str(out_base),
@@ -288,6 +305,7 @@ def run_parameter_set(
         save_summary=save_summary,
         save_incidence=save_incidence,
         save_prevalence=save_prevalence,
+        save_lhd_results = save_lhd_results,
         summary_metrics=summary_metrics,
         overwrite=overwrite
     )
@@ -302,3 +320,13 @@ def run_parameter_set(
 
 
 
+#Helper to generate variants
+def _cfg_with_policy_variant(cfg: ModelConfig, variant) -> ModelConfig:
+    """
+    Return a config copy with lhd.policy_name and optional lhd overrides applied.
+    Requires ModelConfig.copy_with to support nested dicts (as your code already uses).
+    """
+    patch = {"lhd": {"policy_name": str(variant.policy_name)}}
+    if getattr(variant, "lhd_overrides", None):
+        patch["lhd"].update(dict(variant.lhd_overrides))
+    return cfg.copy_with(patch)

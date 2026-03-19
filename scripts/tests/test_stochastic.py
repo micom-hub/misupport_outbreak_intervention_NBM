@@ -94,7 +94,6 @@ class DummyModelConfig:
 
         self.lhd = type("L", (), {})()
         self.lhd.lhd_discovery_prob = 0.0
-        self.lhd.lhd_employees = 0
         self.lhd.lhd_workday_hrs = 8.0
         self.lhd.mean_compliance = 1.0
         self.lhd.lhd_default_int_reduction = 0.0

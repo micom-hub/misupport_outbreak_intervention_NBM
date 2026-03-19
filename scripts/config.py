@@ -35,12 +35,14 @@ class PopulationParams:
     cas_weight: float = 0.1
 
 
+#Note that reduction is percent REMOVED
 @dataclass(frozen=True)
 class LHDParams:
+    policy_name: str = "observe_only"
     lhd_daily_capacity: int = 100
     mean_compliance: float = 1.0
     lhd_default_call_cost: float = 1
-    lhd_default_int_reduction: float = 0.8
+    lhd_default_int_reduction: float = 0.2
     lhd_default_int_duration: int = 10
     p_detect_inf: float = 0.25
     report_delay_days: int = 1
@@ -133,8 +135,8 @@ class ModelConfig:
             raise ValueError("epi.vax_uptake must be in [0,1]")
         if self.sim.n_replicates < 1:
             raise ValueError("sim.n_replicates must be >= 1")
-        if self.lhd.lhd_employees < 0:
-            raise ValueError("lhd.lhd_employees must be >= 0")
+        if self.lhd.lhd_daily_capacity < 0:
+            raise ValueError("lhd.lhd_daily_capacity must be >= 0")
         if not isinstance(self.sim.I0, (list, int)):
             raise ValueError("sim.I0 must be an integer or list")
         if not (self.sim.master_casual_candidates >= self.population.cas_contacts):

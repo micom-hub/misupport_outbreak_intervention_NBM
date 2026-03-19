@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 import igraph as ig
-from typing import Dict, Any, Optional, Callable, List
+from typing import Optional, List
 import matplotlib.pyplot as plt
 from numba import njit
 from numba.typed import List as NumbaList
@@ -130,9 +130,6 @@ class NetworkModel:
         run_dir: str,
         *,
         seed: Optional[int] = None,
-        lhd_register_defaults: bool = True,
-        lhd_algorithm_map: Optional[Dict[str, object]] = None,
-        lhd_action_factory_map: Optional[Dict[str, Callable[..., Any]]] = None
         ):
         """
         Unpack config and graphdata
@@ -169,6 +166,7 @@ class NetworkModel:
         self.all_surveillance_batches = [None] * self.n_replicates
         self.all_stochastic_dieout = np.zeros(self.n_replicates, dtype = bool)
         self.all_end_days = np.ones(self.n_replicates, dtype = int)*self.Tmax
+        self.all_lhd_results = [None] * self.n_replicates
 
         self.all_vax_status = [None] * self.n_replicates
 
@@ -177,11 +175,6 @@ class NetworkModel:
         #Create if not created by driver
         if self.config.sim.save_data_files:
                 os.makedirs(self.results_folder, exist_ok = True)
-
-        #Unpack LHD specs
-        self.lhd_register_defaults = lhd_register_defaults
-        self.lhd_algorithm_map = lhd_algorithm_map
-        self.lhd_action_factory_map = lhd_action_factory_map
 
    
     def _assign_graphdata_to_model(self, graphdata: GraphData):
@@ -289,9 +282,7 @@ class NetworkModel:
             seed = self.lhd_seed,
             surv_seed = self.surv_seed,
             capacity = self.config.lhd.lhd_daily_capacity,
-            register_defaults = self.lhd_register_defaults,
-            algorithm_map = self.lhd_algorithm_map,
-            action_factory_map = self.lhd_action_factory_map
+            policy_name = getattr(self.config.lhd, "policy_name", "observe_only")
         )
 
         self.lhd.reset_for_run()
@@ -561,6 +552,7 @@ class NetworkModel:
             self.all_end_days[run] = self.simulation_end_day
             self.all_new_exposures[run] = [ne.copy() for ne in self.new_exposures]
             self.all_surveillance_batches[run] = surv_over_time
+            self.all_lhd_results[run] = self.lhd.results_to_df()
 
 
 
