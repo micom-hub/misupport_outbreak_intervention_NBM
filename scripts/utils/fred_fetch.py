@@ -78,7 +78,7 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
     # Wait for download to finish (very basic!)
     import time
 
-    time.sleep(5)  # Increase if file is large!
+    time.sleep(.3)  # Increase if file is large!
 
     driver.quit()
 
@@ -91,7 +91,6 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
 
     # find the numeric prefix as it is important
     match = re.search(r"(\d+).*\.zip$", latest_zip)
-    print(match)
     if match:
         county_prefix = match.group(1)
 
