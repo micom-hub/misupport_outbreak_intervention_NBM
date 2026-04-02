@@ -243,6 +243,7 @@ class LocalHealthDepartment:
 
         return batch
 
+
     #Results writer helper
     def _log_day(self, *, t: int, batch: Dict[str, np.ndarray], proposals: List[ActionProposal], plan: ActionPlan, summary: ExecutionSummary) -> None:
         rep = np.asarray(batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32)
@@ -283,6 +284,11 @@ class LocalHealthDepartment:
 
 
 
+    #Helper to convert to nodes dtype
+    def _as_nodes(self, targets) -> np.ndarray:
+        return np.asarray(targets, dtype=np.int32)
+
+
     #Reset Helper
     def reset_for_run(self):
         """
@@ -296,3 +302,6 @@ class LocalHealthDepartment:
             self.surveillance.reset_for_run(seed=self.surveillance.seed, is_vax = self.model.is_vaccinated)
         if hasattr(self, "state") and self.state is not None:
             self.state.reset_for_run()
+
+
+
