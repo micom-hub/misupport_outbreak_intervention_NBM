@@ -11,10 +11,8 @@ The script:
 
 import os
 from pathlib import Path
-from typing import Dict, Optional, Union
-import numpy as np
+from typing import Optional, Union, Dict, Any
 import pandas as pd
-from datetime import datetime
 from line_profiler import profile
 
 
@@ -138,7 +136,7 @@ def read_or_build_master(
     master_df = build_edge_list(
         contacts_df=contacts_df,
         config=cfg,
-        seed= cfg.sim.seed,
+        seed= int(seed) if seed is not None else int(cfg.sim.seed),
         save=False,
         county=cfg.sim.county,
         master_casual_contacts=int(cfg.sim.master_casual_candidates)
@@ -157,7 +155,10 @@ def run_single_model(
     cfg: Union[ModelConfig, str, Path],
     output_dir: Optional[str] = None,
     *,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    policy_name: Optional[str] = None,
+    lhd_overrides: Optional[Dict[str, Any]] = None,
+    save_lhd_results: bool = True
     ) -> NetworkModel:
     """
     Driver function to run a single model
@@ -166,7 +167,10 @@ def run_single_model(
         contacts_src: as a contacts_df object, a filepath, or county name
         cfg: ModelConfig object for run or absolute filepath to a ModelConfig.json saved by ModelConfig.to_json
         output_dir: base directory for model outputs, defaults to "model_runs"
+
+
         seed: optional seed to overwrite cfg.sim.seed
+        policy_name: optional policy name override 
     """
 
     #If cfg is a filepath, build ModelConfig
@@ -181,9 +185,19 @@ def run_single_model(
     except Exception:
         raise
     
-    #Overwrite seed if one is provided 
+    #Overwrite seed if provided
     if seed is not None:
         cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
+
+    #overwrite policy or parameters if necessary
+    if policy_name is not None or lhd_overrides:
+        patch = {"lhd": {}}
+        if policy_name is not None:
+            patch["lhd"]["policy_name"] = str(policy_name)
+        if lhd_overrides:
+            patch["lhd"].update(dict(lhd_overrides))
+        cfg = cfg.copy_with(patch)
+
 
 
     #Figure out what contacts_src is, and normalize
@@ -255,6 +269,7 @@ def run_single_model(
 
     # Run simulation
     model.simulate()
+    model.results_to_df().to_csv(os.path.join(run_dir, "summary.csv"), index=False)
 
     return model
 
@@ -278,7 +293,14 @@ if __name__ == "__main__":
         }
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state, save_files = True)
-    model = run_single_model(contacts, cfg, seed = 13 )
-    model.results_to_df().to_csv("testingresults.csv", index=False)
+    model = run_single_model(contacts, cfg, seed = 13, 
+    policy_name="trace_then_isolate", 
+    lhd_overrides= {
+        "lhd_daily_capacity": 1000, 
+        "lhd_default_int_reduction": .99,  
+        "lhd_default_int_duration": 20, 
+        "p_detect_inf": 0.5  
+        }
+        )
     
     

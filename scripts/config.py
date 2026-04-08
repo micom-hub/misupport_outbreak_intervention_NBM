@@ -35,14 +35,13 @@ class PopulationParams:
     cas_weight: float = 0.1
 
 
-#Note that reduction is percent REMOVED
 @dataclass(frozen=True)
 class LHDParams:
     policy_name: str = "observe_only"
     lhd_daily_capacity: int = 100
     mean_compliance: float = 1.0
     lhd_default_call_cost: float = 1
-    lhd_default_int_reduction: float = 0.2
+    lhd_default_int_reduction: float = 0.2 #frac removed
     lhd_default_int_duration: int = 10
     p_detect_inf: float = 0.25
     report_delay_days: int = 1

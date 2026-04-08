@@ -13,7 +13,7 @@ from scripts.graph.graph_utils import (GraphData,
     build_graph_data,
     sample_from_master_graphdata,
 )
-from scripts.driver import prepare_contacts, read_or_build_master
+from scripts.singledriver import prepare_contacts, read_or_build_master
 from scripts.config import ModelConfig
 from scripts.lhd.policy_config import PolicyConfig, validate_variant
 from scripts.simulation.outbreak_model import NetworkModel
