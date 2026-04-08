@@ -1,4 +1,4 @@
-#scripts/lhd/lhd.py
+# scripts/lhd/lhd.py
 from typing import TYPE_CHECKING, Optional, Dict, List, Any
 from collections import defaultdict, Counter
 import numpy as np
@@ -48,14 +48,14 @@ class LocalHealthDepartment:
         self.surv_seed = surv_seed
         self.rng = np.random.default_rng(seed)
 
-    #capacity 
+        # capacity
         self.daily_capacity = int(capacity) if capacity is not None else int(self.model.config.lhd.lhd_daily_capacity)
-    
-    #baseline surveillance parameters
+
+        # baseline surveillance parameters
         self.p_detect_inf = self.model.config.lhd.p_detect_inf
         self.report_delay_days = self.model.config.lhd.report_delay_days
-    
-    #Default parameter values (control + info)
+
+        # Default parameter values (control + info)
         self.min_factor = 1e-6
         self.default_iso_reduction = float(self.model.config.lhd.lhd_default_int_reduction)
         self.default_iso_duration = int(self.model.config.lhd.lhd_default_int_duration)
@@ -75,7 +75,7 @@ class LocalHealthDepartment:
             "spec": 1.0, #no false-positives (yet)
             "report_delay_days": self.report_delay_days,
         }
-    #Instantiate surveillance object
+        # Instantiate surveillance object
         self.surveillance = SurveillanceModel(
             neighbor_map=self.model.neighbor_map,
             ct_to_id=self.model.ct_to_id,
@@ -87,11 +87,10 @@ class LocalHealthDepartment:
             report_delay_days=self.report_delay_days,
         )
 
-    #Instantiate LHDState 
+        # Instantiate LHDState
         self.state = LHDState(N = self.model.N)
 
-
-    #Assemble the LHD policy (algo + planner)
+        # Assemble the LHD policy (algo + planner)
         cfg_name = getattr(self.model.config.lhd, "policy_name", "observe_only")
         self.policy_name = str(policy_name or cfg_name)
 
@@ -114,16 +113,19 @@ class LocalHealthDepartment:
 
         self.executor = Executor()
 
-        #expiry tokens day -> list[tokens]
+        # expiry tokens day -> list[tokens]
         self._expiry_tokens_by_day = defaultdict(list)
 
         self._results_rows = []
 
-    #-------------------------------------------
-    #Helpers for scheduling and expiring actions
-    #-------------------------------------------
+    # -------------------------------------------
+    # Helpers for scheduling and expiring actions
+    # -------------------------------------------
     def _schedule_token(self, tok: MultiplierToken) -> None:
         self._expiry_tokens_by_day[int(tok.expires_at)].append(tok)
+
+    def _as_nodes(self, targets) -> np.ndarray:
+        """Helper to convert targets to a numpy array of int32 nodes."""
 
     def process_expirations(self, t: int) -> int:
         """
@@ -134,18 +136,21 @@ class LocalHealthDepartment:
             tok.revert(self.model)
         return int(len(due))
 
-
-    #------------
-    #Surveillance
-    #------------
+    # ------------
+    # Surveillance
+    # ------------
     def observe(self, *, t: int, epi_state: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        #Provide state change to surveillance, get back observations
+        # Provide state change to surveillance, get back observations
         return self.surveillance.step(t=int(t), epi_state=epi_state, scheduled_actions=None)
-
 
     # ---------------
     # Action Handling
     # ---------------
+    def _apply_isolation(
+        self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]
+    ) -> tuple[int, int]:
+        """Applies isolation to a set of nodes, modifying multipliers and scheduling tokens."""
+
     def _apply_isolation(self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]) -> tuple[int, int]:
         """
         For a given set of nodes and isolation parameters, order isolation
@@ -186,7 +191,10 @@ class LocalHealthDepartment:
         return int(nodes.size), tokens_added
 
     def _order_trace(self, *, t: int, cases: np.ndarray, params: Dict[str, Any]) -> int:
-        #Order contact tracing on given node(s)
+        """Orders contact tracing for given cases through the surveillance model."""
+
+    def _order_trace(self, *, t: int, cases: np.ndarray, params: Dict[str, Any]) -> int:
+        # Order contact tracing on given node(s)
         cases = np.asarray(cases, dtype=np.int32)
         if cases.size == 0:
             return 0
@@ -196,7 +204,10 @@ class LocalHealthDepartment:
         return int(cases.size)
 
     def _order_test(self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]) -> int:
-        #Order tests for given node(s)
+        """Orders testing for given nodes through the surveillance model."""
+
+    def _order_test(self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]) -> int:
+        # Order tests for given node(s)
         nodes = np.asarray(nodes, dtype=np.int32)
         if nodes.size == 0:
             return 0
@@ -204,7 +215,6 @@ class LocalHealthDepartment:
         merged.update(params or {})
         self.surveillance.order_test(t=int(t), nodes=nodes, params=merged)
         return int(nodes.size)
-
 
     def step(self, *, t: int, epi_state: Dict[str, np.ndarray], scheduled_surv_actions: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
 
@@ -216,35 +226,44 @@ class LocalHealthDepartment:
         """
         t = int(t)
 
-        #1) Process old interventions that are expiring
+        # 1) Process old interventions that are expiring
         expired = self.process_expirations(t)
 
-        #2) Conduct surveillance on daily updates
+        # 2) Conduct surveillance on daily updates
         batch = self.observe(t = t, epi_state = epi_state)
 
-        #3) Integrate findings to knowledge state
+        # 3) Integrate findings to knowledge state
         self.state.process_batch(batch)
 
-        #4) Have algorithms propose actions to take
+        # 4) Have algorithms propose actions to take
         proposals = []
         for algo in self.algorithms:
             proposals.extend(algo.propose(self.state))
 
-        #5) Use planner to allocate resources to proposals
+        # 5) Use planner to allocate resources to proposals
         plan: ActionPlan = self.planner.select(proposals, capacity = self.daily_capacity)
 
-        #7) Pass ActionPlan to executor
+        # 7) Pass ActionPlan to executor
         exec_summary: ExecutionSummary = self.executor.execute(lhd = self, t = t, plan = plan)
         exec_summary.tokens_expired = expired
 
-        #8) Record results of the day 
+        # 8) Record results of the day
         self._log_day(t=t, batch=batch, proposals=proposals, plan=plan, summary=exec_summary)
-
 
         return batch
 
+    def _log_day(
+        self,
+        *,
+        t: int,
+        batch: Dict[str, np.ndarray],
+        proposals: List[ActionProposal],
+        plan: ActionPlan,
+        summary: ExecutionSummary,
+    ) -> None:
+        """Records daily LHD metrics and actions for later aggregation."""
 
-    #Results writer helper
+    # Results writer helper
     def _log_day(self, *, t: int, batch: Dict[str, np.ndarray], proposals: List[ActionProposal], plan: ActionPlan, summary: ExecutionSummary) -> None:
         rep = np.asarray(batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32)
         proposed_actions = Counter([p.action for p in proposals])
@@ -279,17 +298,14 @@ class LocalHealthDepartment:
         self._results_rows.append(row)
 
     def results_to_df(self) -> pd.DataFrame:
-        #Export results to dataframe
+        # Export results to dataframe
         return pd.DataFrame(self._results_rows)
 
-
-
-    #Helper to convert to nodes dtype
+    # Helper to convert to nodes dtype
     def _as_nodes(self, targets) -> np.ndarray:
         return np.asarray(targets, dtype=np.int32)
 
-
-    #Reset Helper
+    # Reset Helper
     def reset_for_run(self):
         """
         Reset LHD state for new model run 
@@ -302,6 +318,3 @@ class LocalHealthDepartment:
             self.surveillance.reset_for_run(seed=self.surveillance.seed, is_vax = self.model.is_vaccinated)
         if hasattr(self, "state") and self.state is not None:
             self.state.reset_for_run()
-
-
-

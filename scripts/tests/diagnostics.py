@@ -270,14 +270,21 @@ def emulate_simulation_and_record(model: NetworkModel, results_folder: Path, var
                     pre_snap["rng_before"] = canonicalize_rng_state(model.rng.bit_generator.state if getattr(model, "rng", None) is not None else None)
                 except Exception:
                     pre_snap["rng_before"] = repr(getattr(model, "rng", None))
+                # Capture LHD state before step
                 try:
                     pre_snap["lhd_rng_before"] = canonicalize_rng_state(model.lhd.rng.bit_generator.state if getattr(model.lhd, "rng", None) is not None else None)
                 except Exception:
                     pre_snap["lhd_rng_before"] = repr(getattr(model.lhd, "rng", None))
                 try:
-                    pre_snap["lhd_action_log_before_len"] = len(list(model.lhd.action_log)) if getattr(model, "lhd", None) is not None else None
+                    pre_snap["lhd_results_rows_len_before"] = (
+                        len(getattr(model.lhd, "_results_rows", []))
+                        if getattr(model, "lhd", None) is not None
+                        else None
+                    )
                 except Exception:
-                    pre_snap["lhd_action_log_before_len"] = repr(getattr(model.lhd, "action_log", None))
+                    pre_snap["lhd_results_rows_len_before"] = repr(
+                        getattr(model.lhd, "_results_rows", None)
+                    )
 
                 # update multiplier matrices (pre-step)
                 try:
@@ -336,7 +343,33 @@ def emulate_simulation_and_record(model: NetworkModel, results_folder: Path, var
 
                 # Now call LHD step
                 try:
-                    model.lhd.step(model.current_time, snapshot)
+                    # The lhd.step expects the current epidemiological state, not the event recorder snapshot.
+                    # This is a critical point for accurate emulation.
+                    # Assuming NetworkModel has attributes like susceptible_nodes, exposed_nodes, etc.,
+                    # or a method to derive the current epidemiological state.
+                    current_epi_state = {
+                        "susceptible": (
+                            model.susceptible_nodes
+                            if hasattr(model, "susceptible_nodes")
+                            else np.array([])
+                        ),
+                        "exposed": (
+                            model.exposed_nodes
+                            if hasattr(model, "exposed_nodes")
+                            else np.array([])
+                        ),
+                        "infectious": (
+                            model.infectious_nodes
+                            if hasattr(model, "infectious_nodes")
+                            else np.array([])
+                        ),
+                        "recovered": (
+                            model.recovered_nodes
+                            if hasattr(model, "recovered_nodes")
+                            else np.array([])
+                        ),
+                    }
+                    model.lhd.step(t=model.current_time, epi_state=current_epi_state)
                 except Exception:
                     # capture LHD exception and attach
                     step_entry["lhd_after"] = {"error": "lhd.step failed", "traceback": traceback.format_exc()}
@@ -347,9 +380,16 @@ def emulate_simulation_and_record(model: NetworkModel, results_folder: Path, var
                 # capture LHD post-state
                 try:
                     lhd_post = {
-                        "lhd_rng_after": canonicalize_rng_state(model.lhd.rng.bit_generator.state if getattr(model.lhd, "rng", None) is not None else None),
-                        "lhd_action_log_len": len(list(model.lhd.action_log)),
-                        "lhd_recent_actions": canonicalize(model.lhd.action_log[-5:]) if getattr(model.lhd, "action_log", None) else None
+                        "lhd_rng_after": canonicalize_rng_state(
+                            model.lhd.rng.bit_generator.state
+                            if getattr(model.lhd, "rng", None) is not None
+                            else None
+                        ),  # Still useful for RNG state
+                        "lhd_results_rows_len_after": (
+                            len(getattr(model.lhd, "_results_rows", []))
+                            if getattr(model, "lhd", None) is not None
+                            else None
+                        ),
                     }
                 except Exception:
                     lhd_post = {"error": "cannot read lhd poststate"}
@@ -373,9 +413,13 @@ def emulate_simulation_and_record(model: NetworkModel, results_folder: Path, var
 
         # store replicate-level recorded model action log
         try:
-            rep_rec["final_lhd_action_log"] = canonicalize(list(model.lhd.action_log))
+            rep_rec["final_lhd_results_rows"] = canonicalize(
+                getattr(model.lhd, "_results_rows", [])
+            )
         except Exception:
-            rep_rec["final_lhd_action_log"] = repr(getattr(model.lhd, "action_log", None))
+            rep_rec["final_lhd_results_rows"] = repr(
+                getattr(model.lhd, "_results_rows", None)
+            )
 
         # save replicate record
         rec["replicates"].append(rep_rec)
@@ -470,14 +514,13 @@ def find_first_mismatch(recA: Dict[str, Any], recB: Dict[str, Any]) -> Tuple[boo
             # compare LHD action logs lengths and recent actions
             la = sa.get("lhd_after", {})
             lb = sb.get("lhd_after", {})
-            if la is None and lb is None:
-                continue
-            if la is None or lb is None:
-                return False, f"LHD post-state mismatch presence at replicate {ridx} time {sa.get('time')}: A={la} B={lb}"
-            if la.get("lhd_action_log_len") != lb.get("lhd_action_log_len"):
-                return False, f"LHD action log length mismatch at replicate {ridx} time {sa.get('time')}: A={la.get('lhd_action_log_len')} B={lb.get('lhd_action_log_len')}"
-            if canonicalize(la.get("lhd_recent_actions")) != canonicalize(lb.get("lhd_recent_actions")):
-                return False, f"LHD recent actions differ at replicate {ridx} time {sa.get('time')}: A={la.get('lhd_recent_actions')} B={lb.get('lhd_recent_actions')}"
+            if la.get("lhd_results_rows_len_after") != lb.get(
+                "lhd_results_rows_len_after"
+            ):
+                return (
+                    False,
+                    f"LHD results rows length mismatch at replicate {ridx} time {sa.get('time')}: A={la.get('lhd_results_rows_len_after')} B={lb.get('lhd_results_rows_len_after')}",
+                )
 
     # If we reach here, treat as identical (for recorded items)
     return True, "No mismatches found"

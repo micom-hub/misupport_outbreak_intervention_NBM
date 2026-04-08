@@ -1,4 +1,4 @@
-#scripts/variants/run_variants_funcs.py
+# scripts/variants/run_variants_funcs.py
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any, Union
@@ -28,8 +28,8 @@ def prepare_run(
     data_dir: str = "data",
     overwrite_files: bool = True,
     save_files: bool = True,
-    seed: Optional[int] = None
-) -> Tuple[List[ModelConfig], pd.DataFrame]:
+    seed: Optional[int] = None,
+) -> Tuple[pd.DataFrame, List[ModelConfig], Dict[str, Any]]:
 
     """
     Prepares all necessary data structures for an experiment
@@ -42,14 +42,14 @@ def prepare_run(
 
     Returns: (configs list, master_edge_df)
     """
-    #Use defaults in config.py if no config is provided
+    # Use defaults in config.py if no config is provided
     base_cfg = base_cfg or ModelConfig()
 
-    #Create output directory      
+    # Create output directory
     out_base = Path(output_dir).expanduser().resolve()
     out_base.mkdir(parents=True, exist_ok = True)
 
-    #1) Ensure contact data exists
+    # 1) Ensure contact data exists
     contacts_df = prepare_contacts(
         county = base_cfg.sim.county,
         state = base_cfg.sim.state,
@@ -58,7 +58,7 @@ def prepare_run(
         save_files = save_files
     )
 
-    #2) Load or build master edge list
+    # 2) Load or build master edge list
     if seed is None:
         seed = base_cfg.sim.seed
     base_seed = int(seed)
@@ -68,10 +68,10 @@ def prepare_run(
     master_df = read_or_build_master(contacts_df = contacts_df, cfg = base_cfg, 
     run_dir = str(out_base), seed = prep_seed, variant = True) 
 
-    #3) Create minimal graph data object with master
+    # 3) Create minimal graph data object with master
     master_gd = build_minimal_graphdata_from_edge_list(master_df, N = contacts_df.shape[0])
 
-    #4) Sample LHS Object 
+    # 4) Sample LHS Object
     configs_list = csv_to_cfg(
         csv_path = csv_path, 
         N = n_samples, 
@@ -111,7 +111,7 @@ def run_variants(
         
     """
 
-    #Ensure output directory and run name
+    # Ensure output directory and run name
     out_base = Path(output_dir).expanduser().resolve()
     out_base.mkdir(parents=True, exist_ok = True)
 
@@ -124,21 +124,17 @@ def run_variants(
     else:
         run_dir.mkdir(parents = True, exist_ok = True)
 
-
-
-    #Set up model defaults, ensure RNG is as specified
+    # Set up model defaults, ensure RNG is as specified
     if seed is not None:
         cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
     seed = cfg.sim.seed
 
     metrics = summary_metrics
 
-    #save ModelConfig.json
+    # save ModelConfig.json
     cfg.to_json(str(run_dir / "ModelConfig.json"))
 
-
-
-    #Build containers for results
+    # Build containers for results
     models: List[NetworkModel] = []
 
     summary_dfs = []
@@ -146,13 +142,11 @@ def run_variants(
     prevalence_dfs = []
     lhd_daily_dfs = []
 
-
-    #Loop across each variant, instantiate and simulate model, run, write result
+    # Loop across each variant, instantiate and simulate model, run, write result
     for variant in policy_config.variants:
         validate_variant(variant)
 
         cfg_var = _cfg_with_policy_variant(cfg, variant)
-
 
         model = NetworkModel(
             config = cfg_var,
@@ -170,18 +164,21 @@ def run_variants(
             df_summary = model.results_to_df(metrics)
             df_summary.insert(0, "variant_name", variant.name)
             summary_dfs.append(df_summary)
-        
+
         if save_incidence:
             df_incidence = model.timeseries_to_df("incidence")
             df_incidence.insert(0, "variant_name", variant.name)
             incidence_dfs.append(df_incidence)
-        
+
         if save_prevalence:
             df_prevalence = model.timeseries_to_df("prevalence")
             df_prevalence.insert(0, "variant_name", variant.name)
             prevalence_dfs.append(df_prevalence)
 
         if save_lhd_results:
+            # LHD results can be stored in two ways:
+            # 1. `all_lhd_results`: if the model runs multiple internal replicates and aggregates LHD results.
+            # 2. `lhd.results_to_df()`: for single-replicate LHD results.
             parts = []
             all_lhd = getattr(model, "all_lhd_results", None)
             if all_lhd is not None:
@@ -205,13 +202,12 @@ def run_variants(
             if parts:
                 lhd_daily_dfs.append(pd.concat(parts, ignore_index=True, sort=False))
 
-
         models.append(model)
 
-    #Write all results into an aggregated file under run_dir
+    # Write all results into an aggregated file under run_dir
     if save_summary:
-            df_overall_summary = pd.concat(summary_dfs, ignore_index=True, sort=False)
-            df_overall_summary.to_parquet(str(run_dir / "summary.parquet"))
+        df_overall_summary = pd.concat(summary_dfs, ignore_index=True, sort=False)
+        df_overall_summary.to_parquet(str(run_dir / "summary.parquet"))
     if save_incidence:
         df_overall_incidence = pd.concat(incidence_dfs, ignore_index=True, sort=False)
         df_overall_incidence.to_parquet(str(run_dir / "incidence.parquet"))
@@ -223,10 +219,8 @@ def run_variants(
     if save_lhd_results and lhd_daily_dfs:
         pd.concat(lhd_daily_dfs, ignore_index=True, sort=False).to_parquet(str(run_dir / "lhd_results.parquet"))
 
-
     return models
 
-        
 
 def run_parameter_set(
     contacts_df: pd.DataFrame,
@@ -268,16 +262,18 @@ def run_parameter_set(
         Variants create model_{i:04d} under output_dir which detail model configurations and results summaries
 
     """
-    #1) Set up output and RNG - each run a different seed
+    # 1) Set up output and RNG - each run a different seed
     out_base = Path(output_dir).expanduser().resolve()
     out_base.mkdir(parents=True, exist_ok=True)
 
     base_seed = int(seed) if seed is not None else int(cfg.sim.seed)
-    run_seed = base_seed + int(i) #increment seed for each run
+    run_seed = derive_seed_from_base(
+        base_seed, f"run_{i}"
+    )  # Use a derived seed for each run
 
     run_graphdata_seed = derive_seed_from_base(run_seed)
 
-    #2) Sample master graphdata and build run graphdata
+    # 2) Sample master graphdata and build run graphdata
     sampled_edges_df = sample_from_master_graphdata(
         master_gd,
         cfg,
@@ -292,7 +288,7 @@ def run_parameter_set(
         N = int(contacts_df.shape[0])
     )
 
-    #3) Initialize and simulate model
+    # 3) Initialize and simulate model
     models = run_variants(
         policy_config,
         cfg,
@@ -319,8 +315,7 @@ def run_parameter_set(
     }
 
 
-
-#Helper to generate variants
+# Helper to generate variants
 def _cfg_with_policy_variant(cfg: ModelConfig, variant) -> ModelConfig:
     """
     Return a config copy with lhd.policy_name and optional lhd overrides applied.

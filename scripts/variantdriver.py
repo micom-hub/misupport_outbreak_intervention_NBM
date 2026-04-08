@@ -1,4 +1,4 @@
-#scripts/variantdriver.py
+# scripts/variantdriver.py
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
@@ -60,9 +60,7 @@ def run_experiment(
 
     out_base.mkdir(parents = True, exist_ok = True)
 
-
-
-    #1) Prepare run
+    # 1) Prepare run
     print("[run_experiment] Initializing run data... ")
     contacts_df, configs_list, master_gd = prepare_run(
         csv_path = csv_path,
@@ -77,16 +75,16 @@ def run_experiment(
     n_configs = len(configs_list)
     print(f"[run_experiment] {n_configs} Models Initialized")
 
-    #2) Execute individual runs
+    # 2) Execute individual runs
     indices = list(range(n_configs))
     statuses: List[Dict[str, Any]] = []
 
-    #check worker count
-    #If None, use one less than maximum CPUs 
+    # check worker count
+    # If None, use one less than maximum CPUs
     if workers is None:
         workers = max(1, mp.cpu_count()-1)
 
-    #If more than 1 workers, attempt parallel process
+    # If more than 1 workers, attempt parallel process
     if workers > 1:
         print(f"[run_experiment] Attempting parallel run with {workers} workers")
         try:
@@ -125,7 +123,7 @@ def run_experiment(
                     }
                     statuses.append(res)
 
-        #anticipating problem pickling LHD objects
+        # anticipating problem pickling LHD objects
         except Exception as exc:
             print(f"[run_experiment] Parallel execution failed ({exc}); falling back to sequential execution.")
             statuses = []
@@ -147,8 +145,8 @@ def run_experiment(
                     overwrite=overwrite_runs,
                 )
                 statuses.append(res)
-            
-    #Run in sequence
+
+    # Run in sequence
     else:
         print("[run_experiment] Running sequentially...")
         statuses = []
@@ -171,7 +169,7 @@ def run_experiment(
             )
             statuses.append(res)
 
-    #Write a run status manifest
+    # Write a run status manifest
     sorted_statuses = sorted(statuses, key = lambda x: int(x.get("index", -1)))
     try:
         with open(out_base / "run_status.json", "w") as fh:
@@ -179,8 +177,7 @@ def run_experiment(
     except Exception:
         pass
 
-
-    #3) Aggregate per-run results to a single file 
+    # 3) Aggregate per-run results to a single file
     print("[run_experiment] Runs completed, aggregating data...")
     aggregated_paths: Dict[str, str] = {}
 
@@ -194,7 +191,7 @@ def run_experiment(
             lhs_df = None
 
     def _collect_and_concat(fname: str) -> Optional[pd.DataFrame]:
-        #Quick helper function to aggregate files by name to a big pd
+        # Quick helper function to aggregate files by name to a big pd
         parts = []
         for i in indices:
             run_dir = out_base / f"model_{int(i):04d}"
@@ -236,21 +233,20 @@ def run_experiment(
             outp = out_base / "aggregated_prevalence.parquet"
             _atomic_write_parquet(df_all, outp)
             aggregated_paths["prevalence"] = str(outp)
-            
+
     if save_lhd_results:
         df_all = _collect_and_concat("lhd_results.parquet")
         if df_all is not None:
-            outp = out_base / "aggregated_prevalence.parquet"
+            outp = out_base / "aggregated_lhd_results.parquet"  
             _atomic_write_parquet(df_all, outp)
-            aggregated_paths["prevalence"] = str(outp)
+            aggregated_paths["lhd_results"] = str(outp)
 
     if clean_dir:
         print("[run_experiment] cleaning per-model run directories...")
         for i in indices:
             run_dir = out_base / f"model_{int(i):04d}"
             if run_dir.exists() and run_dir.is_dir():
-                    shutil.rmtree(run_dir)
-
+                shutil.rmtree(run_dir)
 
     return {
         "run_dir": str(out_base),

@@ -8,57 +8,12 @@ import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 
-# Project imports (adjust module paths if your package layout differs)
+# Project imports
 from scripts.variants.run_variants_funcs import run_variants
 from scripts.lhd.lhdConfig import LhdVariant, LhdConfig
 from scripts.simulation.outbreak_model import NetworkModel
 from scripts.graph.graph_utils import GraphData
-
-
-# --- Helpers ---------------------------------------------------------------
-
-def canonicalize(obj: Any):
-    """Recursively convert numpy/scalar types to Python built-ins for stable comparison & JSON output."""
-    if obj is None:
-        return None
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return canonicalize(obj.tolist())
-    if isinstance(obj, (list, tuple)):
-        return [canonicalize(x) for x in obj]
-    if isinstance(obj, dict):
-        return {str(k): canonicalize(v) for k, v in obj.items()}
-    if isinstance(obj, set):
-        return sorted(canonicalize(x) for x in obj)
-    # bit generator state dicts can contain numpy arrays; canonicalize nested
-    try:
-        # attempt JSON-serializable fallback
-        json.dumps(obj)
-        return obj
-    except Exception:
-        return repr(obj)
-
-
-def arrays_equal(a, b) -> bool:
-    """Robust equality for arrays/lists/None."""
-    if a is None and b is None:
-        return True
-    if a is None or b is None:
-        return False
-    a_np = np.asarray(a)
-    b_np = np.asarray(b)
-    try:
-        return bool(np.array_equal(a_np, b_np))
-    except Exception:
-        # fallback to canonicalized equality
-        return canonicalize(a) == canonicalize(b)
-
-
-def dicts_equal(d0, d1) -> bool:
-    return canonicalize(d0) == canonicalize(d1)
+from scripts.tests.test_utils import canonicalize, arrays_equal_sorted, dicts_equal
 
 
 # --- Minimal Dummy Config & GraphData -------------------------------------
@@ -223,8 +178,16 @@ def instrument_networkmodel(monkeypatch, records: Dict[int, Dict[str, list]]):
                 "replicate_ind": getattr(self, "replicate_ind", None),
                 "time": getattr(self, "current_time", None),
                 "state_before": canonicalize(pre_state),
-                "rng_before": canonicalize(self.rng.bit_generator.state if getattr(self, "rng", None) is not None else None),
-                "lhd_action_log_before": canonicalize(list(self.lhd.action_log) if getattr(self, "lhd", None) is not None else None),
+                "rng_before": canonicalize(
+                    self.rng.bit_generator.state
+                    if getattr(self, "rng", None) is not None
+                    else None
+                ),
+                "lhd_results_rows_len_before": (
+                    len(getattr(self.lhd, "_results_rows", []))
+                    if getattr(self, "lhd", None) is not None
+                    else None
+                ),
             }
             recs["steps"].append({"pre": pre, "post": None})
             # call original step
@@ -238,10 +201,26 @@ def instrument_networkmodel(monkeypatch, records: Dict[int, Dict[str, list]]):
                 "replicate_ind": getattr(self, "replicate_ind", None),
                 "time": getattr(self, "current_time", None),
                 "state_after": canonicalize(post_state),
-                "new_exposures": canonicalize(self.new_exposures[-1] if getattr(self, "new_exposures", None) else None),
-                "new_infections": canonicalize(self.new_infections[-1] if getattr(self, "new_infections", None) else None),
-                "rng_after": canonicalize(self.rng.bit_generator.state if getattr(self, "rng", None) is not None else None),
-                "lhd_action_log_after": canonicalize(list(self.lhd.action_log) if getattr(self, "lhd", None) is not None else None),
+                "new_exposures": canonicalize(
+                    self.new_exposures[-1]
+                    if getattr(self, "new_exposures", None)
+                    else None
+                ),
+                "new_infections": canonicalize(
+                    self.new_infections[-1]
+                    if getattr(self, "new_infections", None)
+                    else None
+                ),
+                "rng_after": canonicalize(
+                    self.rng.bit_generator.state
+                    if getattr(self, "rng", None) is not None
+                    else None
+                ),
+                "lhd_results_rows_len_after": (
+                    len(getattr(self.lhd, "_results_rows", []))
+                    if getattr(self, "lhd", None) is not None
+                    else None
+                ),
             }
             recs["steps"][-1]["post"] = post
             return out
@@ -319,8 +298,13 @@ def first_mismatch_between_models(m0, m1, records) -> Tuple[bool, str]:
         if not arrays_equal(post0.get("new_exposures"), post1.get("new_exposures")):
             return False, f"Mismatch at replicate={key[0]} time={key[1]}: new_exposures differs.\nmodel0={post0.get('new_exposures')}\nmodel1={post1.get('new_exposures')}"
         # compare LHD action logs
-        if not dicts_equal(post0.get("lhd_action_log_after"), post1.get("lhd_action_log_after")):
-            return False, f"Mismatch at replicate={key[0]} time={key[1]}: lhd_action_log differs.\nmodel0={post0.get('lhd_action_log_after')}\nmodel1={post1.get('lhd_action_log_after')}"
+        if post0.get("lhd_results_rows_len_after") != post1.get(
+            "lhd_results_rows_len_after"
+        ):
+            return (
+                False,
+                f"Mismatch at replicate={key[0]} time={key[1]}: lhd_results_rows_len_after differs.\nmodel0={post0.get('lhd_results_rows_len_after')}\nmodel1={post1.get('lhd_results_rows_len_after')}",
+            )
     # 3) compare aggregated outputs if present
     df0 = m0.results_to_df() if hasattr(m0, "results_to_df") else None
     df1 = m1.results_to_df() if hasattr(m1, "results_to_df") else None

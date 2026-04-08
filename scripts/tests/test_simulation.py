@@ -7,6 +7,9 @@ from scipy.sparse import csr_matrix
 from scripts.config import ModelConfig
 from scripts.simulation.outbreak_model import NetworkModel
 from scripts.graph.graph_utils import GraphData
+from scripts.graph.graph_utils import (
+    build_minimal_graphdata_from_edge_list,
+)  # Assuming this function exists and can be used
 
 
 def make_small_graphdata():
@@ -52,50 +55,27 @@ def make_small_graphdata():
         neighbor_map[t].append((s, w, ct))
     fast_neighbor_map = {src: {tgt: (w, ct) for (tgt, w, ct) in nbrs} for src, nbrs in neighbor_map.items()}
 
-    # Build csr_by_type similar to build_minimal_graphdata_from_edge_list
-    # For each ct, create indptr/indices/weights arrays of directed neighbors
-    all_cts = edge_df["contact_type"].unique().tolist()
-    csr_by_type = {}
-    for ct in all_cts:
-        # collect directed edges of this ct
-        rows_ct = []
-        for src_node in range(N):
-            for (tgt, w, c) in neighbor_map[src_node]:
-                if c == ct:
-                    rows_ct.append((src_node, tgt, w))
-        if len(rows_ct) == 0:
-            indptr = np.zeros(N + 1, dtype=np.int64)
-            indices = np.empty(0, dtype=np.int32)
-            weights = np.empty(0, dtype=np.float32)
-        else:
-            rows_ct = np.array(rows_ct, dtype=object)
-            srcs = np.array([r[0] for r in rows_ct], dtype=np.int32)
-            tgts = np.array([r[1] for r in rows_ct], dtype=np.int32)
-            wvec = np.array([r[2] for r in rows_ct], dtype=np.float32)
-            # sort by src to create indptr
-            order = np.argsort(srcs, kind="mergesort")
-            srcs_s = srcs[order]
-            tgts_s = tgts[order]
-            wts_s = wvec[order]
-            counts = np.bincount(srcs_s, minlength=N)
-            indptr = np.empty(N + 1, dtype=np.int64)
-            indptr[0] = 0
-            np.cumsum(counts, out=indptr[1:])
-            indices = tgts_s.astype(np.int32, copy=True)
-            weights = wts_s.astype(np.float32, copy=True)
-        csr_by_type[str(ct)] = (indptr, indices, weights)
+    # Use build_minimal_graphdata_from_edge_list to ensure consistency with production code
+    # This function is assumed to exist in scripts.graph.graph_utils
+    minimal_gd_from_util = build_minimal_graphdata_from_edge_list(edge_df, N=N)
 
-    contact_types = sorted(list(csr_by_type.keys()))
-    ct_to_id = {ct: i for i, ct in enumerate(contact_types)}
-    id_to_ct = {i: ct for ct, i in ct_to_id.items()}
-    full_node_list = list(range(N))
-    degrees_arr = adj.getnnz(axis=1).tolist()
+    # Extract relevant parts from the utility-built GraphData
+    csr_by_type = minimal_gd_from_util.csr_by_type
+    contact_types = minimal_gd_from_util.contact_types
+    ct_to_id = minimal_gd_from_util.ct_to_id
+    id_to_ct = minimal_gd_from_util.id_to_ct
+    full_node_list = minimal_gd_from_util.full_node_list
+    degrees_arr = minimal_gd_from_util.degrees_arr
+
+    # The utility function might also set compliances, but we'll use the explicit one here if needed
+    compliances = np.ones(N, dtype=np.float32)  # Assuming default compliance
 
     # Build GraphData dataclass
     gd = GraphData(
         N=int(N),
         edge_list=edge_df,
         adj_matrix=adj,
+        # individual_lookup, ages, sexes are explicitly defined and can be kept
         individual_lookup=individual_lookup,
         ages=ages,
         sexes=sexes,

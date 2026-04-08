@@ -125,11 +125,11 @@ def read_or_build_master(
     config_path = run_dir / "ModelConfig.json"
     if not variant:
         try:
-            cfg.to_json(str(config_path))
-        except Exception:
-            pass
+            cfg.to_json(str(config_path))  # Save ModelConfig for this run
+        except Exception as e:
+            print(f"WARNING: Failed to save ModelConfig to {config_path}: {e}")
 
-    #If master already exists and we aren't overwriting, read in
+    # If master already exists and we aren't overwriting, read in
     if master_path.exists() and not bool(cfg.sim.overwrite_master):
         return pd.read_parquet(str(master_path))
 
@@ -143,12 +143,12 @@ def read_or_build_master(
 )
     if cfg.sim.save_master:
         try:
-            master_df.to_parquet(str(master_path), index = False)
-        except Exception:
-            pass
+            master_df.to_parquet(str(master_path), index=False)
+        except Exception as e:
+            print(f"WARNING: Failed to save MasterEdgelist to {master_path}: {e}")
 
     return master_df
-        
+
 # Single model run
 def run_single_model(
     contacts_src: Union[pd.DataFrame, str],
@@ -273,7 +273,7 @@ def run_single_model(
 
     return model
 
-#Helper function to make sure contacts_df looks right
+# Helper function to make sure contacts_df looks right
 def _validate_contacts_df(df: pd.DataFrame) -> None:
     """
     Throws error if contacts_df doesn't have necessary columns
@@ -302,5 +302,3 @@ if __name__ == "__main__":
         "p_detect_inf": 0.5  
         }
         )
-    
-    
