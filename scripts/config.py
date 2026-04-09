@@ -49,13 +49,13 @@ class LHDParams:
 
 @dataclass(frozen=True)
 class SimulationParams:
-    n_replicates: int = 50 #Stochastic Replicates
+    n_replicates: int = 20 #Stochastic Replicates
     run_name: str = field(default_factory=lambda: "RUN_" + datetime.now().strftime("%m-%d-%Y_%H-%M-%S"))
     overwrite_master: bool = True
     simulation_duration: int = 100
-    I0: Union[List[int],int] = 5
+    I0: Union[List[int],int] = 5 #list for indices or int for randoms
     seed: int = 2026
-    county: str = "Keweenaw"
+    county: str = "Ontonagon"
     state: str = "Michigan"
     resample_network_per_run: bool = False
     master_casual_candidates: int = 100

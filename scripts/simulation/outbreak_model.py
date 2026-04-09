@@ -677,52 +677,50 @@ class NetworkModel:
         
     def timeseries_to_df(self, type: str = "prevalence") -> pd.DataFrame:
         """
-        Returns a wide pandas dataframe with a time eries for each run
-        
-        Args: 
-            type: "incidence" or "prevalence" to provide specified timeseries
+        Returns a wide pandas dataframe with a time series for each stochastic run. Fills with 0s if run ends early
+
+        Args:
+            type: "incidence" or "prevalence"
+                - prevalence = fraction infectious (I/N)
+                - incidence  = fraction newly exposed per day (new E / N), with t_0 including I0 by convention
         """
         series_type = str(type).strip().lower()
         if series_type not in ("incidence", "prevalence"):
             raise ValueError(f"type must be 'incidence' or 'prevalence' (got {type})")
-        n_runs = self.n_replicates
 
-        #Prebuild arrays - should be same either way
-        if series_type == "prevalence":
-            lengths = [len(self.all_states_over_time[run]) for run in range(n_runs)]
-        else:
-            lengths = [len(self.all_new_exposures[run]) for run in range(n_runs)]
+        n_runs = int(self.n_replicates)
 
-        T = max(lengths) if lengths else 0
-        if T == 0:
-            return pd.DataFrame({"run_number":np.arange(n_runs)})
-        
-        #Build prevalence arrays
+        # Fixed horizon across all runs: include day 0 through day Tmax
+        Tmax = int(self.Tmax)
+        T = Tmax + 1
+        if T <= 0:
+            return pd.DataFrame({"run_number": np.arange(n_runs, dtype=np.int64)})
+
+        data = np.zeros((n_runs, T), dtype=np.float32)
+
         if series_type == "prevalence":
-            data = np.zeros((n_runs, T), dtype = np.float32)
             for run in range(n_runs):
-                states_list = self.all_states_over_time[run]
+                states_list = self.all_states_over_time[run] or []
                 max_t = min(T, len(states_list))
                 for t in range(max_t):
                     timestep = states_list[t]
                     try:
                         nI = int(len(timestep[2]))
                     except Exception:
-                        #just in case they are saved as arrays
                         try:
                             nI = int(np.asarray(timestep[2]).size)
                         except Exception:
                             nI = 0
                     data[run, t] = float(nI) / float(self.N)
-        #incidence arrays
-        else:
-            data = np.zeros((n_runs, T), dtype = np.float32)
+
+            # trailing entries remain 0.0 automatically
+
+        else:  # incidence
             for run in range(n_runs):
-                exposures_list = self.all_new_exposures[run]
+                exposures_list = self.all_new_exposures[run] or []
                 max_t = min(T, len(exposures_list))
                 for t in range(max_t):
                     arr = exposures_list[t]
-                    count=0
                     try:
                         if hasattr(arr, "size"):
                             count = int(arr.size)
@@ -730,17 +728,19 @@ class NetworkModel:
                             count = int(len(arr))
                     except Exception:
                         count = 0
+
+                    # By your existing convention: treat t_0 incidence as I0 if exposures count is 0
                     if t == 0 and count == 0:
                         I0 = getattr(self, "I0", None)
-                        count = len(I0)
+                        count = int(len(I0)) if I0 is not None else 0
 
-                    frac = count/self.N
-                    data[run, t] = frac
-        
-        #build dataframe
+                    data[run, t] = float(count) / float(self.N)
+
+            # trailing entries remain 0.0 automatically
+
         col_names = [f"t_{i}" for i in range(T)]
-        df = pd.DataFrame(data, columns = col_names)
-        df.insert(0, "run_number", np.arange(n_runs))
+        df = pd.DataFrame(data, columns=col_names)
+        df.insert(0, "run_number", np.arange(n_runs, dtype=np.int64))
 
         return df
 

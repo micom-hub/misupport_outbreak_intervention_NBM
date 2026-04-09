@@ -26,3 +26,16 @@ For a single and straightforward run of the model, simply navegate to [driver.py
 
 ### Compatibility
 For FredFetch, your device must have a compatible chromedriver. As a workaround, you can download the synthetic population zip files from the FRED website linked in FredFetch, store it in a directory ./data/ and rename the file to {County}.zip
+
+
+## Full Pipeline
+
+1) Change run settings in scripts/config.py
+2) Build LHS.csv for parameter variation
+3) Make .sh scripts executable (chmod +x scripts/parameter_sweep_pipeline.sh), same for scripts/PostRunProcessing/run_prcc_matlab.sh
+4) Make changes at the bottom of scripts/variantdriver.py as needed
+5) For a full run, PRCC, and trajectory visualization, from within project repo, call:
+````
+./scripts/parameter_sweep_pipeline.sh --all --baseline-policy observe_only
+````
+
