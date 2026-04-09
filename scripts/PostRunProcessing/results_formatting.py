@@ -151,8 +151,8 @@ def export_prcc_inputs_for_matlab(
                 raise ValueError(f"No time columns t_* found for timeseries policy={policy_value}")
 
             #aggregate if requested
-            warnings.warn("Aggregation requested for timeseries data, verify that this is intended", UserWarning)
             if aggregate_replicates and "run_number" in df_pol.columns:
+                warnings.warn("Aggregation requested for timeseries data, verify that this is intended", UserWarning)
                 df_pol = df_pol.groupby("model_index", as_index=False)[tcols].agg(agg_func)
 
             #convert data to long as expected by matlab script
@@ -367,6 +367,18 @@ def _safe_name(x: Any) -> str:
     s = str(x)
     s = re.sub(r"[^A-Za-z0-9_\-]+", "_", s).strip("_")
     return s or "policy"
+
+
+if __name__ == "__main__":
+    
+    res =  export_prcc_inputs_for_matlab(
+        results_path = "model_runs/first_sensitivity_analysis/aggregated_summary.parquet",
+        lhs_path = "model_runs/first_sensitivity_analysis/LHS.csv",
+        kind = "summary",
+        out_dir = "model_runs/first_sensitivity_analysis",
+    )
+    print(res)
+    
 
 
 

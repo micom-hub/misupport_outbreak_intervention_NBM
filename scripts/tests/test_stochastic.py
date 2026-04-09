@@ -10,7 +10,6 @@ from scipy.sparse import csr_matrix
 
 # Project imports
 from scripts.variants.run_variants_funcs import run_variants
-from scripts.lhd.lhdConfig import LhdVariant, LhdConfig
 from scripts.simulation.outbreak_model import NetworkModel
 from scripts.graph.graph_utils import GraphData
 from scripts.tests.test_utils import canonicalize, arrays_equal_sorted, dicts_equal

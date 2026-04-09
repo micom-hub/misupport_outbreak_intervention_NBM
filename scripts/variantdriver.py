@@ -16,7 +16,7 @@ import pandas as pd
 from scripts.variants.run_variants_funcs import prepare_run, run_parameter_set
 from scripts.lhd.policy_config import PolicyConfig, POLICY_CONFIGURATION
 from scripts.config import ModelConfig
-
+from scripts.PostRunProcessing.results_formatting import export_prcc_inputs_for_matlab
 from scripts.visualization.viz import (
     plot_metric_boxplot,
     plot_trajectories_by_variant,
@@ -39,7 +39,7 @@ def run_experiment(
     save_summary: bool = True,
     save_incidence: bool = False,
     save_prevalence: bool = False,
-    save_lhd_results: bool = True,
+    save_lhd_results: bool = False,
     summary_metrics: Optional[List[str]] = None,
     overwrite_runs: bool = True,#Run results
     clean_dir: bool = False
@@ -270,17 +270,41 @@ if __name__ == "__main__":
         csv_path="testLHS.csv",
         n_samples=2,
         policy_config=POLICY_CONFIGURATION,
-        output_dir="model_runs/experiment_002",
+        output_dir="model_runs/testingmodels",
         base_cfg=None,
         seed=3,
         workers=1,
         save_summary=True,
         save_incidence=True,
-        save_prevalence=False,
+        save_prevalence=True,
         clean_dir=True
     )
-    print("Done. aggregated:", result["aggregated_paths"])
+    print("Done. aggregated:", result["run_dir"])
 
+    structured_paths = []
+    for filepath in result['aggregated_paths'].values():
+        if "aggregated_summary" in filepath:
+            export_prcc_inputs_for_matlab(
+                results_path = filepath,
+                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
+                kind = "summary",
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "summary")
+            )
+        elif "aggregated_incidence" in filepath:
+            export_prcc_inputs_for_matlab(
+                results_path = filepath,
+                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
+                kind = "timeseries",
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "incidence")
+            )
+        elif "aggregated_prevalence" in filepath:
+            export_prcc_inputs_for_matlab(
+                results_path = filepath,
+                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
+                kind = "timeseries",
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "prevalence")
+            )
+        
     # summary = pd.read_parquet("model_runs/experiment_002/aggregated_summary.parquet")
     # inc = pd.read_parquet("model_runs/experiment_002/aggregated_incidence.parquet")
 
