@@ -59,7 +59,7 @@ def validate_variant(v: PolicyVariant) -> None:
 # Example configuration: edit this list to compare policies by name
 POLICY_CONFIGURATION = PolicyConfig(variants=[
     PolicyVariant(name="observe_only", policy_name="observe_only"),
-    PolicyVariant(name="isolate_only", policy_name="isolate_only"),
-    PolicyVariant(name="trace_only", policy_name="trace_only"),
+    # PolicyVariant(name="isolate_only", policy_name="isolate_only"),
+    # PolicyVariant(name="trace_only", policy_name="trace_only"),
     PolicyVariant(name="trace_then_isolate", policy_name="trace_then_isolate"),
 ])

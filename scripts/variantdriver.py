@@ -268,9 +268,9 @@ if __name__ == "__main__":
     #Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
     result = run_experiment(
         csv_path="testLHS.csv",
-        n_samples=50,
+        n_samples=100,
         policy_config=POLICY_CONFIGURATION,
-        output_dir="model_runs/InitialSensitivityAnalysis",
+        output_dir="model_runs/SecondSensitivityAnalysis",
         base_cfg=None,
         seed=5,
         workers=3,
@@ -288,28 +288,26 @@ if __name__ == "__main__":
                 results_path = filepath,
                 lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
                 kind = "summary",
-                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "summary")
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "summary"),
+                aggregate_replicates = True
             )
         elif "aggregated_incidence" in filepath:
             export_prcc_inputs_for_matlab(
                 results_path = filepath,
                 lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
                 kind = "timeseries",
-                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "incidence")
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "incidence"),
+                aggregate_replicates = True
+
+                
             )
         elif "aggregated_prevalence" in filepath:
             export_prcc_inputs_for_matlab(
                 results_path = filepath,
                 lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
                 kind = "timeseries",
-                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "prevalence")
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "prevalence"),
+                aggregate_replicates = True
+
             )
         
-    # summary = pd.read_parquet("model_runs/experiment_002/aggregated_summary.parquet")
-    # inc = pd.read_parquet("model_runs/experiment_002/aggregated_incidence.parquet")
-
-    # fig, ax = plot_metric_boxplot(summary, metric="outbreakSize", variant_col="variant")
-    # plt.show()
-
-    # fig, axes = plot_trajectories_by_variant(inc, variant_col="variant")
-    # plt.show()

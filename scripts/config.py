@@ -41,7 +41,7 @@ class LHDParams:
     lhd_daily_capacity: int = 100
     mean_compliance: float = 1.0
     lhd_default_call_cost: float = 1
-    lhd_default_int_reduction: float = 0.2 #frac removed
+    lhd_default_int_reduction: float = 0.9 #frac removed
     lhd_default_int_duration: int = 10
     p_detect_inf: float = 0.25
     report_delay_days: int = 1
@@ -55,7 +55,7 @@ class SimulationParams:
     simulation_duration: int = 100
     I0: Union[List[int],int] = 5 #list for indices or int for randoms
     seed: int = 2026
-    county: str = "Ontonagon"
+    county: str = "Keweenaw"
     state: str = "Michigan"
     resample_network_per_run: bool = False
     master_casual_candidates: int = 100
