@@ -35,12 +35,14 @@ conda activate lhdsim
 ### Quick Start (Single Run)
 To run a single simulation with default parameters and a single LHD policy:
 ```bash
-python scripts/driver.py
+python scripts/singledriver.py
 ```
 This is useful for debugging or visualizing a outbreak trajectories for a single set of outbreak parameters.
 
 ### Running Policy Variants
 To compare different LHD prioritization algorithms, use the [variantdriver](scripts/variantdriver.py) script.
+
+# Experimental Workflow:
 
 #### Step 1: Configure Policy Variants
 Edit [policy_config](scripts/lhd/policy_config.py) to define the LHD policies you are looking to compare. Ensure that policy_name exists within [policy_catalog](scripts/lhd/policy_catalog.py)
@@ -65,17 +67,21 @@ To perform a global sensitivity analysis using Latin Hypercube Sampling (LHS) an
 3.  **Execute Pipeline:** Use the full pipeline shell script to run the full simulation, post-processing, and PRCC analysis:
     ```bash
     chmod +x scripts/parameter_sweep_pipeline.sh
-    ./scripts/parameter_sweep_pipeline.sh --all --baseline-policy observe_only
+    ./scripts/parameter_sweep_pipeline.sh --run-dir model_runs/'__name_of_your_experiment_here__' --all --baseline-policy observe_only
     ```
+
+*Note: To monitor run progress, navigate to your designated model run directory, where runs will be generated in order numbered 1-n_samples*
 ---
+
+
 
 ## Modifying Model Configurations
 
 ### Epidemiological & Jurisdiction Settings
 Edit `scripts/config.py` to change:
-- **Contact Network Topology:** Adjust jurisdiction data sources and geographic constraints.
-- **Disease Parameters:** Modify `base_transmission_prob`, `vax_uptake`, and recovery periods.
-- **Simulation Constraints:** Change `num_reps` (stochastic replicates) or `max_timesteps`.
+- **Contact Network Structure:** Adjust how individuals make contact during the model
+- **Epi Parameters:** Modify 
+- **Simulation Settings:** Change `num_reps`  or `max_timesteps`.
 
 ### LHD Resource Logic
 LHD behavior is defined in `scripts/lhd/policy_catalog.py`. You can modify how the LHD prioritizes individuals by:
@@ -91,16 +97,8 @@ The model uses a MATLAB post-processing suite located in `scripts/PostRunProcess
 - **`performPrccWithCorrections.m`**: Applies Bonferroni and Benjamini-Hochberg (BHFDR) corrections to account for multiple testing.
 - **`plotPRCC.m`**: Generates temporal sensitivity plots, showing how parameter importance shifts over the duration of an outbreak.
 
-For a manual PRCC run after exporting data:
-```matlab
-% In MATLAB
-prccResult = lhsPrccFromCsv('path/to/your/results-stat-cols-X.csv', 0.05);
-```
 
 For this to work, ensure MATLAB is installed along with the statistics and machine learning toolkit, and is available in your system path.
 
 ---
 
-## Compatibility
-Supported Systems: Linux, macOS.  
-Core Dependencies: Python 3.x, MATLAB (only needed for PRCC), Conda.

@@ -231,16 +231,16 @@ def plot_policy_fan(
 
 if __name__ == "__main__":
     plot_policy_fan(
-    "model_runs/SecondSensitivityAnalysis",
+    "model_runs/TertiarySensitivityAnalysis",
     kind="incidence",
     policy=["observe_only", "trace_then_isolate"],
-    out_path="model_runs/SecondSensitivityAnalysis/results/fan_incidence_observe_only.png",
+    out_path="model_runs/TertiarySensitivityAnalysis/results/fan_incidence_observe_only.png",
 )
 
 plot_policy_fan(
-    "model_runs/SecondSensitivityAnalysis",
+    "model_runs/TertiarySensitivityAnalysis",
     kind="prevalence",
     policy=["observe_only", "trace_then_isolate"],
     replicate_agg="median",  # optional: avoid overweighting stochastic reps
-        out_path="model_runs/SecondSensitivityAnalysis/results/fan_prevalence_faceted.png",
+        out_path="model_runs/TertiarySensitivityAnalysis/results/fan_prevalence_faceted.png",
 )

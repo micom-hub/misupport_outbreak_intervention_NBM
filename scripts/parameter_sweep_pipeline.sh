@@ -35,7 +35,7 @@ ENV VARS (optional):
   ALPHA=0.05                   (default: 0.05)
 
 Examples:
-  ./scripts/parameter_sweep_pipeline.sh --run-dir model_runs/InitialSensitivityAnalysis --all --baseline-policy observe_only
+  ./scripts/parameter_sweep_pipeline.sh --run-dir model_runs/TESTMODELRUN --all --baseline-policy observe_only
   ./scripts/parameter_sweep_pipeline.sh --run-dir model_runs/InitialSensitivityAnalysis --trajectory-plots --baseline-policy observe_only
 EOF
 }

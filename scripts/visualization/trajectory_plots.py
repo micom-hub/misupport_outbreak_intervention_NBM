@@ -342,7 +342,9 @@ def plot_summary_metrics_boxplots(
         groups = [g[metric].dropna().to_numpy() for _, g in df.groupby(vcol, sort=True)]
         labels = [str(k) for k, _ in df.groupby(vcol, sort=True)]
 
-        ax.boxplot(groups, labels=labels, showfliers=False)
+        bp = ax.boxplot(groups, showfliers = False)
+        ax.set_xticks(np.arange(1, len(labels) + 1))
+        ax.set_xticklabels(labels)
         ax.set_title(metric)
         ax.set_xlabel("Variant")
         ax.set_ylabel(metric)
@@ -409,7 +411,9 @@ def plot_summary_metric_paired_differences(
     groups = [g["delta"].to_numpy() for _, g in dd.groupby("variant", sort=True)]
     labels = [str(k) for k, _ in dd.groupby("variant", sort=True)]
 
-    ax.boxplot(groups, labels=labels, showfliers=False)
+    bp = ax.boxplot(groups, showfliers=False)
+    ax.set_xticks(np.arange(1, len(labels)+1))
+    ax.set_xticklabels(labels)
     ax.axhline(0, color="black", linewidth=1)
     ax.set_xlabel("Variant")
     ax.set_ylabel(f"Δ {metric} (variant - {baseline_variant})")
