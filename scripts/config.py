@@ -140,4 +140,3 @@ class ModelConfig:
             raise ValueError("sim.I0 must be an integer or list")
         if not (self.sim.master_casual_candidates >= self.population.cas_contacts):
             raise ValueError("sim.master_casual_candidates must exceed population.cas_contacts for sampling purposes")
-

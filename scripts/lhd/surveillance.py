@@ -1,4 +1,4 @@
-#scripts/lhd/surveillance.py
+# scripts/lhd/surveillance.py
 from __future__ import annotations
 from typing import Dict, Any, Optional, List, Tuple
 from collections import defaultdict
@@ -7,10 +7,9 @@ import numpy as np
 
 from scripts.utils.rng_utility import u01_for_nodes, derive_seed_from_base
 
-#integer constants to represent disease stage
+# integer constants to represent disease stage
 STAGE_PRE = np.int8(1) #pre-infectious (E)
 STAGE_INF = np.int8(2) #Infectious (I)
-
 
 
 class SurveillanceModel:
@@ -48,47 +47,41 @@ class SurveillanceModel:
         report_delay_days: int = 0
     ):
 
-
-
-
         self.seed = int(seed)
         self.N = int(N)
 
-        self.ages = np.asarray(ages, dtype = np.int32)
-        self.is_vax = np.asarray(is_vax, dtype = np.bool_)
+        self.ages = np.asarray(ages, dtype=np.int32)
+        self.is_vax = np.asarray(is_vax, dtype=np.bool_)
 
         self.p_detect_inf = float(p_detect_inf)
-        self.p_detect_pre = 0.0 #can't detect pre-infectious for now
+        self.p_detect_pre = 0.0  # can't detect pre-infectious for now
 
         self.delay = int(report_delay_days)
         if self.delay < 0:
             raise ValueError("report_delay_days must be >= 0")
 
-        #case report queue lag = delay + 1
+        # case report queue lag = delay + 1
         self._L = self.delay + 1
         self._queue_nodes: List[List[np.ndarray]] = [[] for _ in range(self._L)]
         self._queue_stage: List[List[np.ndarray]] = [[] for _ in range(self._L)]
-        self._trace_orders = defaultdict(list) #due_day -> [cases_array, params]
-        self._test_orders = defaultdict(list) #due_day -> [node_array, params]
+        self._trace_orders = defaultdict(list)  # due_day -> [cases_array, params]
+        self._test_orders = defaultdict(list)  # due_day -> [node_array, params]
 
         self.case_status = np.zeros(self.N, dtype=np.uint8)
 
-        #True contact structure for contact tracing 
+        # True contact structure for contact tracing
         self.neighbor_map = neighbor_map
         self.ct_to_id = ct_to_id
 
-
-
-    #Methods for passing around information
+    # Methods for passing around information
     def _deliver_due(self, t: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Export case reports queued for 'today' to LHD
         """
-        #check for queued events today
+        # check for queued events today
         b = int(t % self._L)
         if not self._queue_nodes[b]:
             return np.empty(0, np.int32), np.empty(0, np.int8)
-
 
         nodes = np.concatenate(self._queue_nodes[b]).astype(np.int32, copy=False)
         stages = np.concatenate(self._queue_stage[b]).astype(np.int8, copy=False)
@@ -109,22 +102,27 @@ class SurveillanceModel:
         self._queue_nodes[b].append(nodes.astype(np.int32, copy=False))
         self._queue_stage[b].append(np.full(nodes.size, stage_code, dtype=np.int8))
 
-
-    #Methods for information-requesting actions
-    def order_trace(self, *, t: int, cases: np.ndarray, params: Optional[Dict[str, Any]] = None) -> None:
+    # Methods for information-requesting actions
+    def order_trace(
+        self, *, t: int, cases: np.ndarray, params: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
         Schedules a contact trace for a case (or array of cases)
         """
         params = params or {}
         delay = int(params.get("delay_days", 0))
         due = int(t + delay)
-        self._trace_orders[due].append((np.asarray(cases, dtype=np.int32), dict(params)))
+        self._trace_orders[due].append(
+            (np.asarray(cases, dtype=np.int32), dict(params))
+        )
 
-    def order_test(self, *, t: int, nodes: np.ndarray, params: Optional[Dict[str, Any]] = None) -> None:
+    def order_test(
+        self, *, t: int, nodes: np.ndarray, params: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
         Schedules a test for an individual node (or array of nodes)
         """
-        #params may contain test sens/spec
+        # params may contain test sens/spec
         params = params or {}
 
         delay = int(params.get("delay_days", 0))
@@ -135,16 +133,25 @@ class SurveillanceModel:
         """
         1) Pop test orders that are happening today
         2) "Test" Node
-        3) Queue case reports for positive cases 
+        3) Queue case reports for positive cases
         """
-        #1) pop test orders
-        orders = self._test_orders.pop(int(t), [])
+
+        # Collect all orders due now or in the past (handles Day-0 scheduling)
+        due_keys = [k for k in self._test_orders.keys() if k <= t]
+        orders = []
+        for k in sorted(due_keys):
+            orders.extend(self._test_orders.pop(k))
+
         if not orders:
             return
 
-        #2) Determine test results
-        pre_ids = np.asarray(epi_state.get("pre_ids", np.empty(0, np.int32)), dtype=np.int32)
-        inf_ids = np.asarray(epi_state.get("inf_ids", np.empty(0, np.int32)), dtype=np.int32)
+        # 2) Determine test results
+        pre_ids = np.sort(
+            np.asarray(epi_state.get("pre_ids", np.empty(0, np.int32)), dtype=np.int32)
+        )
+        inf_ids = np.sort(
+            np.asarray(epi_state.get("inf_ids", np.empty(0, np.int32)), dtype=np.int32)
+        )
 
         for nodes, params in orders:
             nodes = np.asarray(nodes, dtype=np.int32)
@@ -166,24 +173,24 @@ class SurveillanceModel:
             spec = min(max(spec, 0.0), 1.0)
 
             # per-node probability of positive result
-            #false-positives
+            # false-positives
             p_pos = np.full(nodes.size, 1.0 - spec, dtype=np.float64)
-            #probability of picking up pre-infectious
+            # probability of picking up pre-infectious
             p_pos[is_pre] = sens_pre
-            #probability of picking up post-infectious
+            # probability of picking up post-infectious
             p_pos[is_inf] = sens_inf
-            
-            seed_test = int(derive_seed_from_base(self.seed, t, params.get("tag", '')))
+
+            seed_test = int(derive_seed_from_base(self.seed, t, params.get("tag", "")))
             u = u01_for_nodes(seed_test, int(t), nodes, np.int8(3))
             pos_mask = u < p_pos
             if not pos_mask.any():
                 continue
 
             pos_nodes = nodes[pos_mask]
-            pos_is_pre = is_pre[pos_mask] 
+            pos_is_pre = is_pre[pos_mask]
             pos_is_inf = is_inf[pos_mask]
 
-            #3) Send cases for reporting (with lag)
+            # 3) Send cases for reporting (with lag)
 
             # Filter out positive results that are already known cases
             pos_nodes = pos_nodes[self.case_status[pos_nodes] == 0]
@@ -194,17 +201,18 @@ class SurveillanceModel:
             report_delay = int(params.get("report_delay_days", self.delay))
             due_report = int(t + report_delay)
 
-
-            det_pre = pos_nodes[pos_is_pre[:pos_nodes.size]] if pos_is_pre.size == pos_nodes.size else pos_nodes[0:0]
-            det_inf = pos_nodes[pos_is_inf[:pos_nodes.size]] if pos_is_inf.size == pos_nodes.size else pos_nodes[0:0]
-            det_unk = pos_nodes[(~pos_is_pre) & (~pos_is_inf)] if pos_is_pre.size == pos_nodes.size else pos_nodes
+            det_pre = pos_nodes[pos_is_pre]
+            det_inf = pos_nodes[pos_is_inf]
+            det_unk = pos_nodes[(~pos_is_pre) & (~pos_is_inf)]
 
             if det_pre.size:
-                self._enqueue(due_report, det_pre, STAGE_PRE)
+                self._queue(due_report, det_pre, STAGE_PRE)
             if det_inf.size:
-                self._enqueue(due_report, det_inf, STAGE_INF)
+                self._queue(due_report, det_inf, STAGE_INF)
             if det_unk.size:
-                self._enqueue(due_report, det_unk, np.int8(0))  # unknown/false-positive stage
+                self._queue(
+                    due_report, det_unk, np.int8(0)
+                )  # unknown/false-positive stage
 
     def _process_due_traces(self, t: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -214,7 +222,12 @@ class SurveillanceModel:
         2) Identify contacts with probability
         3) Return src/tgt/ct arrays
         """
-        orders = self._trace_orders.pop(int(t), [])
+        # Collect all orders due now or in the past
+        due_keys = [k for k in self._trace_orders.keys() if k <= t]
+        orders = []
+        for k in sorted(due_keys):
+            orders.extend(self._trace_orders.pop(k))
+
         if not orders:
             return (np.empty(0, np.int32), np.empty(0, np.int32), np.empty(0, np.int16))
 
@@ -236,7 +249,7 @@ class SurveillanceModel:
             # contact type whitelist
             raw_cts = params.get("contact_types", None)
             if raw_cts is None:
-                raw_cts = ["hh", "sch", "wp"]  #tracing focuses on non-casual contacts
+                raw_cts = ["hh", "sch", "wp"]  # tracing focuses on non-casual contacts
             whitelist_ids = set()
             for ct in raw_cts:
                 cid = self._ctid(ct)
@@ -251,7 +264,7 @@ class SurveillanceModel:
                 nbrs_list = []
                 ctids_list = []
 
-                for (nbr, _w, ct) in neigh:
+                for nbr, _w, ct in neigh:
                     cid = self._ctid(ct)
                     if cid < 0:
                         continue
@@ -297,11 +310,12 @@ class SurveillanceModel:
             np.concatenate(ct_parts).astype(np.int16, copy=False),
         )
 
-
     def step(
-        self, *,
-        t: int, epi_state: Dict[str, np.ndarray], 
-        scheduled_actions: Optional[Dict[str, Any]] = None
+        self,
+        *,
+        t: int,
+        epi_state: Dict[str, np.ndarray],
+        scheduled_actions: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, np.ndarray]:
         """
         Returns a daily SurveillanceBatch dict with:
@@ -310,55 +324,77 @@ class SurveillanceModel:
         """
         t = int(t)
 
-        #1) Check if testing/contact tracing were scheduled
+        # 1) Check if testing/contact tracing were scheduled
         if scheduled_actions:
             if "trace_cases" in scheduled_actions:
-                self.order_trace(t=t, cases=scheduled_actions["trace_cases"], params=scheduled_actions.get("trace_params"))
+                self.order_trace(
+                    t=t,
+                    cases=scheduled_actions["trace_cases"],
+                    params=scheduled_actions.get("trace_params"),
+                )
             if "test_nodes" in scheduled_actions:
-                self.order_test(t=t, nodes=scheduled_actions["test_nodes"], params=scheduled_actions.get("test_params"))
+                self.order_test(
+                    t=t,
+                    nodes=scheduled_actions["test_nodes"],
+                    params=scheduled_actions.get("test_params"),
+                )
 
-        #2) Baseline detection -- detect some cases on transition from E -> I
+        # 2) Baseline detection -- detect some cases on transition from E -> I
 
-
-        #Determine which cases are detected, and schedule them to be reported
-        new_inf = np.asarray(epi_state.get("new_inf_ids", np.empty(0, np.int32)), dtype = np.int32)
+        # Determine which cases are detected, and schedule them to be reported
+        new_inf = np.asarray(
+            epi_state.get("new_inf_ids", np.empty(0, np.int32)), dtype=np.int32
+        )
         if new_inf.size > 0 and self.p_detect_inf > 0.0:
             cand = new_inf[self.case_status[new_inf] == 0]
             if cand.size > 0:
-                #splitmix pseudo-random draw for determinism
+                # splitmix pseudo-random draw for determinism
                 u = u01_for_nodes(self.seed, t, cand, STAGE_INF)
                 det = cand[u < self.p_detect_inf]
                 if det.size > 0:
-                    self.case_status[det] = 1 #Queue discovered events
+                    self.case_status[det] = 1  # Queue discovered events
                     self._queue(t + self.delay, det, STAGE_INF)
 
-        #3) Handle active case-finding 
+        # 3) Handle active case-finding
         self._process_due_tests(t, epi_state)
         trace_src, trace_tgt, trace_ct = self._process_due_traces(t)
 
-        #4) Deliver reports due today
+        # 4) Deliver reports due today
         reported_nodes, reported_stage = self._deliver_due(t)
-        if reported_nodes.size == 0:
-            batch = _empty_batch(t)
-        else:
-            batch = {
-                "t": np.int32(t),
-                "reported_cases": reported_nodes,
-                "report_time": np.full(reported_nodes.size, np.int32(t), dtype=np.int32),
-                "reported_stage": reported_stage,
-                "age": self.ages[reported_nodes].astype(np.int32, copy=False),
-                "is_vax": self.is_vax[reported_nodes].astype(np.bool_, copy=False),
-                "trace_src": np.empty(0, dtype=np.int32),
-                "trace_tgt": np.empty(0, dtype=np.int32),
-                "trace_ct": np.empty(0, dtype=np.int16),
-            }
 
-            
+        batch = {
+            "t": np.int32(t),
+            "reported_cases": reported_nodes,
+            "report_time": (
+                np.full(reported_nodes.size, np.int32(t), dtype=np.int32)
+                if reported_nodes.size > 0
+                else np.empty(0, dtype=np.int32)
+            ),
+            "reported_stage": (
+                reported_stage
+                if reported_nodes.size > 0
+                else np.empty(0, dtype=np.int8)
+            ),
+            "age": (
+                self.ages[reported_nodes].astype(np.int32, copy=False)
+                if reported_nodes.size > 0
+                else np.empty(0, dtype=np.int32)
+            ),
+            "is_vax": (
+                self.is_vax[reported_nodes].astype(np.bool_, copy=False)
+                if reported_nodes.size > 0
+                else np.empty(0, dtype=np.bool_)
+            ),
+            "trace_src": trace_src,
+            "trace_tgt": trace_tgt,
+            "trace_ct": trace_ct,
+        }
+
         return batch
 
-
-    def reset_for_run(self, *, 
-    seed: Optional[int] = None, is_vax: Optional[np.ndarray] = None) -> None:
+    def reset_for_run(
+        self, *, seed: Optional[int] = None, is_vax: Optional[np.ndarray] = None
+    ) -> None:
         """
         Reset surveillance object for a new run
         """
@@ -386,7 +422,6 @@ class SurveillanceModel:
         ok = (idx < sorted_b.size) & (sorted_b[idx] == a)
         return ok
 
-
     def _ctid(self, ct: Any) -> int:
         """
         Convert string contact types to ct_ids
@@ -394,8 +429,6 @@ class SurveillanceModel:
         if isinstance(ct, (int, np.integer)):
             return int(ct)
         return int(self.ct_to_id.get(str(ct), -1))
-
-
 
 
 def _empty_batch(t: int) -> Dict[str, np.ndarray]:

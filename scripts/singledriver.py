@@ -26,7 +26,7 @@ from scripts.graph.graph_utils import (
 from scripts.simulation.outbreak_model import NetworkModel
 from scripts.utils.synth_data_processing import synthetic_data_process, build_edge_list
 from scripts.utils.fred_fetch import downloadPopData
-
+from scripts.visualization.network_visualization import visualize_lhd_evolution
 
 # Prepare and structure contact data
 
@@ -293,12 +293,18 @@ if __name__ == "__main__":
         }
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state, save_files = True)
-    model = run_single_model(contacts, cfg, seed = 13, 
-    policy_name="trace_then_isolate", 
-    lhd_overrides= {
-        "lhd_daily_capacity": 1000, 
-        "lhd_default_int_reduction": .99,  
-        "lhd_default_int_duration": 20, 
-        "p_detect_inf": 0.5  
-        }
-        )
+    model = run_single_model(
+        contacts,
+        cfg,
+        seed=13,
+        policy_name="trace_only",
+        lhd_overrides={
+            "lhd_daily_capacity": 1000,
+            "lhd_default_int_reduction": 0.5,
+            "lhd_default_int_duration": 20,
+            "p_detect_inf": 0.25,
+        },
+    )
+
+    # Visualize the LHD's network discovery and intervention evolution
+    visualize_lhd_evolution(model, run_number=0)

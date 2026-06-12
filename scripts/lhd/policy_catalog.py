@@ -1,5 +1,4 @@
-#scripts/lhd/policy_catalog.py
-
+# scripts/lhd/policy_catalog.py
 
 
 from __future__ import annotations
@@ -8,19 +7,19 @@ from typing import Dict, Any
 from scripts.lhd.algorithms_state import IsolateNewCases, TraceNewCases
 from scripts.lhd.planner import GreedyPlanner
 
-#Registry of algorithms currently implemented 
+# Registry of algorithms currently implemented
 ALGO_REGISTRY = {
     "isolate_new_cases": IsolateNewCases,
     "trace_new_cases": TraceNewCases,
 }
 
-#Registry of planners currently implemented
+# Registry of planners currently implemented
 PLANNER_REGISTRY = {
     "greedy": GreedyPlanner,
 }
 
 
-#LHD Policies, which are combinations of algorithms (prioritizing individuals) and planners (resource allocation strategies)
+# LHD Policies, which are combinations of algorithms (prioritizing individuals) and planners (resource allocation strategies)
 POLICIES: Dict[str, Dict[str, Any]] = {
     "observe_only": {
         "planner": "greedy",
@@ -58,10 +57,14 @@ def build_policy(policy_name: str, *, default_algo_params: dict) -> tuple[list, 
     algos = []
     for algo_name, params in spec.get("algorithms", []):
         cls = ALGO_REGISTRY[algo_name]
-        # allow injecting sensible defaults
-        if algo_name == "isolate_new_cases":
-            params = dict(params)
-            params.setdefault("params", default_algo_params)
-        algos.append(cls(**params))
+
+        # Get the default configuration for this algorithm (cost, priority, and action-specific params)
+        algo_config = default_algo_params.get(algo_name, {})
+        # Policy-specific overrides (from POLICIES dict) can be merged here if needed, but currently 'params' is empty.
+        algo_params = {
+            **algo_config,
+            **params,
+        }  # Merge policy-specific params (if any) over defaults
+        algos.append(cls(**algo_params))
 
     return algos, planner, name

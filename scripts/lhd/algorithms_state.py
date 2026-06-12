@@ -51,14 +51,14 @@ class TraceNewCases(AlgorithmBase):
             return []
         return [
             ActionProposal(
-                action="trace_contacts",
+                action="trace",
                 target_kind="node",
                 target=int(n),
                 priority=self.priority,
                 cost_units=max(self.cost_per_case, 1),
                 params=self.params,
                 source_algo=self.name,
-                reason="trace contacts for newly reported case",
+                reason="trace newly reported case",
             )
             for n in nodes
         ]

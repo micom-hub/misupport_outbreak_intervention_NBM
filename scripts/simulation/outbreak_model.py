@@ -164,6 +164,7 @@ class NetworkModel:
         self.all_new_exposures = [None]*self.n_replicates
         self.all_transmissions = [None]*self.n_replicates
         self.all_surveillance_batches = [None] * self.n_replicates
+        self.all_lhd_daily_logs = [None] * self.n_replicates
         self.all_stochastic_dieout = np.zeros(self.n_replicates, dtype = bool)
         self.all_end_days = np.ones(self.n_replicates, dtype = int)*self.Tmax
         self.all_lhd_results = [None] * self.n_replicates
@@ -532,7 +533,7 @@ class NetworkModel:
                 })
 
                 #Pass updated epidemiological states to surveillance
-                batch = batch = self.lhd.step(t=self.current_time, epi_state=epi_state)
+                batch = self.lhd.step(t=self.current_time, epi_state=epi_state)
 
                 surv_over_time.append(batch)
 
@@ -553,6 +554,7 @@ class NetworkModel:
             self.all_new_exposures[run] = [ne.copy() for ne in self.new_exposures]
             self.all_surveillance_batches[run] = surv_over_time
             self.all_lhd_results[run] = self.lhd.results_to_df()
+            self.all_lhd_daily_logs[run] = self.lhd.lhd_daily_log_to_df()
 
 
 

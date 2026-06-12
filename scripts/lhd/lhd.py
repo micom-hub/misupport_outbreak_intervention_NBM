@@ -98,17 +98,20 @@ class LocalHealthDepartment:
             "isolate_new_cases": {
                 "cost_per_case": 1,
                 "priority": 1.0,
-                "params": {},  # action params are filled by LHD defaults during execution
+                "params": {  # These are the parameters for the _apply_isolation method
+                    "reduction": self.default_iso_reduction,
+                    "duration": self.default_iso_duration,
+                    "contact_types": self.default_iso_contact_types,
+                },
             },
             "trace_new_cases": {
                 "cost_per_case": 1,
                 "priority": 1.0,
-                "params": {},
+                "params": self.default_trace_params,  # Pass the actual trace params here
             },
         }
         self.algorithms, self.planner, self.policy_name = build_policy(
-            self.policy_name,
-            default_algo_params=default_algo_params
+            self.policy_name, default_algo_params=default_algo_params
         )
 
         self.executor = Executor()
@@ -117,16 +120,12 @@ class LocalHealthDepartment:
         self._expiry_tokens_by_day = defaultdict(list)
 
         self._results_rows = []
+        self._action_log = []
+        self._lhd_daily_log = []
 
     # -------------------------------------------
     # Helpers for scheduling and expiring actions
     # -------------------------------------------
-    def _schedule_token(self, tok: MultiplierToken) -> None:
-        self._expiry_tokens_by_day[int(tok.expires_at)].append(tok)
-
-    def _as_nodes(self, targets) -> np.ndarray:
-        """Helper to convert targets to a numpy array of int32 nodes."""
-
     def process_expirations(self, t: int) -> int:
         """
         Revert control tokens due at day t. Returns count expired.
@@ -139,9 +138,17 @@ class LocalHealthDepartment:
     # ------------
     # Surveillance
     # ------------
-    def observe(self, *, t: int, epi_state: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def observe(
+        self,
+        *,
+        t: int,
+        epi_state: Dict[str, np.ndarray],
+        scheduled_actions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, np.ndarray]:
         # Provide state change to surveillance, get back observations
-        return self.surveillance.step(t=int(t), epi_state=epi_state, scheduled_actions=None)
+        return self.surveillance.step(
+            t=int(t), epi_state=epi_state, scheduled_actions=scheduled_actions
+        )
 
     # ---------------
     # Action Handling
@@ -149,9 +156,6 @@ class LocalHealthDepartment:
     def _apply_isolation(
         self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]
     ) -> tuple[int, int]:
-        """Applies isolation to a set of nodes, modifying multipliers and scheduling tokens."""
-
-    def _apply_isolation(self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]) -> tuple[int, int]:
         """
         For a given set of nodes and isolation parameters, order isolation
         """
@@ -188,49 +192,80 @@ class LocalHealthDepartment:
             self._schedule_token(tok)
             tokens_added = 1
 
+        # Log specific actions to the node-level log
+        for node in nodes:
+            self._action_log.append(
+                {
+                    "t": t,
+                    "node": int(node),
+                    "action": "isolate",
+                    "duration": duration,
+                    "reduction": reduction,
+                }
+            )
+
         return int(nodes.size), tokens_added
 
-    def _order_trace(self, *, t: int, cases: np.ndarray, params: Dict[str, Any]) -> int:
-        """Orders contact tracing for given cases through the surveillance model."""
-
-    def _order_trace(self, *, t: int, cases: np.ndarray, params: Dict[str, Any]) -> int:
+    def _order_trace(
+        self, *, t: int, cases: np.ndarray, params: Dict[str, Any]
+    ) -> tuple[int, int]:
         # Order contact tracing on given node(s)
         cases = np.asarray(cases, dtype=np.int32)
         if cases.size == 0:
-            return 0
-        merged = dict(self.default_trace_params)
-        merged.update(params or {})
+            return 0, 0
+
+        # Ensure params is a dict and merge carefully
+        passed_params = params if isinstance(params, dict) else {}
+        merged = {**self.default_trace_params, **passed_params}
+
         self.surveillance.order_trace(t=int(t), cases=cases, params=merged)
-        return int(cases.size)
 
-    def _order_test(self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]) -> int:
-        """Orders testing for given nodes through the surveillance model."""
+        for node in cases:
+            self._action_log.append(
+                {"t": t, "node": int(node), "action": "trace", "params": merged}
+            )
+        return int(cases.size), 0
 
-    def _order_test(self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]) -> int:
+    def _order_test(
+        self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]
+    ) -> tuple[int, int]:
         # Order tests for given node(s)
         nodes = np.asarray(nodes, dtype=np.int32)
         if nodes.size == 0:
-            return 0
+            return 0, 0
         merged = dict(self.default_test_params)
         merged.update(params or {})
         self.surveillance.order_test(t=int(t), nodes=nodes, params=merged)
-        return int(nodes.size)
 
-    def step(self, *, t: int, epi_state: Dict[str, np.ndarray], scheduled_surv_actions: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
+        for node in nodes:
+            self._action_log.append(
+                {"t": t, "node": int(node), "action": "test", "params": merged}
+            )
+        return int(nodes.size), 0
 
+    def step(
+        self,
+        *,
+        t: int,
+        epi_state: Dict[str, np.ndarray],
+        scheduled_surv_actions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, np.ndarray]:
         """
         One step for the LHD where it:
         1) Processes old interventions
-        2) Observes reported cases through surveillance 
-        3) 
+        2) Observes reported cases through surveillance
+        3)
         """
+
         t = int(t)
 
         # 1) Process old interventions that are expiring
         expired = self.process_expirations(t)
 
         # 2) Conduct surveillance on daily updates
-        batch = self.observe(t = t, epi_state = epi_state)
+        batch = self.observe(
+            t=t, epi_state=epi_state, scheduled_actions=scheduled_surv_actions
+        )
 
         # 3) Integrate findings to knowledge state
         self.state.process_batch(batch)
@@ -241,17 +276,25 @@ class LocalHealthDepartment:
             proposals.extend(algo.propose(self.state))
 
         # 5) Use planner to allocate resources to proposals
-        plan: ActionPlan = self.planner.select(proposals, capacity = self.daily_capacity)
+        plan: ActionPlan = self.planner.select(proposals, capacity=self.daily_capacity)
 
         # 7) Pass ActionPlan to executor
-        exec_summary: ExecutionSummary = self.executor.execute(lhd = self, t = t, plan = plan)
+        exec_summary: ExecutionSummary = self.executor.execute(lhd=self, t=t, plan=plan)
         exec_summary.tokens_expired = expired
 
         # 8) Record results of the day
-        self._log_day(t=t, batch=batch, proposals=proposals, plan=plan, summary=exec_summary)
+        self._log_day(
+            t=t,
+            batch=batch,
+            proposals=proposals,
+            plan=plan,
+            summary=exec_summary,
+            run_number=self.model.replicate_ind,
+        )
 
         return batch
 
+    # Results writer helper
     def _log_day(
         self,
         *,
@@ -259,23 +302,46 @@ class LocalHealthDepartment:
         batch: Dict[str, np.ndarray],
         proposals: List[ActionProposal],
         plan: ActionPlan,
+        run_number: int,
         summary: ExecutionSummary,
     ) -> None:
-        """Records daily LHD metrics and actions for later aggregation."""
-
-    # Results writer helper
-    def _log_day(self, *, t: int, batch: Dict[str, np.ndarray], proposals: List[ActionProposal], plan: ActionPlan, summary: ExecutionSummary) -> None:
-        rep = np.asarray(batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32)
+        rep = np.asarray(
+            batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32
+        )
         proposed_actions = Counter([p.action for p in proposals])
         selected_actions = Counter([p.action for p in plan.selected])
 
+        # Extract nodes for specific actions
+        nodes_isolated_today = [
+            p.target
+            for p in plan.selected
+            if p.action == "isolate" and p.target_kind == "node"
+        ]
+        nodes_contact_traced_today = [
+            p.target
+            for p in plan.selected
+            if p.action == "trace" and p.target_kind == "node"
+        ]
+
+        # Extract newly discovered nodes from tracing
+        trace_src = batch.get("trace_src", np.empty(0, dtype=np.int32))
+        trace_tgt = batch.get("trace_tgt", np.empty(0, dtype=np.int32))
+        newly_discovered_trace_nodes = (
+            np.unique(np.concatenate([trace_src, trace_tgt])).tolist()
+            if trace_src.size > 0
+            else []
+        )
+
         row = {
+            "run_number": run_number,
             "t": int(t),
             "policy_name": self.policy_name,
             "capacity_available": int(plan.capacity_available),
             "capacity_used": int(plan.capacity_used),
             "reported_cases_today": int(rep.size),
-            "new_cases_today": int(getattr(self.state, "new_cases_today", np.empty(0, np.int32)).size),
+            "new_cases_today": int(
+                getattr(self.state, "new_cases_today", np.empty(0, np.int32)).size
+            ),
             "known_cases_total": int(len(getattr(self.state, "known_case_list", []))),
             "new_edges_today": int(getattr(self.state, "new_edges_today", 0)),
             "known_edges_total": int(len(getattr(self.state, "known_edges", []))),
@@ -283,6 +349,16 @@ class LocalHealthDepartment:
             "selected_total": int(len(plan.selected)),
             "tokens_scheduled": int(summary.tokens_scheduled),
             "tokens_expired": int(summary.tokens_expired),
+            "isolation_actions_taken_today": summary.applied_by_action.get(
+                "isolate", 0
+            ),
+            "nodes_isolated_today": nodes_isolated_today,
+            "tracing_actions_taken_today": summary.info_orders_by_action.get(
+                "trace", 0
+            ),
+            "nodes_contact_traced_today": nodes_contact_traced_today,
+            "newly_reported_cases_today": rep.tolist(),
+            "newly_discovered_trace_nodes_today": newly_discovered_trace_nodes,
         }
 
         # flatten action counts
@@ -296,24 +372,35 @@ class LocalHealthDepartment:
             row[f"info_{k}"] = int(v)
 
         self._results_rows.append(row)
+        self._lhd_daily_log.append(row)
+
+    def lhd_daily_log_to_df(self) -> pd.DataFrame:
+        return pd.DataFrame(self._lhd_daily_log)
 
     def results_to_df(self) -> pd.DataFrame:
         # Export results to dataframe
         return pd.DataFrame(self._results_rows)
 
-    # Helper to convert to nodes dtype
+    def action_log_to_df(self) -> pd.DataFrame:
+        # Export detailed node-level actions to dataframe
+        return pd.DataFrame(self._action_log)
+
+    def _schedule_token(self, tok: MultiplierToken) -> None:
+        self._expiry_tokens_by_day[int(tok.expires_at)].append(tok)
+
     def _as_nodes(self, targets) -> np.ndarray:
         return np.asarray(targets, dtype=np.int32)
 
     # Reset Helper
     def reset_for_run(self):
         """
-        Reset LHD state for new model run 
+        Reset LHD state for new model run
         """
-        self.expiry = {}
-        self.action_log = []
-        self._active_actions = {}
-        self._action_token_counts = {}
+
+        self._expiry_tokens_by_day.clear()
+        self._results_rows.clear()
+        self._action_log.clear()
+        self._lhd_daily_log.clear()
         if hasattr(self, "surveillance") and self.surveillance is not None:
             self.surveillance.reset_for_run(seed=self.surveillance.seed, is_vax = self.model.is_vaccinated)
         if hasattr(self, "state") and self.state is not None:

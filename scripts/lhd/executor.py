@@ -9,7 +9,7 @@ from scripts.utils.dict_utilities import params_key
 from scripts.lhd.response_types import ActionPlan, ExecutionSummary, ActionProposal
 
 
-#Class to execute actions, contains logic for each action and target kind, with how to do them
+# Class to execute actions, contains logic for each action and target kind, with how to do them
 class Executor:
     def execute(self, *, lhd, t: int, plan: ActionPlan) -> ExecutionSummary:
         summary = ExecutionSummary()
@@ -33,16 +33,18 @@ class Executor:
                 summary.applied_by_action[action] = summary.applied_by_action.get(action, 0) + applied
                 summary.tokens_scheduled += tokens_added
 
-            elif action == "trace_contacts" and target_kind == "node":
+            elif action == "trace" and target_kind == "node":
                 nodes = lhd._as_nodes(targets)
-                lhd.surveillance.order_trace(t=t, cases=nodes, params=params)
-                summary.info_orders_by_action[action] = summary.info_orders_by_action.get(action, 0) + int(nodes.size)
+                applied, _ = lhd._order_trace(t=t, cases=nodes, params=params)
+                summary.info_orders_by_action[action] = (
+                    summary.info_orders_by_action.get(action, 0) + applied
+                )
 
-            elif action == "test_nodes" and target_kind == "node":
+            elif action == "test" and target_kind == "node":
                 nodes = lhd._as_nodes(targets)
-                lhd.surveillance.order_test(t=t, nodes=nodes, params=params)
-                summary.info_orders_by_action[action] = summary.info_orders_by_action.get(action, 0) + int(nodes.size)
+                applied, _ = lhd._order_test(t=t, nodes=nodes, params=params)
+                summary.info_orders_by_action[action] = (
+                    summary.info_orders_by_action.get(action, 0) + applied
+                )
 
         return summary
-
- 

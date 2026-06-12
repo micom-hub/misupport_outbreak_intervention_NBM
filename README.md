@@ -23,7 +23,7 @@ In an outbreak response, local health departments (LHDs) apply their resources t
 To set up the environment using the provided YAML file:
 ```bash
 conda env create -f environment.yml
-conda activate lhdsim
+conda activate LHDsim
 ```
 
 *Note: For `FredFetch` functionality, ensure a compatible `chromedriver` is installed, or manually place synthetic population ZIP files in `./data/{County}.zip`.*
@@ -35,7 +35,7 @@ conda activate lhdsim
 ### Quick Start (Single Run)
 To run a single simulation with default parameters and a single LHD policy:
 ```bash
-python scripts/singledriver.py
+python -m scripts.singledriver
 ```
 This is useful for debugging or visualizing a outbreak trajectories for a single set of outbreak parameters.
 
