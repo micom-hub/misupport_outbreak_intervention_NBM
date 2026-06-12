@@ -297,7 +297,7 @@ if __name__ == "__main__":
         contacts,
         cfg,
         seed=13,
-        policy_name="trace_only",
+        policy_name="trace_then_isolate",
         lhd_overrides={
             "lhd_daily_capacity": 1000,
             "lhd_default_int_reduction": 0.5,

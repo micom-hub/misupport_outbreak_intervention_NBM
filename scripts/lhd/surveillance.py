@@ -419,7 +419,9 @@ class SurveillanceModel:
         if a.size == 0 or sorted_b.size == 0:
             return np.zeros(a.size, dtype=bool)
         idx = np.searchsorted(sorted_b, a)
-        ok = (idx < sorted_b.size) & (sorted_b[idx] == a)
+        # Ensure indices are within bounds before accessing the array
+        idx_clipped = np.clip(idx, 0, sorted_b.size - 1)
+        ok = sorted_b[idx_clipped] == a
         return ok
 
     def _ctid(self, ct: Any) -> int:

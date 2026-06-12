@@ -62,9 +62,9 @@ class LocalHealthDepartment:
         self.default_iso_contact_types = ["cas", "sch", "wp"]
 
         self.default_trace_params = {
-            "delay_days": 0, #do day-of tracing
-            "recall_prob": 0.25, #25% recall prob for any given contact
-            "max_per_case": 25,  #limit on total recalled
+            "delay_days": 0,  # do day-of tracing
+            "recall_prob": float(self.model.config.lhd.trace_recall_prob),
+            "max_per_case": 25,  # limit on total recalled
             "contact_types": ["hh", "sch", "wp"],
         }
 
@@ -108,6 +108,25 @@ class LocalHealthDepartment:
                 "cost_per_case": 1,
                 "priority": 1.0,
                 "params": self.default_trace_params,  # Pass the actual trace params here
+            },
+            "test_contacts_of_known_cases": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": self.default_test_params,
+            },
+            "trace_edge_endpoints": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": self.default_trace_params,
+            },
+            "isolate_neighbors_of_high_degree_cases": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": {
+                    "reduction": self.default_iso_reduction,
+                    "duration": self.default_iso_duration,
+                    "contact_types": self.default_iso_contact_types,
+                },
             },
         }
         self.algorithms, self.planner, self.policy_name = build_policy(

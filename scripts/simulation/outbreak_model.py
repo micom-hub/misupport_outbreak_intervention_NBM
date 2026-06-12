@@ -1,4 +1,4 @@
-#scripts/simulation/outbreak_model.py
+# scripts/simulation/outbreak_model.py
 from __future__ import annotations
 import os
 import numpy as np
@@ -16,7 +16,7 @@ from scripts.config import ModelConfig
 from scripts.lhd.lhd import LocalHealthDepartment
 from scripts.graph.graph_utils import GraphData 
 
-#Define numba loop outside of model, called by determine_new_exposures
+# Define numba loop outside of model, called by determine_new_exposures
 @njit
 def _determine_transmissions_numba(
     state,
@@ -41,7 +41,7 @@ def _determine_transmissions_numba(
     trans_ct_buf,  
     legacy_seed
 ):
-    #Seed legacy RNG 
+    # Seed legacy RNG
     np.random.seed(int(legacy_seed))
 
     n_ct = len(indptr_list)
@@ -51,7 +51,7 @@ def _determine_transmissions_numba(
     for ii in range(infectious_indices.shape[0]):
         src = infectious_indices[ii]
 
-        #compute per-src factors
+        # compute per-src factors
         src_inf_mult = rel_inf_vax if is_vax[src] else 1.0
 
         for ct_ind in range(n_ct):
@@ -73,11 +73,11 @@ def _determine_transmissions_numba(
             for k in range(start, end):
                 neighbor = indices[k]
 
-                #ensure neighbor is susceptible
+                # ensure neighbor is susceptible
                 if state[neighbor] != 0:
                     continue
-                
-                #ensure neighbor wasn't already infected this step 
+
+                # ensure neighbor wasn't already infected this step
                 if infected_stamp[neighbor] == stamp_value:
                     continue
 
@@ -91,13 +91,13 @@ def _determine_transmissions_numba(
 
                 if vax_efficacy != 0.0 and is_vax[neighbor]:
                     prob = prob * (1.0 - vax_efficacy)
-                
+
                 a = ages[neighbor]
                 if a <= 5:
                     prob = prob * susc_under5
                 elif a >= 65:
                     prob = prob * susc_elderly
-                
+
                 if prob <= 0.0:
                     continue
                 if prob >=1.0:
@@ -116,12 +116,7 @@ def _determine_transmissions_numba(
     return out_n
 
 
-
-
-
-
-
-#-----Outbreak Model-------
+# -----Outbreak Model-------
 class NetworkModel:
     def __init__(
         self,  
@@ -134,14 +129,14 @@ class NetworkModel:
         """
         Unpack config and graphdata
         """
-        
+
         self.config = config
         self.config.validate()
-        
+
         self._assign_graphdata_to_model(graphdata)
         self.Tmax = self.config.sim.simulation_duration
 
-        #Handle RNGs, seeds derived and assigned in _initialize_replicate
+        # Handle RNGs, seeds derived and assigned in _initialize_replicate
         if seed is not None:
             self._base_seed = int(seed)
         else:
@@ -154,12 +149,11 @@ class NetworkModel:
         self._numba_legacy_seed_base = None
         self._seed_metadata = {}
 
-        #run metadata:
+        # run metadata:
         self.county = self.config.sim.county
         self.n_replicates = self.config.sim.n_replicates
 
-
-        #Set up storage for full run
+        # Set up storage for full run
         self.all_states_over_time = [None]*self.n_replicates
         self.all_new_exposures = [None]*self.n_replicates
         self.all_transmissions = [None]*self.n_replicates
@@ -171,15 +165,14 @@ class NetworkModel:
 
         self.all_vax_status = [None] * self.n_replicates
 
-        #Results that are saved go to run_dir
+        # Results that are saved go to run_dir
         self.results_folder = run_dir 
-        #Create if not created by driver
+        # Create if not created by driver
         if self.config.sim.save_data_files:
-                os.makedirs(self.results_folder, exist_ok = True)
+            os.makedirs(self.results_folder, exist_ok=True)
 
-   
     def _assign_graphdata_to_model(self, graphdata: GraphData):
-    # graphdata assumed to be a full GraphData object returned by build_graph_data
+        # graphdata assumed to be a full GraphData object returned by build_graph_data
         self.N = graphdata.N
         self.edge_list = graphdata.edge_list
         self.adj_matrix = graphdata.adj_matrix
@@ -199,7 +192,6 @@ class NetworkModel:
         self.in_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
         self.out_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
 
-
     def _initialize_replicate(self, run: int):
         """
         Set up new SEIR arrays and seed initial infectious individuals for each stochastic replicate
@@ -207,13 +199,13 @@ class NetworkModel:
         self.current_time = 0
         self.replicate_ind = int(run)
 
-        #Set run seed for the replicate, update RNGs
+        # Set run seed for the replicate, update RNGs
         self.replicate_seed = int(derive_seed_from_base(self._base_seed, self.replicate_ind))
         self.rng = np.random.default_rng(self.replicate_seed)
         self.lhd_seed = int(derive_seed_from_base(self.replicate_seed, "lhd"))
         self.surv_seed = int(derive_seed_from_base(self.replicate_seed, "surveillance"))
 
-        #store seeds for reproducibility
+        # store seeds for reproducibility
         self._seed_metadata = {
             "base_seed":int(self._base_seed),
             "replicate_ind": int(self.replicate_ind),
@@ -222,25 +214,22 @@ class NetworkModel:
             "surveillance_seed":int(self.surv_seed)
         }
         self._numba_legacy_seed_base = int(derive_seed_from_base(self.replicate_seed, "numba"))
-        
 
-
-       #Set vaccinations
+        # Set vaccinations
         self.is_vaccinated = self.rng.random(self.N) < self.config.epi.vax_uptake
-        
 
-        #State tracking variables; S = 0, E = 1, I = 2, R = 3
+        # State tracking variables; S = 0, E = 1, I = 2, R = 3
         self.state = np.zeros(self.N, dtype = np.int8) 
         self.time_in_state = np.zeros(self.N, dtype = np.float32)
         self.incubation_periods = np.full(self.N, np.nan, dtype = np.float32)
         self.infectious_periods = np.full(self.N, np.nan, dtype = np.float32)
 
-        #Per-run trajectories
+        # Per-run trajectories
         self.states_over_time = [] 
         self.new_exposures = []
         self.new_infections = []
 
-        #pick random I0 if none provided
+        # pick random I0 if none provided
         initial_infectious = self.config.sim.I0
         self.I0 = initial_infectious
         if isinstance(initial_infectious, int):
@@ -258,38 +247,37 @@ class NetworkModel:
         self.new_exposures.append(np.empty(0, dtype = np.int32))
         self.new_infections.append(initial_infectious)
 
-        #Reset run flags
+        # Reset run flags
         self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
 
-        #Reset LHD intervention Multipliers
+        # Reset LHD intervention Multipliers
         self.in_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
         self.out_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
 
-        #Pre-allocate transmission event space
+        # Pre-allocate transmission event space
         if not hasattr(self, "_trans_src_buf") or self._trans_src_buf.shape[0] != self.N:
             self._trans_src_buf = np.empty(self.N, dtype=np.int32)
             self._trans_tgt_buf = np.empty(self.N, dtype=np.int32)
             self._trans_ct_buf = np.empty(self.N, dtype=np.int16)
         if not hasattr(self, "_infected_stamp") or self._infected_stamp.shape[0] != self.N:
-            self._infected_stamp = np.zeros(self.N, dtype=np.int32)
-        self._infected_stamp.fill(0)
+            self._infected_stamp = np.full(self.N, -1, dtype=np.int32)
+        self._infected_stamp.fill(-1)
 
-
-
-        #Set-up LHD
+        # Set-up LHD
         self.lhd = LocalHealthDepartment(
-            model = self,
-            seed = self.lhd_seed,
-            surv_seed = self.surv_seed,
-            capacity = self.config.lhd.lhd_daily_capacity,
-            policy_name = getattr(self.config.lhd, "policy_name", "observe_only")
+            model=self,
+            seed=self.lhd_seed,
+            surv_seed=self.surv_seed,
+            capacity=self.config.lhd.lhd_daily_capacity,
+            policy_name=getattr(self.config.lhd, "policy_name", "observe_only"),
         )
 
         self.lhd.reset_for_run()
 
         return
-             
+    _initialize_states = _initialize_replicate  # Alias for compatibility
+
     def assign_incubation_period(self, inds):
         """
         Take a list of newly-assigned exposed indices and assign an incubation period
@@ -300,10 +288,10 @@ class NetworkModel:
         else:
             is_vax_inds = np.zeros(inds.shape, dtype=bool)
         mean_inc = np.where(is_vax_inds, float(self.config.epi.incubation_period_vax), float(self.config.epi.incubation_period))
-       
-        #shape is gamma_alpha, scale is mean/shape
+
+        # shape is gamma_alpha, scale is mean/shape
         return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inc/self.config.epi.gamma_alpha)
-    
+
     def assign_infectious_period(self, inds):
         """
         Take a list of newly-assigned infectious indices and assign an infectious period
@@ -315,9 +303,8 @@ class NetworkModel:
             is_vax_inds = np.zeros(inds.shape, dtype=bool)
         mean_inf = np.where(is_vax_inds, float(self.config.epi.infectious_period_vax), float(self.config.epi.infectious_period))
 
-
         return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf/self.config.epi.gamma_alpha)
-    
+
     def _prepare_numba_structures(self):
         """
         Convert self.csr_by_type and multiplier dicts into Numba-friendly structures
@@ -374,7 +361,7 @@ class NetworkModel:
         infectious_indices = np.where(self.state == 2)[0]
         if infectious_indices.size == 0:
             return (np.empty(0, np.int32), np.empty(0, np.int32), np.empty(0, np.int16))
-        
+
         base_prob = float(self.config.epi.base_transmission_prob)
         vax_efficacy = float(self.config.epi.vax_efficacy)
         susc_under5 = float(self.config.epi.susceptibility_multiplier_under_five)
@@ -386,7 +373,7 @@ class NetworkModel:
 
         if not getattr(self, "_numba_contact_types", None) or len(self._numba_contact_types) == 0:
             return (np.empty(0, np.int32), np.empty(0, np.int32), np.empty(0, np.int16))
-        
+
         self._update_multiplier_matrices()
 
         stamp_value = np.int32(self.current_time) #check for same-day inf
@@ -417,12 +404,11 @@ class NetworkModel:
             legacy_seed
         )
 
-        # Gather new transmission info  
+        # Gather new transmission info
         src = self._trans_src_buf[:tot]
         tgt = self._trans_tgt_buf[:tot]
         ct  = self._trans_ct_buf[:tot]
         return src, tgt, ct
-        
 
     @profile
     def step(self):
@@ -430,7 +416,7 @@ class NetworkModel:
         Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
         """
 
-        #S -> E
+        # S -> E
         trans_src, newly_exposed, trans_ct = self.determine_transmissions()
 
         if newly_exposed.size > 0:
@@ -438,7 +424,7 @@ class NetworkModel:
             self.time_in_state[newly_exposed] = -1 #start at -1 since 1 is immediately added in E-> I 
             self.incubation_periods[newly_exposed] = self.assign_incubation_period(newly_exposed)
 
-        #E -> I
+        # E -> I
         exposed = np.where(self.state == 1)[0]
         self.time_in_state[exposed] += 1
         to_infectious = exposed[self.time_in_state[exposed] >= self.incubation_periods[exposed]]
@@ -448,7 +434,7 @@ class NetworkModel:
             self.time_in_state[to_infectious] = -1 #1 added in next step
             self.infectious_periods[to_infectious] = self.assign_infectious_period(to_infectious)
 
-        #I -> R
+        # I -> R
         infectious = np.where(self.state == 2)[0]
         self.time_in_state[infectious] += 1
         to_recovered = infectious[self.time_in_state[infectious] >= self.infectious_periods[infectious]]
@@ -457,11 +443,11 @@ class NetworkModel:
             self.state[to_recovered] = 3
             self.time_in_state[to_recovered] = -1
 
-        #Advance Recovered
+        # Advance Recovered
         recovered = np.where(self.state == 3)[0]
         self.time_in_state[recovered] += 1
 
-         #R -> S with waning immunity
+        # R -> S with waning immunity
         cid = self.config.epi.conferred_immunity_duration
         if cid is not None:
             try:
@@ -470,16 +456,16 @@ class NetworkModel:
                 cid_val = None
 
             if cid_val is not None and cid_val >= 0:
-                #Revert those with greater time_in_state to sus
+                # Revert those with greater time_in_state to sus
                 waned_mask = (self.state == 3) & (self.time_in_state >= cid_val)
                 if waned_mask.any():
                     waned_nodes = np.where(waned_mask)[0]
-                    #move to sus and reset everything
+                    # move to sus and reset everything
                     self.state[waned_nodes] = 0
                     self.time_in_state[waned_nodes] = 0
                     self.incubation_periods[waned_nodes] = np.nan
                     self.infectious_periods[waned_nodes] = np.nan
-                    #check if there is lasting immunity, and reduce in multiplier
+                    # check if there is lasting immunity, and reduce in multiplier
                     lasting = self.config.epi.lasting_partial_immunity
                     if lasting:
                         lasting = np.clip(lasting, 0, 1)
@@ -487,7 +473,7 @@ class NetworkModel:
                         for ct in self.contact_types:
                             self.in_multiplier[ct][waned_nodes] *= reduced_sus
 
-        #Save timestep data
+        # Save timestep data
         S = list(np.where(self.state == 0)[0])
         E = list(np.where(self.state == 1)[0])
         I = list(np.where(self.state == 2)[0])  # noqa: E741
@@ -503,9 +489,7 @@ class NetworkModel:
             "inf_ids": np.array(I, dtype = np.int32) #all I
         }
 
-
         return trans_src, newly_exposed, trans_ct, epi_state
-
 
     def simulate(self):
 
@@ -513,7 +497,7 @@ class NetworkModel:
             transmissions_over_time = []
             surv_over_time = []
             self._initialize_replicate(run)
-            #store vaccination status for run
+            # store vaccination status for run
             self.all_vax_status[run] = self.is_vaccinated.copy()
 
             t = 0
@@ -521,10 +505,10 @@ class NetworkModel:
                 t += 1 #day 0 is recorded in initialization
                 self.current_time = t
 
-                #advance SEIR 
+                # advance SEIR
                 trans_src, trans_tgt, trans_ct, epi_state = self.step()
-                
-                #Update transmission tracking
+
+                # Update transmission tracking
                 transmissions_over_time.append({
                     "time":np.int32(self.current_time),
                     "src":trans_src.copy(),
@@ -532,12 +516,12 @@ class NetworkModel:
                     "ct": trans_ct.copy()
                 })
 
-                #Pass updated epidemiological states to surveillance
+                # Pass updated epidemiological states to surveillance
                 batch = self.lhd.step(t=self.current_time, epi_state=epi_state)
 
                 surv_over_time.append(batch)
 
-                #Run LHD step once
+                # Run LHD step once
                 # self.lhd.step(self.current_time, snapshot)
 
                 S, E, I, R = self.states_over_time[-1]  # noqa: E741
@@ -545,8 +529,8 @@ class NetworkModel:
                     self.simulation_end_day = t 
                     self.stochastic_dieout = True
                     break
-                
-            #save per run data
+
+            # save per run data
             self.all_transmissions[run] = transmissions_over_time
             self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
             self.all_stochastic_dieout[run] = self.stochastic_dieout
@@ -555,8 +539,6 @@ class NetworkModel:
             self.all_surveillance_batches[run] = surv_over_time
             self.all_lhd_results[run] = self.lhd.results_to_df()
             self.all_lhd_daily_logs[run] = self.lhd.lhd_daily_log_to_df()
-
-
 
     def results_to_df(self, metrics: List[str] = ["peakPrev", "peakTime", "outbreakSize"]) -> pd.DataFrame:
         """
@@ -572,13 +554,13 @@ class NetworkModel:
         if metrics is None:
             metrics = ["peakPrev", "peakTime", "outbreakSize"]
 
-        #Check that metrics requested are supported
+        # Check that metrics requested are supported
         metrics_supported = {"peakPrev", "peakTime", "outbreakSize"}
         unknown = [metric for metric in metrics if metric not in metrics_supported]
 
         if unknown:
             warnings.warn(f"Unknown metric requested: {unknown}. Please select one of {metrics_supported}")
-        
+
         def _aggregate_exposures(exposures_list):
             """
             helper to take a list of exposures and aggregated exposures
@@ -598,37 +580,37 @@ class NetworkModel:
                         continue
                 if a.size > 0:
                     exposures.append(a)
-                
+
             if not exposures:
                 return np.empty(0, dtype = np.int32)
             if len(exposures) == 1:
                 return exposures[0]
             return np.concatenate(exposures)
-        
+
         rows = []
         n_runs = self.n_replicates
         for run in range(n_runs):
             row = {"run_number": int(run)}
 
-            states_list = self.all_states_over_time[run]
-            
-            #Build prevalence time series
+            states_list = self.all_states_over_time[run] or []
+
+            # Build prevalence time series
             prevalences = []
             for timestep in states_list:
                 if timestep is None:
                     nI = 0
                 else:
                     try:
-                        #Gather infectious nodes
+                        # Gather infectious nodes
                         I_nodes = timestep[2]
                         nI = int(len(I_nodes))
                     except Exception:
                         nI = 0
                 prevalences.append(float(nI) / float(self.N))
-            
-            #Metrics:
 
-            #peakPrev & peakTime
+            # Metrics:
+
+            # peakPrev & peakTime
             if "peakPrev" in metrics or "peakTime" in metrics:
                 if prevalences:
                     arr = np.asarray(prevalences, dtype = float)
@@ -643,40 +625,38 @@ class NetworkModel:
                 if "peakTime" in metrics:
                     row["peakTime"] = peakTime_val
 
-            #Outbreak size -- unique infected nodes (I0 plus all ever exposed)
+            # Outbreak size -- unique infected nodes (I0 plus all ever exposed)
             if "outbreakSize" in metrics:
                 exposures_list = self.all_new_exposures[run]
 
                 aggregate = _aggregate_exposures(exposures_list)
 
-                #Combine I0 with all exposures for outbreak size
+                # Combine I0 with all exposures for outbreak size
                 init_I0 = np.array(self.I0, dtype = int)
-                
+
                 unique_infectious = np.unique(np.concatenate([init_I0, aggregate]))
                 outbreakSize = int(len(unique_infectious))
                 row["outbreakSize"] = outbreakSize
 
-            
-            #Add row to rows
+            # Add row to rows
             rows.append(row)
 
-        
-        #Build and order dataframe, handle typing
+        # Build and order dataframe, handle typing
         cols = ["run_number"] + [metric for metric in metrics]
         df = pd.DataFrame(rows)
         if "peakTime" in metrics and "peakTime" in df.columns:
-            df["peakTime"] = df["peakTime"].astype("int64")
+            df["peakTime"] = df["peakTime"].astype("Int64")
         if "peakPrev" in metrics and "peakPrev" in df.columns:
             df["peakPrev"] = df["peakPrev"].astype(float)
         if "outbreakSize" in metrics and "outbreakSize" in df.columns:
-            df["outbreakSize"] = df["outbreakSize"].astype("int64")
-        #Put cols in order, NA if requested column wasn't calculated
+            df["outbreakSize"] = df["outbreakSize"].astype("Int64")
+        # Put cols in order, NA if requested column wasn't calculated
         for c in cols:
             if c not in df.columns:
                 df[c] = pd.NA
 
         return df[cols]
-        
+
     def timeseries_to_df(self, type: str = "prevalence") -> pd.DataFrame:
         """
         Returns a wide pandas dataframe with a time series for each stochastic run. Fills with 0s if run ends early
@@ -751,26 +731,26 @@ class NetworkModel:
         Draws a network containing outbreak-involved nodes (E,I,R) + neighbors at time t
         """
 
-        #get indices of E, I, R
+        # get indices of E, I, R
         S, E, I, R = self.all_states_over_time[run_number][t] # noqa: E741
         affected_inds = set(E) | set(I) | set(R) 
 
-        #neighbors of affected nodes
+        # neighbors of affected nodes
         neighbors = set()
         for ind in affected_inds:
             for (nbr, w, ct) in self.neighbor_map.get(int(ind), []):
                 neighbors.add(int(nbr))
 
-        #combine affected nodes and neighbors
+        # combine affected nodes and neighbors
         plot_nodes = sorted(affected_inds | neighbors)
 
-        #build subgraph
+        # build subgraph
         name_to_ind = {name: idx for idx, name in enumerate(plot_nodes)}
         subg = ig.Graph()
         subg.add_vertices(len(plot_nodes))
         subg.vs["name"] = plot_nodes
 
-        #add edges
+        # add edges
         edges = []
         for src in plot_nodes:
             for (tgt, w, ct) in self.neighbor_map.get(int(src), []):
@@ -780,7 +760,7 @@ class NetworkModel:
         if edges:
             subg.add_edges(edges)
 
-        #color by state
+        # color by state
         color_map = {}
         for v in subg.vs:
             name = v["name"]
@@ -788,13 +768,13 @@ class NetworkModel:
                 color_map[name] = "blue"
             elif name in E:
                 color_map[name] = "orange"
-            
+
             elif name in I:
                 color_map[name] = "red"
 
             elif name in R:
                 color_map[name] = "green"
-            
+
             else:
                 color_map[name] = "gray"
 
@@ -802,7 +782,7 @@ class NetworkModel:
 
         layout = subg.layout("fr")
 
-        #plot
+        # plot
         if ax is None:
             fig, ax = plt.subplots(figsize = (10, 10))
             show_plot = True
@@ -810,7 +790,7 @@ class NetworkModel:
             show_plot = False
         if clear:
             ax.clear()
-        
+
         ig.plot(
             subg,
             layout = layout,
@@ -823,7 +803,7 @@ class NetworkModel:
         )
         ax.set_title(f"Network at t = {t}")
 
-        #Save if requested
+        # Save if requested
         if saveFile:
             plotpath = os.path.join(self.results_folder, f"network_at_{str(t)}")
             if suffix:
@@ -832,8 +812,5 @@ class NetworkModel:
         if show_plot and self.config.sim.display_plots:
             plt.show()
         plt.close()
-    
 
         return
-
-    
