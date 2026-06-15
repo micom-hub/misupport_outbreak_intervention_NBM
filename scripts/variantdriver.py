@@ -268,7 +268,7 @@ if __name__ == "__main__":
     #Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
     result = run_experiment(
         csv_path="testLHS.csv",
-        n_samples=50,
+        n_samples=5,
         policy_config=POLICY_CONFIGURATION,
         output_dir="model_runs/TESTMODELRUN",
         base_cfg=None,

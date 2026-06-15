@@ -134,7 +134,7 @@ Returns:
     return out_variants
 
 
-#parsing helper
+# parsing helper
 def _try_parse_value(s: str):
     """Try to interpret string as int, then float, then bool, else return original string."""
     if s is None:
@@ -156,7 +156,7 @@ def _try_parse_value(s: str):
     except Exception:
         return s
 
-#get variant parameter values from name
+# get variant parameter values from name
 def _parse_variant_name(variant_name: str, name_sep: str = "__") -> Tuple[str, Dict[str, Any]]:
     """
     Parse variant_name like "Base__param1=1__param2=0.5" into:
@@ -178,7 +178,7 @@ def _parse_variant_name(variant_name: str, name_sep: str = "__") -> Tuple[str, D
     return base, params
 
 
-#Aggregate variant results from sweeps
+# Aggregate variant results from sweeps
 def aggregate_variant_results(
     variant_results: List[Dict[str, Any]],
     *,
@@ -186,7 +186,8 @@ def aggregate_variant_results(
     aggregate_sweeps: bool = True,
     aggregated_summary: bool = True,
     reduced_results: bool = False,
-    numeric_aggs: Optional[List[str]] = None
+    status_path: Optional[str] = None,
+    numeric_aggs: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
     """
     Build a per-run DataFrame for all variants and optionally an aggregated summary.
@@ -199,6 +200,7 @@ def aggregate_variant_results(
         aggregate_sweeps: if True, parsed sweep parameters are exposed as columns in overall_df
         aggregated_summary: if True, return a second DataFrame with aggregated summary stats
         aggregated_action_log: if True, returns a third Dataframe with aggregated action log
+        status_path: if provided, save a json file summarizing run success/failure
         numeric_aggs: list of aggregation functions to compute for numeric columns (default: ['mean','std','median','min','max'])
 
     Returns:
@@ -215,31 +217,50 @@ def aggregate_variant_results(
         - If a model or model.epi_outcomes() fails, that variant will be skipped with a warning.
         - The function always returns overall_df (may be empty).
     """
+
     if numeric_aggs is None:
         numeric_aggs = ["mean", "std", "median", "min", "max"]
 
     per_run_frames: List[pd.DataFrame] = []
     all_param_keys = set()
+    run_status = []
 
     for i, entry in enumerate(variant_results):
         vname = entry.get("variant_name") or entry.get("name") or f"variant_{i}"
         model = entry.get("model", None)
-
         base_name, params = _parse_variant_name(vname, name_sep=name_sep)
+
+        status_info = {
+            "variant_name": vname,
+            "base_variant": base_name,
+            "success": False,
+            "error": None,
+        }
+
         all_param_keys.update(params.keys())
 
         if model is None:
-            warnings.warn(f"aggregate_variant_results: missing model for variant '{vname}' - skipping")
+            warnings.warn(
+                f"aggregate_variant_results: missing model for variant '{vname}' - skipping"
+            )
+            status_info["error"] = "Model object is missing or None"
+            run_status.append(status_info)
             continue
 
         # call epi_outcomes for model
         try:
-            epi_df = model.epi_outcomes(reduced = reduced_results)
+            epi_df = model.epi_outcomes(reduced=reduced_results)
             if not isinstance(epi_df, pd.DataFrame):
                 epi_df = pd.DataFrame(epi_df)
+            status_info["success"] = True
         except Exception as exc:
-            warnings.warn(f"aggregate_variant_results: epi_outcomes() failed for '{vname}': {exc}")
+            warnings.warn(
+                f"aggregate_variant_results: epi_outcomes() failed for '{vname}': {exc}"
+            )
+            status_info["error"] = str(exc)
             epi_df = pd.DataFrame()
+
+        run_status.append(status_info)
 
         # augment per-run table with variant metadata and sweep params
         pr = epi_df.copy()
@@ -250,6 +271,13 @@ def aggregate_variant_results(
             pr[k] = val
 
         per_run_frames.append(pr)
+
+    # Save run status to JSON if a path is provided
+    if status_path:
+        status_dir = os.path.dirname(os.path.abspath(status_path))
+        os.makedirs(status_dir, exist_ok=True)
+        with open(status_path, "w") as f:
+            json.dump(run_status, f, indent=2)
 
     # overall per-run DataFrame
     if per_run_frames:
@@ -297,7 +325,7 @@ def aggregate_variant_results(
 
             combined_summary = grouped.reset_index()
 
-            #Organize overall_df
+            # Organize overall_df
             order = [
             'base_variant', 'variant_name', 'run_number',
             'time', 'action_id', 'action_type', 'kind',
@@ -308,10 +336,10 @@ def aggregate_variant_results(
         cols = [c for c in order if c in overall_df.columns] + [c for c in overall_df.columns if c not in order]
         overall_df = overall_df[cols]
 
-
     return overall_df, combined_summary
 
-#Build time series plots
+
+# Build time series plots
 def plot_epi_series(
     df_timeseries: pd.DataFrame,  
     type: str = "prevalence",
@@ -335,7 +363,7 @@ def plot_epi_series(
     (fig, axes) matplotlib Figure and axes array
 
     """
-     # Visual defaults (kept consistent)
+    # Visual defaults (kept consistent)
     spaghetti_color = "#00274C"
     spaghetti_alpha = 0.22
     mean_line_color = "#00274C"
@@ -754,7 +782,7 @@ def plot_epi_series(
     fig.suptitle(main_title, x=0.5, y=0.995, ha="center", fontsize=14, fontweight="bold")
 
     return fig, axes
-   
+
 def ensure_list_cell(x):
     """
     Return a Python list for common types stored in timeseries rows:
@@ -801,7 +829,7 @@ def ensure_list_cell(x):
         pass
     # fallback: wrap in list
     return [x]
-    
+
 def load_run_results(run_dir: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load aggregated run outputs saved by clean_run_results:

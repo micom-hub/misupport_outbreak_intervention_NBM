@@ -152,7 +152,7 @@ def export_prcc_inputs_for_matlab(
 
             #aggregate if requested
             if aggregate_replicates and "run_number" in df_pol.columns:
-                warnings.warn("Aggregation requested for timeseries data, verify that this is intended", UserWarning)
+                warnings.warn("Timeseries data are being averaged across stochastic replicates, verify that this is intended", UserWarning)
                 df_pol = df_pol.groupby("model_index", as_index=False)[tcols].agg(agg_func)
 
             #convert data to long as expected by matlab script

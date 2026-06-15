@@ -55,7 +55,7 @@ POLICY_CONFIGURATION = PolicyConfig(variants=[
 ```
 #### Step 2: Run  Variant Driver
 ```bash
-python scripts/variantdriver.py
+python -m scripts.variantdriver
 ```
 This script will iterate through the defined variants, running the model across the specified parameter space or stochastic replicates.
 
