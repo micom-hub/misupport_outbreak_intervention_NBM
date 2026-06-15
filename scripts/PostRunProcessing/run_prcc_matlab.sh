@@ -25,7 +25,7 @@ RUN_DIR=""
 SCRIPTS_ROOT=""
 
 abspath() {
-  python3 -c "import os,sys; print(os.path.abspath(sys.argv[1]))" "$1"
+  python3 -c "import os,sys; print(os.path.abspath(sys.argv[1]))" "${1:-.}"
 }
 
 while [[ $# -gt 0 ]]; do

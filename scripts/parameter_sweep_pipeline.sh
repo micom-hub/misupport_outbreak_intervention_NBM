@@ -59,7 +59,7 @@ ALPHA="${ALPHA:-0.05}"
 
 # Hard-coded conda env
 CONDA_ENV="LHDsim"
-PYTHON_BIN="python"
+PYTHON_BIN="python3"
 
 # flags
 DO_PRCC_LONG=0
@@ -79,6 +79,8 @@ abspath() {
 
 run_python() {
   # unbuffered for immediate prints
+  # Ensure the repo root is in PYTHONPATH so absolute imports (e.g. from scripts.x) work on all OS
+  export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
   if command -v conda >/dev/null 2>&1; then
     conda run -n "$CONDA_ENV" "$PYTHON_BIN" -u "$@"
   else
@@ -153,7 +155,7 @@ fi
 # -------------------------
 
 echo "[pipeline] Step 0: running variantdriver.py"
-run_python "${REPO_ROOT}/scripts/variantdriver.py"
+run_python -m scripts.variantdriver
 
 # Use the run_dir passed by user
 RUN_DIR="$(abspath "$RUN_DIR")"
@@ -190,7 +192,7 @@ if [[ "$DO_PRCC_LONG" == "1" || "$DO_PRCC_ANALYSIS" == "1" ]]; then
     --matlab-bin "$MATLAB_BIN"
 
   echo "[pipeline] Step 1b: parse MATLAB .mat -> prcc_results_long.parquet"
-  run_python "${REPO_ROOT}/scripts/PostRunProcessing/parse_matlabPRCC.py" "$RUN_DIR"
+  run_python -m scripts.PostRunProcessing.parse_matlabPRCC "$RUN_DIR"
 fi
 
 # -------------------------
@@ -204,7 +206,7 @@ if [[ "$DO_PRCC_ANALYSIS" == "1" ]]; then
   fi
 
   echo "[pipeline] Step 2: PRCC postrun analysis -> results/prcc_analysis/"
-  cmd=( run_python "${REPO_ROOT}/scripts/PostRunProcessing/prcc_postrun_analysis.py" "$RUN_DIR"
+  cmd=( run_python -m scripts.PostRunProcessing.prcc_postrun_analysis "$RUN_DIR"
         --method "$METHOD" --topk "$TOPK" )
   [[ "$SIGONLY" == "1" ]] && cmd+=( --sigonly )
   [[ -n "$BASELINE_POLICY" ]] && cmd+=( --baseline-policy "$BASELINE_POLICY" )
