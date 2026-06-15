@@ -8,7 +8,8 @@ import traceback
 import concurrent.futures
 import multiprocessing as mp
 import shutil
-from line_profiler import profile
+import argparse
+
 
 import pandas as pd
 
@@ -23,6 +24,7 @@ from scripts.visualization.viz import (
     plot_paired_difference_trajectory,
 )
 
+
 def run_experiment(
     csv_path: str,
     n_samples: int,
@@ -31,7 +33,7 @@ def run_experiment(
     *,
     base_cfg: Optional[ModelConfig] = None,
     data_dir: str = "data",
-    overwrite_files: bool = True, #Input files
+    overwrite_files: bool = True,  # Input files
     save_files: bool = True,
     seed: Optional[int] = None,
     workers: Optional[int] = 1,
@@ -41,8 +43,8 @@ def run_experiment(
     save_prevalence: bool = False,
     save_lhd_results: bool = False,
     summary_metrics: Optional[List[str]] = None,
-    overwrite_runs: bool = True,#Run results
-    clean_dir: bool = False
+    overwrite_runs: bool = True,  # Run results
+    clean_dir: bool = False,
 ) -> Dict[str, Any]:
     """
     Runs the whole shebang for LHDsim variants
@@ -50,7 +52,7 @@ def run_experiment(
     1) Prepares runs from LHS with prepare_run
     2) Runs run_parameter_set for each parameter-set
         - Sequential or in parallel if workers > 1 (if None, uses max available)
-    3) Aggregate results across each run into a 
+    3) Aggregate results across each run into a
         #if clean_dir, deletes variant subdirectories
     """
     out_base = Path(output_dir).expanduser().resolve()
@@ -58,19 +60,19 @@ def run_experiment(
     if out_base.is_dir() and overwrite_runs:
         shutil.rmtree(str(out_base))
 
-    out_base.mkdir(parents = True, exist_ok = True)
+    out_base.mkdir(parents=True, exist_ok=True)
 
     # 1) Prepare run
     print("[run_experiment] Initializing run data... ")
     contacts_df, configs_list, master_gd = prepare_run(
-        csv_path = csv_path,
-        n_samples = n_samples,
-        output_dir = str(out_base),
-        base_cfg = base_cfg,
-        data_dir = data_dir,
-        overwrite_files = overwrite_files,
-        save_files = save_files,
-        seed = seed
+        csv_path=csv_path,
+        n_samples=n_samples,
+        output_dir=str(out_base),
+        base_cfg=base_cfg,
+        data_dir=data_dir,
+        overwrite_files=overwrite_files,
+        save_files=save_files,
+        seed=seed,
     )
     n_configs = len(configs_list)
     print(f"[run_experiment] {n_configs} Models Initialized")
@@ -82,13 +84,13 @@ def run_experiment(
     # check worker count
     # If None, use one less than maximum CPUs
     if workers is None:
-        workers = max(1, mp.cpu_count()-1)
+        workers = max(1, mp.cpu_count() - 1)
 
     # If more than 1 workers, attempt parallel process
     if workers > 1:
         print(f"[run_experiment] Attempting parallel run with {workers} workers")
         try:
-            with concurrent.futures.ProcessPoolExecutor(max_workers = workers) as exe:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as exe:
                 futures = {
                     exe.submit(
                         run_parameter_set,
@@ -103,7 +105,7 @@ def run_experiment(
                         save_summary=save_summary,
                         save_incidence=save_incidence,
                         save_prevalence=save_prevalence,
-                        save_lhd_results = save_lhd_results,
+                        save_lhd_results=save_lhd_results,
                         summary_metrics=summary_metrics,
                         overwrite=overwrite_runs,
                     ): i
@@ -119,13 +121,15 @@ def run_experiment(
                         "run_dir": str(out_base / f"model_{int(i):04d}"),
                         "success": False,
                         "error": str(exc),
-                        "trace": traceback.format_exc()
+                        "trace": traceback.format_exc(),
                     }
                     statuses.append(res)
 
         # anticipating problem pickling LHD objects
         except Exception as exc:
-            print(f"[run_experiment] Parallel execution failed ({exc}); falling back to sequential execution.")
+            print(
+                f"[run_experiment] Parallel execution failed ({exc}); falling back to sequential execution."
+            )
             statuses = []
             for i in indices:
                 res = run_parameter_set(
@@ -140,7 +144,7 @@ def run_experiment(
                     save_summary=save_summary,
                     save_incidence=save_incidence,
                     save_prevalence=save_prevalence,
-                    save_lhd_results = save_lhd_results,
+                    save_lhd_results=save_lhd_results,
                     summary_metrics=summary_metrics,
                     overwrite=overwrite_runs,
                 )
@@ -163,17 +167,17 @@ def run_experiment(
                 save_summary=save_summary,
                 save_incidence=save_incidence,
                 save_prevalence=save_prevalence,
-                save_lhd_results = save_lhd_results,
+                save_lhd_results=save_lhd_results,
                 summary_metrics=summary_metrics,
-                overwrite=overwrite_runs
+                overwrite=overwrite_runs,
             )
             statuses.append(res)
 
     # Write a run status manifest
-    sorted_statuses = sorted(statuses, key = lambda x: int(x.get("index", -1)))
+    sorted_statuses = sorted(statuses, key=lambda x: int(x.get("index", -1)))
     try:
         with open(out_base / "run_status.json", "w") as fh:
-            json.dump(sorted_statuses, fh, indent = 2)
+            json.dump(sorted_statuses, fh, indent=2)
     except Exception:
         pass
 
@@ -237,7 +241,7 @@ def run_experiment(
     if save_lhd_results:
         df_all = _collect_and_concat("lhd_results.parquet")
         if df_all is not None:
-            outp = out_base / "aggregated_lhd_results.parquet"  
+            outp = out_base / "aggregated_lhd_results.parquet"
             _atomic_write_parquet(df_all, outp)
             aggregated_paths["lhd_results"] = str(outp)
 
@@ -252,32 +256,36 @@ def run_experiment(
         "run_dir": str(out_base),
         "n_parameter_sets": n_configs,
         "statuses": sorted_statuses,
-        "aggregated_paths": aggregated_paths
+        "aggregated_paths": aggregated_paths,
     }
 
 
 def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
-    #Helper to atomic-write parquets
+    # Helper to atomic-write parquets
     tmp = path.with_suffix(path.suffix + ".tmp")
     df.to_parquet(str(tmp), index=False)
     os.replace(str(tmp), str(path))
 
 
 if __name__ == "__main__":
+    #let terminal calls overwrite the output_dir default if they don't match
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-dir", default="model_runs/TEST_RUN")
+    args = parser.parse_args()
 
-    #Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
+    # Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
     result = run_experiment(
         csv_path="testLHS.csv",
-        n_samples=5,
+        n_samples=50,
         policy_config=POLICY_CONFIGURATION,
-        output_dir="model_runs/TESTMODELRUN",
+        output_dir=args.output_dir,
         base_cfg=None,
         seed=5,
         workers=5,
         save_summary=True,
         save_incidence=True,
         save_prevalence=True,
-        clean_dir=True
+        clean_dir=True,
     )
     print("Done. aggregated:", result["run_dir"])
 
@@ -310,4 +318,3 @@ if __name__ == "__main__":
                 aggregate_replicates = True
 
             )
-        
