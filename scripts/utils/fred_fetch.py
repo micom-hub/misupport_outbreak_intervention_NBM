@@ -76,11 +76,17 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
         .perform())
 
     
+    (webdriver.ActionChains(driver)
+        .scroll_to_element(download_button)
+        .scroll_by_amount(0, 1000)
+        .click(download_button)
+        .click(download_button)
+        .perform())
 
     # Wait for download to finish (very basic!)
     import time
 
-    time.sleep(0.5)  # Increase if file is large!
+    time.sleep(.3)  # Increase if file is large!
 
     driver.quit()
 
@@ -92,7 +98,7 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
     latest_zip = max(zip_files, key=os.path.getmtime)
 
     # find the numeric prefix as it is important
-    match = re.search(r"(\d+).*\.zip$", latest_zip)
+    match = re.search(r"/(\d+)", latest_zip)
     if match:
         county_prefix = match.group(1)
     print(match)
