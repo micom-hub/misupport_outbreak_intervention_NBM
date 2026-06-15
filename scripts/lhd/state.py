@@ -1,4 +1,4 @@
-#scripts/lhd/state.py
+# scripts/lhd/state.py
 from __future__ import annotations
 from typing import Dict, List, Tuple
 from collections import defaultdict
@@ -27,47 +27,48 @@ class LHDState:
     def __init__(self, N: int):
         self.N = int(N)
 
-        #1) Daily trackers for markov-like algorithms
+        # 1) Daily trackers for markov-like algorithms
         self.last_t: int = -1
         self.new_cases_today = np.empty(0, dtype=np.int32)
         self.new_edges_today: int = 0
 
-        #2) Establish case registry
+        # 2) Establish case registry
 
-        #bool, whether each index is a known case
+        # bool, whether each index is a known case
         self.known_case = np.zeros(self.N, dtype = np.bool_)
-        #list of known cases
+        # list of known cases
         self.known_case_list = []
-        #time a case was reported, -1 if never reported
+        # time a case was reported, -1 if never reported
         self.case_report_time = np.full(self.N, -1, dtype = np.int32)
-        #knowledge of case stage - 0/unknown, 1/pre-infectious, 2/infectious
+        # knowledge of case stage - 0/unknown, 1/pre-infectious, 2/infectious
         self.case_stage = np.zeros(self.N, dtype=np.int8) 
 
-        #attributes as known when/if reported
+        # attributes as known when/if reported
         self.case_age = np.full(self.N, -1, dtype = np.int32)
         self.case_is_vax_known = np.zeros(self.N, dtype = np.bool_)
         self.case_is_vax = np.zeros(self.N, dtype = np.bool_)
+        self.case_report_source = np.full(
+            self.N, "", dtype=object
+        )  # "passive", "tested_positive"
 
+        # 3) Known Contact Structure
 
-        #3) Known Contact Structure
-
-        #undirected edge key for (i, j, ct)
+        # undirected edge key for (i, j, ct)
         self._edge_seen = set()
 
-        #edge log, (i, j, ct_id, discovered_time, information_source)
+        # edge log, (i, j, ct_id, discovered_time, information_source)
         self.known_edges: List[tuple[int, int, int, int, str]] = []
 
-        #adjacency i -> list of (j, ct_id, discovered_time, information_source)
+        # adjacency i -> list of (j, ct_id, discovered_time, information_source)
         self.known_adj: Dict[int, List[Tuple[int, int, int, str]]] = defaultdict(list)
 
+        # 4) Tracking interventions
 
-        #4) Tracking interventions
-
-        #separating sick people
+        # separating sick people
         self.isolated_until = np.full(self.N, -1, dtype=np.int32)
-        self.quarantined_until = np.full(self.N, -1, dtype = np.int32)
+        self.quarantined_until = np.full(self.N, -1, dtype=np.int32)
 
-        #Pending requests
+        # Pending requests
         self.pending_tests = defaultdict(list)
         self.pending_traces = defaultdict(list)
 
@@ -80,30 +81,56 @@ class LHDState:
           - reported_cases, report_time, reported_stage, age, is_vax
           - trace_src, trace_tgt, trace_ct (can be empty)
         """
+        # Expects batch dict with keys: t, reported_cases, report_time, reported_stage, age, is_vax, reported_sources, trace_src, trace_tgt, trace_ct
         t = int(batch.get("t", -1))
 
         self.last_t = t
         self.new_cases_today = np.empty(0, dtype=np.int32)
         self.new_edges_today = 0
 
-
-        cases = np.asarray(batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32)
+        cases = np.asarray(
+            batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32
+        )
         if cases.size:
-            stage = np.asarray(batch.get("reported_stage", np.zeros(cases.size, np.int8)), dtype=np.int8)
-            rtime = np.asarray(batch.get("report_time", np.full(cases.size, t, np.int32)), dtype=np.int32)
-            age = np.asarray(batch.get("age", np.full(cases.size, -1, np.int32)), dtype=np.int32)
-            is_vax = np.asarray(batch.get("is_vax", np.zeros(cases.size, np.bool_)), dtype=np.bool_)
+            stage = np.asarray(
+                batch.get("reported_stage", np.zeros(cases.size, np.int8)),
+                dtype=np.int8,
+            )
+            rtime = np.asarray(
+                batch.get("report_time", np.full(cases.size, t, np.int32)),
+                dtype=np.int32,
+            )
+            age = np.asarray(
+                batch.get("age", np.full(cases.size, -1, np.int32)), dtype=np.int32
+            )
+            is_vax = np.asarray(
+                batch.get("is_vax", np.zeros(cases.size, np.bool_)), dtype=np.bool_
+            )
+            sources = np.asarray(
+                batch.get("reported_sources", np.empty(0, dtype=object)), dtype=object
+            )
 
             # For reported cases, only keep first time reported (if mult)
             _, first_ind = np.unique(cases, return_index=True)
             first_ind.sort()
             cases = cases[first_ind]
             stage = stage[first_ind] if stage.size else np.zeros(cases.size, np.int8)
-            rtime = rtime[first_ind] if rtime.size else np.full(cases.size, np.int32(t), np.int32)
+            rtime = (
+                rtime[first_ind]
+                if rtime.size
+                else np.full(cases.size, np.int32(t), np.int32)
+            )
             age = age[first_ind] if age.size else np.full(cases.size, -1, np.int32)
-            is_vax = is_vax[first_ind] if is_vax.size else np.zeros(cases.size, np.bool_)
-            
-            #If the case hasn't been reported before, update info for that case
+            sources = (  # This line now correctly filters the 'sources' array initialized above
+                sources[first_ind]
+                if sources.size > 0
+                else np.full(cases.size, "", dtype=object)
+            )
+            is_vax = (
+                is_vax[first_ind] if is_vax.size else np.zeros(cases.size, np.bool_)
+            )
+
+            # If the case hasn't been reported before, update info for that case
             new_mask = ~self.known_case[cases]
             if new_mask.any():
                 new_cases = cases[new_mask]
@@ -114,9 +141,9 @@ class LHDState:
                 self.case_stage[new_cases] = stage[new_mask]
                 self.case_age[new_cases] = age[new_mask]
                 self.case_is_vax[new_cases] = is_vax[new_mask]
+                self.case_report_source[new_cases] = sources[new_mask]
                 self.case_is_vax_known[new_cases] = True
                 self.known_case_list.extend(new_cases.tolist())
-
 
         # Use contact-tracing to assemble edges
         self.new_edges_today = int(self._process_trace_edges(batch, t=t))
@@ -132,37 +159,37 @@ class LHDState:
 
         m = min(src.size, tgt.size, ct.size)
         for i in range(m):
-            u = int(src[i]); v = int(tgt[i]); c = int(ct[i])
+            u = int(src[i])
+            v = int(tgt[i])
+            c = int(ct[i])
             if u == v or u < 0 or v < 0 or u >= self.N or v >= self.N:
                 continue
             a, b = (u, v) if u < v else (v, u)
 
-            #code edges as individual1, individual2, contact_type
+            # code edges as individual1, individual2, contact_type
             key = (a, b, c)
             if key in self._edge_seen:
                 continue
             self._edge_seen.add(key)
             edges_added += 1
 
-            self.known_edges.append((a, b, c, int(t), "trace"))
+            self.known_edges.append((u, v, c, int(t), "trace"))
             # adjacency in both directions
             self.known_adj[a].append((b, c, int(t), "trace"))
             self.known_adj[b].append((a, c, int(t), "trace"))
 
         return edges_added
 
-   
-   #Helper function to get known neighbors of a node. 
+    # Helper function to get known neighbors of a node.
     def neighbors(self, node: int) -> List[Tuple[int, int, int, str]]:
         """Return known neighbors of a node in the known graph."""
         return self.known_adj.get(int(node), [])
-    
 
-    #Helper function to reset LHDState between runs
+    # Helper function to reset LHDState between runs
     def reset_for_run(self) -> None:
         self.last_t = -1
-        self.new_cases_today = np.empty(0, dtype = np.int32)
-        self.new_edges_today=0
+        self.new_cases_today = np.empty(0, dtype=np.int32)
+        self.new_edges_today = 0
 
         self.known_case.fill(False)
         self.case_report_time.fill(-1)
@@ -170,6 +197,7 @@ class LHDState:
         self.case_age.fill(-1)
         self.case_is_vax_known.fill(False)
         self.case_is_vax.fill(False)
+        self.case_report_source.fill("")
         self.known_case_list.clear()
 
         self._edge_seen.clear()
@@ -181,6 +209,3 @@ class LHDState:
 
         self.pending_tests.clear()
         self.pending_traces.clear()
-
-
-

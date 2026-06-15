@@ -65,6 +65,7 @@ class SurveillanceModel:
         self._queue_nodes: List[List[np.ndarray]] = [[] for _ in range(self._L)]
         self._queue_stage: List[List[np.ndarray]] = [[] for _ in range(self._L)]
         self._trace_orders = defaultdict(list)  # due_day -> [cases_array, params]
+        self._queue_source: List[List[np.ndarray]] = [[] for _ in range(self._L)]
         self._test_orders = defaultdict(list)  # due_day -> [node_array, params]
 
         self.case_status = np.zeros(self.N, dtype=np.uint8)
@@ -74,25 +75,26 @@ class SurveillanceModel:
         self.ct_to_id = ct_to_id
 
     # Methods for passing around information
-    def _deliver_due(self, t: int) -> Tuple[np.ndarray, np.ndarray]:
+    def _deliver_due(self, t: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Export case reports queued for 'today' to LHD
         """
         # check for queued events today
         b = int(t % self._L)
         if not self._queue_nodes[b]:
-            return np.empty(0, np.int32), np.empty(0, np.int8)
+            return np.empty(0, np.int32), np.empty(0, np.int8), np.empty(0, dtype=object)
 
         nodes = np.concatenate(self._queue_nodes[b]).astype(np.int32, copy=False)
         stages = np.concatenate(self._queue_stage[b]).astype(np.int8, copy=False)
+        sources = np.concatenate(self._queue_source[b]).astype(object, copy=False)
         self._queue_nodes[b].clear()
         self._queue_stage[b].clear()
-
+        self._queue_source[b].clear()
         # mark case status reported (what LHD knows)
         self.case_status[nodes] = 2
-        return nodes, stages
+        return nodes, stages, sources
 
-    def _queue(self, due_t: int, nodes: np.ndarray, stage_code: np.int8) -> None:
+    def _queue(self, due_t: int, nodes: np.ndarray, stage_code: np.int8, report_source: str) -> None:
         """
         Add cases to report queue
         """
@@ -101,6 +103,7 @@ class SurveillanceModel:
         b = int(due_t % self._L)
         self._queue_nodes[b].append(nodes.astype(np.int32, copy=False))
         self._queue_stage[b].append(np.full(nodes.size, stage_code, dtype=np.int8))
+        self._queue_source[b].append(np.full(nodes.size, report_source, dtype=object))
 
     # Methods for information-requesting actions
     def order_trace(
@@ -206,13 +209,13 @@ class SurveillanceModel:
             det_unk = pos_nodes[(~pos_is_pre) & (~pos_is_inf)]
 
             if det_pre.size:
-                self._queue(due_report, det_pre, STAGE_PRE)
+                self._queue(due_report, det_pre, STAGE_PRE, "tested_positive")
             if det_inf.size:
-                self._queue(due_report, det_inf, STAGE_INF)
+                self._queue(due_report, det_inf, STAGE_INF, "tested_positive")
             if det_unk.size:
                 self._queue(
-                    due_report, det_unk, np.int8(0)
-                )  # unknown/false-positive stage
+                    due_report, det_unk, np.int8(0), "tested_positive"
+                )  # unknown/false-positive stage (should not happen with spec=1.0)
 
     def _process_due_traces(self, t: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -353,14 +356,14 @@ class SurveillanceModel:
                 det = cand[u < self.p_detect_inf]
                 if det.size > 0:
                     self.case_status[det] = 1  # Queue discovered events
-                    self._queue(t + self.delay, det, STAGE_INF)
+                    self._queue(t + self.delay, det, STAGE_INF, "passive")
 
         # 3) Handle active case-finding
         self._process_due_tests(t, epi_state)
         trace_src, trace_tgt, trace_ct = self._process_due_traces(t)
 
         # 4) Deliver reports due today
-        reported_nodes, reported_stage = self._deliver_due(t)
+        reported_nodes, reported_stage, reported_sources = self._deliver_due(t)
 
         batch = {
             "t": np.int32(t),
@@ -385,6 +388,10 @@ class SurveillanceModel:
                 if reported_nodes.size > 0
                 else np.empty(0, dtype=np.bool_)
             ),
+            "reported_sources": (
+                reported_sources
+                if reported_nodes.size > 0
+                else np.empty(0, dtype=object)),
             "trace_src": trace_src,
             "trace_tgt": trace_tgt,
             "trace_ct": trace_ct,
@@ -406,6 +413,7 @@ class SurveillanceModel:
         for b in range(self._L):
             self._queue_nodes[b].clear()
             self._queue_stage[b].clear()
+            self._queue_source[b].clear()
 
         self._trace_orders.clear()
         self._test_orders.clear()
