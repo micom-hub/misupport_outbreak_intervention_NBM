@@ -173,23 +173,23 @@ def run_single_model(
         policy_name: optional policy name override 
     """
 
-    #If cfg is a filepath, build ModelConfig
+    # If cfg is a filepath, build ModelConfig
     if isinstance(cfg, (str, Path)):
         cfg_path = Path(cfg).expanduser()
         if not cfg_path.is_file():
             raise FileNotFoundError(f"ModelConfig JSON not found at {cfg_path}")
         cfg = ModelConfig.from_json(str(cfg_path))
-    
+
     try:
         cfg.validate()
     except Exception:
         raise
-    
-    #Overwrite seed if provided
+
+    # Overwrite seed if provided
     if seed is not None:
         cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
 
-    #overwrite policy or parameters if necessary
+    # overwrite policy or parameters if necessary
     if policy_name is not None or lhd_overrides:
         patch = {"lhd": {}}
         if policy_name is not None:
@@ -198,17 +198,15 @@ def run_single_model(
             patch["lhd"].update(dict(lhd_overrides))
         cfg = cfg.copy_with(patch)
 
-
-
-    #Figure out what contacts_src is, and normalize
+    # Figure out what contacts_src is, and normalize
     if isinstance(contacts_src, pd.DataFrame):
         contacts_df = contacts_src.reset_index(drop=True)
     elif isinstance(contacts_src, str):
-        #Try as a filepath
+        # Try as a filepath
         if os.path.exists(contacts_src) and contacts_src.endswith(".parquet"):
             contacts_df = pd.read_parquet(contacts_src).reset_index(drop=True)
         else:
-            #Try as a county
+            # Try as a county
             contacts_df = prepare_contacts(
                 contacts_src, 
                 cfg.sim.state, 
@@ -219,7 +217,7 @@ def run_single_model(
     else:
         raise TypeError("contacts_src must be a DataFrame or a path/county string")
 
-    #Determine if output_dir is relative or absolute and save
+    # Determine if output_dir is relative or absolute and save
     if output_dir is None:
         output_dir = "model_runs"
     base_output = Path(output_dir).expanduser()
@@ -239,10 +237,8 @@ def run_single_model(
         seed = cfg.sim.seed
         )
 
-    # Build minimal graphdata from master that can be sampled from 
+    # Build minimal graphdata from master that can be sampled from
     minimal_graphdata = build_minimal_graphdata_from_edge_list(master_df, N=int(contacts_df.shape[0]))
-
-
 
     sampled_edges_df = sample_from_master_graphdata(
         minimal_graphdata, 
@@ -269,6 +265,8 @@ def run_single_model(
 
     # Run simulation
     model.simulate()
+
+
     model.results_to_df().to_csv(os.path.join(run_dir, "summary.csv"), index=False)
 
     return model
