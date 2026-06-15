@@ -37,22 +37,26 @@ class PopulationParams:
 
 @dataclass(frozen=True)
 class LHDParams:
+    policy_name: str = "observe_only"
+    lhd_daily_capacity: int = 100
     mean_compliance: float = 1.0
-    lhd_employees: int = 10
-    lhd_discovery_prob: float = 0.25
-    lhd_workday_hrs: int = 8
-    lhd_default_call_duration: float = 0.1
-    lhd_default_int_reduction: float = 0.8
+    lhd_default_call_cost: float = 1
+    lhd_default_int_reduction: float = 0.9 #frac removed
     lhd_default_int_duration: int = 10
+    p_detect_inf: float = 0.25
+    report_delay_days: int = 1
+    trace_recall_prob: float = 0.25
 
 
 @dataclass(frozen=True)
 class SimulationParams:
-    n_replicates: int = 50 #Stochastic Replicates
-    run_name: str = field(default_factory=lambda: "RUN_" + datetime.now().strftime("%m-%d-%Y_%H-%M-%S"))
+    n_replicates: int = 20  # Stochastic Replicates
+    run_name: str = field(
+        default_factory=lambda: "RUN_" + datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
+    )
     overwrite_master: bool = True
     simulation_duration: int = 100
-    I0: Union[List[int],int] = 5
+    I0: Union[List[int], int] = 5  # list for indices or int for randoms
     seed: int = 2026
     county: str = "Keweenaw"
     state: str = "Michigan"
@@ -74,23 +78,27 @@ class ModelConfig:
     lhd: LHDParams = field(default_factory=LHDParams)
     sim: SimulationParams = field(default_factory=SimulationParams)
 
-
-    #convert ModelConfig to dict
+    # convert ModelConfig to dict
     def to_dict(self) -> Dict[str, Any]:
-        return {"epi": asdict(self.epi), "population": asdict(self.population), "lhd": asdict(self.lhd), "sim": asdict(self.sim)}
+        return {
+            "epi": asdict(self.epi),
+            "population": asdict(self.population),
+            "lhd": asdict(self.lhd),
+            "sim": asdict(self.sim),
+        }
 
     def to_json(self, path: str) -> None:
         with open(path, "w") as fh:
             json.dump(self.to_dict(), fh, indent=2, default=str)
 
-    #Build model config object from a json (saved by to_json)
+    # Build model config object from a json (saved by to_json)
     @classmethod
     def from_json(cls, path: str) -> "ModelConfig":
         with open(path, "r") as fh:
             d = json.load(fh)
         return cls.from_nested_dict(d)
 
-    #build from nested dict, also used by from_json
+    # build from nested dict, also used by from_json
     @classmethod
     def from_nested_dict(cls, nested: Dict[str, Any]) -> "ModelConfig":
         """
@@ -104,7 +112,9 @@ class ModelConfig:
         sim = SimulationParams(**(nested.get("sim", {})))
         return cls(epi=epi, population=population, lhd=lhd, sim=sim)
 
-    def copy_with(self, overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> "ModelConfig":
+    def copy_with(
+        self, overrides: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> "ModelConfig":
         """
         Return a new ModelConfig with nested overrides.
         Example overrides: {"sim": {"n_replicates": 30}, "population": {"wp_contacts": 20}}
@@ -123,7 +133,9 @@ class ModelConfig:
             new_lhd = replace(self.lhd, **overrides["lhd"])
         if "sim" in overrides:
             new_sim = replace(self.sim, **overrides["sim"])
-        return ModelConfig(epi=new_epi, population=new_population, lhd=new_lhd, sim=new_sim)
+        return ModelConfig(
+            epi=new_epi, population=new_population, lhd=new_lhd, sim=new_sim
+        )
 
     def validate(self) -> None:
         # Basic checks that configurations make sense
@@ -133,10 +145,18 @@ class ModelConfig:
             raise ValueError("epi.vax_uptake must be in [0,1]")
         if self.sim.n_replicates < 1:
             raise ValueError("sim.n_replicates must be >= 1")
-        if self.lhd.lhd_employees < 0:
-            raise ValueError("lhd.lhd_employees must be >= 0")
+        if self.lhd.lhd_daily_capacity < 0:
+            raise ValueError("lhd.lhd_daily_capacity must be >= 0")
         if not isinstance(self.sim.I0, (list, int)):
             raise ValueError("sim.I0 must be an integer or list")
         if not (self.sim.master_casual_candidates >= self.population.cas_contacts):
-            raise ValueError("sim.master_casual_candidates must exceed population.cas_contacts for sampling purposes")
+            raise ValueError(
+                "sim.master_casual_candidates must exceed population.cas_contacts for sampling purposes"
+            )
 
+        from scripts.lhd.policy_catalog import POLICIES
+
+        if self.lhd.policy_name not in POLICIES:
+            raise ValueError(
+                f"lhd.policy_name '{self.lhd.policy_name}' not found in policy_catalog.POLICIES"
+            )

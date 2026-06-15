@@ -11,10 +11,8 @@ The script:
 
 import os
 from pathlib import Path
-from typing import Dict, Optional, Union
-import numpy as np
+from typing import Optional, Union, Dict, Any
 import pandas as pd
-from datetime import datetime
 from line_profiler import profile
 
 
@@ -28,7 +26,7 @@ from scripts.graph.graph_utils import (
 from scripts.simulation.outbreak_model import NetworkModel
 from scripts.utils.synth_data_processing import synthetic_data_process, build_edge_list
 from scripts.utils.fred_fetch import downloadPopData
-
+from scripts.visualization.network_visualization import visualize_lhd_evolution
 
 # Prepare and structure contact data
 
@@ -127,39 +125,40 @@ def read_or_build_master(
     config_path = run_dir / "ModelConfig.json"
     if not variant:
         try:
-            cfg.to_json(str(config_path))
-        except Exception:
-            pass
+            cfg.to_json(str(config_path))  # Save ModelConfig for this run
+        except Exception as e:
+            print(f"WARNING: Failed to save ModelConfig to {config_path}: {e}")
 
-    #If master already exists and we aren't overwriting, read in
+    # If master already exists and we aren't overwriting, read in
     if master_path.exists() and not bool(cfg.sim.overwrite_master):
         return pd.read_parquet(str(master_path))
 
     master_df = build_edge_list(
         contacts_df=contacts_df,
         config=cfg,
-        seed= cfg.sim.seed,
+        seed= int(seed) if seed is not None else int(cfg.sim.seed),
         save=False,
         county=cfg.sim.county,
         master_casual_contacts=int(cfg.sim.master_casual_candidates)
 )
     if cfg.sim.save_master:
         try:
-            master_df.to_parquet(str(master_path), index = False)
-        except Exception:
-            pass
+            master_df.to_parquet(str(master_path), index=False)
+        except Exception as e:
+            print(f"WARNING: Failed to save MasterEdgelist to {master_path}: {e}")
 
     return master_df
-        
+
 # Single model run
 def run_single_model(
     contacts_src: Union[pd.DataFrame, str],
     cfg: Union[ModelConfig, str, Path],
     output_dir: Optional[str] = None,
     *,
-    algorithm_map: Optional[Dict[str, object]] = None,
-    factory_map: Optional[Dict[str, callable]] = None,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    policy_name: Optional[str] = None,
+    lhd_overrides: Optional[Dict[str, Any]] = None,
+    save_lhd_results: bool = True
     ) -> NetworkModel:
     """
     Driver function to run a single model
@@ -168,7 +167,10 @@ def run_single_model(
         contacts_src: as a contacts_df object, a filepath, or county name
         cfg: ModelConfig object for run or absolute filepath to a ModelConfig.json saved by ModelConfig.to_json
         output_dir: base directory for model outputs, defaults to "model_runs"
+
+
         seed: optional seed to overwrite cfg.sim.seed
+        policy_name: optional policy name override 
     """
 
     #If cfg is a filepath, build ModelConfig
@@ -183,11 +185,19 @@ def run_single_model(
     except Exception:
         raise
     
-    #Overwrite seed if one is provided 
+    #Overwrite seed if provided
     if seed is not None:
         cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
 
-    run_rng = np.random.default_rng(int(cfg.sim.seed))
+    #overwrite policy or parameters if necessary
+    if policy_name is not None or lhd_overrides:
+        patch = {"lhd": {}}
+        if policy_name is not None:
+            patch["lhd"]["policy_name"] = str(policy_name)
+        if lhd_overrides:
+            patch["lhd"].update(dict(lhd_overrides))
+        cfg = cfg.copy_with(patch)
+
 
 
     #Figure out what contacts_src is, and normalize
@@ -255,21 +265,15 @@ def run_single_model(
         graphdata = run_graphdata, 
         run_dir = str(run_dir),
         seed = cfg.sim.seed,
-        lhd_register_defaults = False,
-        lhd_algorithm_map = algorithm_map,
-        lhd_action_factory_map = factory_map
     )
 
     # Run simulation
     model.simulate()
-
-    # Optional save exposures (legacy behavior)
-    if cfg.sim.record_exposure_events and run_dir:
-        np.savez_compressed(str(run_dir / "exposure_event_log.npz"), *model.exposure_event_log)
+    model.results_to_df().to_csv(os.path.join(run_dir, "summary.csv"), index=False)
 
     return model
 
-#Helper function to make sure contacts_df looks right
+# Helper function to make sure contacts_df looks right
 def _validate_contacts_df(df: pd.DataFrame) -> None:
     """
     Throws error if contacts_df doesn't have necessary columns
@@ -289,7 +293,18 @@ if __name__ == "__main__":
         }
     )
     contacts = prepare_contacts(cfg.sim.county, cfg.sim.state, save_files = True)
-    model = run_single_model(contacts, cfg, seed = 13 )
-    model.results_to_df().to_csv("testingresults.csv", index=False)
-    
-    
+    model = run_single_model(
+        contacts,
+        cfg,
+        seed=13,
+        policy_name="trace_then_isolate",
+        lhd_overrides={
+            "lhd_daily_capacity": 1000,
+            "lhd_default_int_reduction": 0.5,
+            "lhd_default_int_duration": 20,
+            "p_detect_inf": 0.25,
+        },
+    )
+
+    # Visualize the LHD's network discovery and intervention evolution
+    visualize_lhd_evolution(model, run_number=0)

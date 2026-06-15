@@ -1,363 +1,426 @@
-#scripts/lhd/lhd.py
+# scripts/lhd/lhd.py
+from typing import TYPE_CHECKING, Optional, Dict, List, Any
+from collections import defaultdict, Counter
 import numpy as np
-from typing import TYPE_CHECKING, Dict, Optional, Any, Callable, List
-import warnings
-from collections import defaultdict
+import pandas as pd  # only if you want results_to_df here; otherwise import inside method
 
-from scripts.lhd.actions import ActionBase, ActionToken, CallIndividualsAction
-from scripts.lhd.algorithms import AlgorithmBase, RandomPriority
+from scripts.lhd.state import LHDState
+from scripts.lhd.surveillance import SurveillanceModel
+from scripts.lhd.policy_catalog import build_policy
+from scripts.lhd.executor import Executor
+from scripts.lhd.tokens import MultiplierToken
+from scripts.lhd.response_types import ActionProposal, ActionPlan, ExecutionSummary
+
 
 if TYPE_CHECKING:
     from scripts.simulation.outbreak_model import NetworkModel
 
 
 class LocalHealthDepartment:
+    """
+    Current LHD (3/17):
+
+    - step(t, epi_state) 
+        - Expires actions due to expire
+        - Observes updated epi_state through surveillance
+        - Updates LHD knowledge
+        - Uses algorithms to propose actions
+        - Uses planner to allocate resources to actions
+        - Executes actions
+
+    - Algorithms use only the current LHDState to prioritize individuals
+    - Planner selects actions to remain under capacity
+    - Executor applies control actions (multipliers on in/out transmission) and info (surveillance orders)
+    
+    - LHD now builds its own daily results frame to hand to outbreak_model for cost-efficiency metrics
+    """
     def __init__(
-        self, 
-        model: NetworkModel, 
-        discovery_prob: float = None,  
-        employees: int = None, 
-        workday_hrs: float = None,
-        register_defaults: bool = True,
-        algorithm_map: Optional[Dict[str, object]] = None,
-        action_factory_map: Optional[Dict[str, Callable[..., ActionBase]]] = None
+        self,
+        *,
+        seed: int,
+        surv_seed: int,
+        model: NetworkModel,
+        capacity: Optional[int] = None,
+        policy_name: Optional[str] = None,
     ):
-    #LHD settings
         self.model = model
+        self.seed = seed
+        self.surv_seed = surv_seed
+        self.rng = np.random.default_rng(seed)
 
+        # capacity
+        self.daily_capacity = int(capacity) if capacity is not None else int(self.model.config.lhd.lhd_daily_capacity)
 
-        self.discovery_prob = discovery_prob if discovery_prob is not None else self.model.config.lhd.lhd_discovery_prob
+        # baseline surveillance parameters
+        self.p_detect_inf = self.model.config.lhd.p_detect_inf
+        self.report_delay_days = self.model.config.lhd.report_delay_days
 
-    #LHD Capacity
-        self.employees = employees if employees is not None else self.model.config.lhd.lhd_employees
-        self.hours_per_employee = float(workday_hrs) if workday_hrs is not None else self.model.config.lhd.lhd_workday_hrs
-        self.daily_personhours = float(self.employees * self.hours_per_employee)
+        # Default parameter values (control + info)
+        self.min_factor = 1e-6
+        self.default_iso_reduction = float(self.model.config.lhd.lhd_default_int_reduction)
+        self.default_iso_duration = int(self.model.config.lhd.lhd_default_int_duration)
+        self.default_iso_contact_types = ["cas", "sch", "wp"]
 
-    #Algorithm -> algorithm instance
-        self.algorithms: Dict[str, AlgorithmBase] = {}
-    #action factories: action_type -> callable to return ActionBase
-        self.action_factories: Dict[str, Callable[..., ActionBase]] = {}
+        self.default_trace_params = {
+            "delay_days": 0,  # do day-of tracing
+            "recall_prob": float(self.model.config.lhd.trace_recall_prob),
+            "max_per_case": 25,  # limit on total recalled
+            "contact_types": ["hh", "sch", "wp"],
+        }
 
-
-    #trackers for action objects and token counts
-        self.expiry: Dict[int, List[ActionToken]] = {}
-        self.action_log: List[Dict[str, Any]] = []
-        # action id -> action instance
-        self._active_actions: Dict[str, ActionBase] = {}
-        #action id -> number outstanding tokens
-        self._action_token_counts: Dict[str, int] = {}
-
-        self.min_factor = 1e-6 #to prevent div 0 errors
-        self.min_candidate_cost = 1e-4
-
-    #Default action params
-        self.default_int_reduction = model.config.lhd.lhd_default_int_reduction
-        self.default_int_duration = model.config.lhd.lhd_default_int_duration
-        self.default_call_cost = model.config.lhd.lhd_default_call_duration
-
-
-        #Register default actions if requested:
-        if register_defaults:
-            self.register_algorithm('call', RandomPriority())
-
-            def default_call_factory(nodes, contact_type, prio, cost, params = None):
-                return CallIndividualsAction(
-                nodes = nodes,
-            contact_types = [contact_type] if contact_type is not None else
-            ['cas', 'sch', 'wp'],
-            reduction = params.get('reduction', self.default_int_reduction) if params else self.default_int_reduction,
-            duration = int(params.get('duration', self.default_int_duration)) if params else self.default_int_duration,
-            call_cost = float(cost) if cost is not None else self.default_call_cost,
-            min_factor = self.min_factor
+        self.default_test_params = {
+            "delay_days": 0, #day-of testing
+            "sens_pre": 0.5, #pick up half of pre-infectious
+            "sens_inf": 0.99, #pick up 99% of post-infectious
+            "spec": 1.0, #no false-positives (yet)
+            "report_delay_days": self.report_delay_days,
+        }
+        # Instantiate surveillance object
+        self.surveillance = SurveillanceModel(
+            neighbor_map=self.model.neighbor_map,
+            ct_to_id=self.model.ct_to_id,
+            seed=self.surv_seed,
+            N=self.model.N,
+            ages=self.model.ages,
+            is_vax=self.model.is_vaccinated,
+            p_detect_inf=self.p_detect_inf,
+            report_delay_days=self.report_delay_days,
         )
-            self.register_action_factory('call', default_call_factory)
 
-        #Register mappings provided by call
-        if algorithm_map:
-            for atype, alg in algorithm_map.items():
-                self.register_algorithm(atype, alg, overwrite = True)
-        if action_factory_map:
-            for atype, factory in action_factory_map.items():
-                self.register_action_factory(atype, factory, overwrite = True)
-            
+        # Instantiate LHDState
+        self.state = LHDState(N = self.model.N)
 
+        # Assemble the LHD policy (algo + planner)
+        cfg_name = getattr(self.model.config.lhd, "policy_name", "observe_only")
+        self.policy_name = str(policy_name or cfg_name)
 
-    ##registration helpers
-    # map algorithms action_type -> algorithm
-    def register_algorithm(self, action_type: str, algorithm: AlgorithmBase, overwrite: bool = False) -> None:
+        default_algo_params = {
+            "isolate_new_cases": {
+                "cost_per_case": 1,
+                "priority": 1.0,
+                "params": {  # These are the parameters for the _apply_isolation method
+                    "reduction": self.default_iso_reduction,
+                    "duration": self.default_iso_duration,
+                    "contact_types": self.default_iso_contact_types,
+                },
+            },
+            "trace_new_cases": {
+                "cost_per_case": 1,
+                "priority": 1.0,
+                "params": self.default_trace_params,  # Pass the actual trace params here
+            },
+            "test_contacts_of_known_cases": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": self.default_test_params,
+            },
+            "trace_edge_endpoints": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": self.default_trace_params,
+            },
+            "isolate_neighbors_of_high_degree_cases": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": {
+                    "reduction": self.default_iso_reduction,
+                    "duration": self.default_iso_duration,
+                    "contact_types": self.default_iso_contact_types,
+                },
+            },
+        }
+        self.algorithms, self.planner, self.policy_name = build_policy(
+            self.policy_name, default_algo_params=default_algo_params
+        )
+
+        self.executor = Executor()
+
+        # expiry tokens day -> list[tokens]
+        self._expiry_tokens_by_day = defaultdict(list)
+
+        self._results_rows = []
+        self._action_log = []
+        self._lhd_daily_log = []
+
+    # -------------------------------------------
+    # Helpers for scheduling and expiring actions
+    # -------------------------------------------
+    def process_expirations(self, t: int) -> int:
         """
-        Assign each action with an algorithm that is used to decide who that action should be done to. 
+        Revert control tokens due at day t. Returns count expired.
         """
-        if action_type in self.algorithms and not overwrite:
-            raise ValueError(f"Algorithm already registered for action '{action_type}'. Only one allowed.")
-        if action_type in self.algorithms and overwrite:
-            warnings.warn(f"Overwriting existing algorithm for action '{action_type}'")
-        self.algorithms[action_type] = algorithm
+        due = self._expiry_tokens_by_day.pop(int(t), [])
+        for tok in due:
+            tok.revert(self.model)
+        return int(len(due))
 
-    #map action_type -> factory to create action objects
-    #expects 
-    def register_action_factory(self, action_type: str, factory: Callable[..., ActionBase], overwrite: bool = False) -> None:
-        #factory signature expected: (nodes, contact_type, prio, cost, params) -> ActionBase
-        if action_type in self.action_factories and not overwrite:
-            raise ValueError(f"Action factory already registered for action '{action_type}'. Only one allowed.")
-        if action_type in self.action_factories and overwrite:
-            warnings.warn(f"Overwriting existing action factory for action '{action_type}'")
-        self.action_factories[action_type] = factory
+    # ------------
+    # Surveillance
+    # ------------
+    def observe(
+        self,
+        *,
+        t: int,
+        epi_state: Dict[str, np.ndarray],
+        scheduled_actions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, np.ndarray]:
+        # Provide state change to surveillance, get back observations
+        return self.surveillance.step(
+            t=int(t), epi_state=epi_state, scheduled_actions=scheduled_actions
+        )
 
-    def discover_exposures(self, recorder_snapshot):
+    # ---------------
+    # Action Handling
+    # ---------------
+    def _apply_isolation(
+        self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]
+    ) -> tuple[int, int]:
         """
-        Given recorder snapshot dict, select which events the LHD discovers
-        Random based on LHD discovery probability
+        For a given set of nodes and isolation parameters, order isolation
         """
-        n_events = recorder_snapshot['event_time'].shape[0]
-        if n_events == 0:
-            return np.empty(0, dtype = int)
-        
-        #bernoulli sample each event
-        mask = self.rng.random(n_events) < self.discovery_prob
-        return np.where(mask)[0]
+        nodes = np.asarray(nodes, dtype=np.int32)
+        if nodes.size == 0:
+            return 0, 0
 
-    def gather_candidates(self, recorder_snapshot, discovered_event_ind):
-        """
-        Returns flattened candidate arrays with parallel arrays:
-        action_types (st array), nodes (int), priority (float), 
-        contact_types (object), costs (float)
-        """
-        
-        #lists to fill
-        action_types_list = []
-        nodes_list = []
-        prios_list = []
-        cts_list = []
-        costs_list = []
-        params_list = []
+        # merge params with defaults
+        reduction = float(params.get("reduction", self.default_iso_reduction))
+        duration = int(params.get("duration", self.default_iso_duration))
+        cts = params.get("contact_types", self.default_iso_contact_types)
 
-        #use algorithms to generate action candidates
-        for action_type, algo in self.algorithms.items():
-            out = algo.generate_candidates(recorder_snapshot, self.model, discovered_event_ind) or {}
-            nodes = np.asarray(out.get('nodes', np.empty(0, dtype=np.int32)), dtype=np.int32)
-            prios = np.asarray(out.get('priority', np.ones(nodes.shape[0], dtype=np.float32)), dtype=np.float32)
+        # reduction is fraction removed (reduction .2 means .8 left)
+        reduction = min(max(reduction, 0.0), 1.0)
+        factor = max(self.min_factor, 1.0 - reduction)
 
-            #raw cts can be a single str or array of size len(nodes)
-            raw_cts = out.get('contact_types', None)
-            if raw_cts is None:
-                cts = np.array([None] * nodes.shape[0], dtype = object)
-            elif isinstance(raw_cts, (str, bytes)):
-                cts =  np.array([raw_cts] * nodes.shape[0], dtype = object)
-            else:
-                cts = np.asarray(raw_cts, dtype = object)
-                if cts.shape[0] != nodes.shape[0]:
-                    if cts.size == 1:
-                        cts = np.repeat(cts[0], nodes.shape[0]).astype(object)
-                    else:
-                        raise ValueError("contact_types must be scalar or match nodes length")
-            
-            #costs must be a single float or array of size len(nodes)
-            costs = out.get('costs', None)
-            if costs is None:
-                costs = np.full(nodes.shape[0], np.nan, dtype = np.float32)
-            else:
-                costs = np.asarray(costs, dtype = object)
-                if costs.shape[0] != nodes.shape[0]:
-                    if costs.size == 1:
-                        costs = np.repeat(costs[0], nodes.shape[0]).astype(object)
-                    else:
-                        raise ValueError("costs must be scalar or match nodes length")
+        # apply in/out multipliers
+        for ct in cts:
+            if ct in self.model.in_multiplier:
+                self.model.in_multiplier[ct][nodes] *= factor
+            if ct in self.model.out_multiplier:
+                self.model.out_multiplier[ct][nodes] *= factor
 
-            params = out.get('params', None)
-            #for each action type, deduplicate candidates
-            if nodes.size > 0:
-                unique_nodes, inverse = np.unique(nodes, return_inverse = True)
-                best_prios = np.full(unique_nodes.shape[0], -np.inf, dtype = np.float32)
-                best_cts = np.empty(unique_nodes.shape[0], dtype = object)
-                best_costs = np.full(unique_nodes.shape[0], np.inf, dtype = np.float32)
-                best_params = [None] * unique_nodes.shape[0]
+        tokens_added = 0
+        if duration > 0:
+            tok = MultiplierToken(
+                expires_at=int(t + duration),
+                nodes=nodes.copy(),
+                contact_types=tuple(cts),
+                in_factor=factor,
+                out_factor=factor,
+                action="isolate",
+            )
+            self._schedule_token(tok)
+            tokens_added = 1
 
-                for occ in range(nodes.shape[0]):
-                    uid = inverse[occ]
-                    p = float(prios[occ])
-                    c = float(costs[occ])
-                    #keep highest priority, or lowest cost if tie
-                    if p > best_prios[uid] or (p==best_prios[uid] and c < best_costs[uid]):
-                        best_prios[uid] = p
-                        best_cts[uid] = cts[occ]
-                        best_costs[uid] = c
-                        if params is not None:
-                            #params can be per-occurrance or scalar
-                            try:
-                                best_params[uid] = params[occ]
-                            except Exception:
-                                best_params[uid] = params
-                    
-                #append best occurrences to global lists with action_type label
-                for i, u in enumerate(unique_nodes):
-                    action_types_list.append(action_type)
-                    nodes_list.append(int(u))
-                    prios_list.append(best_prios[i])
-                    cts_list.append(best_cts[i])
-                    costs_list.append(best_costs[i])
-                    params_list.append(best_params[i])
-
-        #if no nodes to gather, return empties
-        if not nodes_list:
-            return(
-                np.empty(0, dtype = object),
-                np.empty(0, dtype = np.int32), 
-                np.empty(0, dtype = np.float32),
-                np.empty(0, dtype = object),
-                np.empty(0, dtype = np.float32), 
-                []
+        # Log specific actions to the node-level log
+        for node in nodes:
+            self._action_log.append(
+                {
+                    "t": t,
+                    "node": int(node),
+                    "action": "isolate",
+                    "duration": duration,
+                    "reduction": reduction,
+                }
             )
 
-        #else, gather results and return
-        action_types_arr = np.array(action_types_list, dtype = object)
-        nodes_arr = np.array(nodes_list, dtype = np.int32)
-        prios_arr = np.array(prios_list, dtype = np.float32)
-        contact_types_arr = np.array(cts_list, dtype = object)
-        costs_arr = np.array(costs_list, dtype = np.float32)
-        params_arr = params_list
+        return int(nodes.size), tokens_added
 
-        return action_types_arr, nodes_arr, prios_arr, contact_types_arr, costs_arr, params_arr
+    def _order_trace(
+        self, *, t: int, cases: np.ndarray, params: Dict[str, Any]
+    ) -> tuple[int, int]:
+        # Order contact tracing on given node(s)
+        cases = np.asarray(cases, dtype=np.int32)
+        if cases.size == 0:
+            return 0, 0
 
-    def schedule_action(self, action: ActionBase, current_time: int, resource_cost: float):
+        # Ensure params is a dict and merge carefully
+        passed_params = params if isinstance(params, dict) else {}
+        merged = {**self.default_trace_params, **passed_params}
+
+        self.surveillance.order_trace(t=int(t), cases=cases, params=merged)
+
+        for node in cases:
+            self._action_log.append(
+                {"t": t, "node": int(node), "action": "trace", "params": merged}
+            )
+        return int(cases.size), 0
+
+    def _order_test(
+        self, *, t: int, nodes: np.ndarray, params: Dict[str, Any]
+    ) -> tuple[int, int]:
+        # Order tests for given node(s)
+        nodes = np.asarray(nodes, dtype=np.int32)
+        if nodes.size == 0:
+            return 0, 0
+        merged = dict(self.default_test_params)
+        merged.update(params or {})
+        self.surveillance.order_test(t=int(t), nodes=nodes, params=merged)
+
+        for node in nodes:
+            self._action_log.append(
+                {"t": t, "node": int(node), "action": "test", "params": merged}
+            )
+        return int(nodes.size), 0
+
+    def step(
+        self,
+        *,
+        t: int,
+        epi_state: Dict[str, np.ndarray],
+        scheduled_surv_actions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, np.ndarray]:
         """
-        Apply action and schedule tokens for expiry if duration > 0.
-        Registers Action instance for process_expirations to call reversion
-        """
-        #Apply all actions, get a list of actions performed
-        tokens = action.apply(self.model, current_time)
-
-        for t in tokens:
-            if getattr(t, "action_id", None) != action.id:
-                raise ValueError(f"Token.action_id {getattr(t, 'action_id', None)} does not match action.id {action.id}")
-
-        #partition to reversible and nonreversible
-        reversible_tokens = [t for t in tokens if getattr(t, "reversible", True)]
-        nonreversible_tokens = [t for t in tokens if not getattr(t, "reversible", True)]
-
-        #if there are reversible tokens and duration, schedule
-
-
-        #register reversible tokens only, schedule expiry
-        if reversible_tokens and (action.duration and action.duration > 0):
-            expiry_time = int(current_time + action.duration)
-            self.expiry.setdefault(expiry_time, []).extend(reversible_tokens)
-
-            self._active_actions[action.id] = action
-            self._action_token_counts[action.id] = self._action_token_counts.get(action.id, 0) + len(reversible_tokens)
-
-        #if duration > 0, but not reversible, warning as nothing to revert
-        if action.duration and action.duration > 0 and not reversible_tokens:
-            warnings.warn(f"Action {action.id} has duration but produced no reversible tokens, will not be automatically reverted")
-
-        #log metadata
-        self.action_log.append({
-            'time': int(current_time),
-            'action_id': action.id,
-            'action_type': action.action_type,
-            'kind': getattr(action, "kind", action.action_type),
-            'nodes_count': int(getattr(action, "nodes", np.empty(0)).size),
-            'hours_used': float(resource_cost),
-            'duration': int(action.duration),
-            'reversible_tokens': len(reversible_tokens),
-            'nonreversible_tokens': len(nonreversible_tokens)
-        })
-
-    def process_expirations(self, current_time):
-        """
-        Revert ActionTokens scheduled for current_time using action reversion methods, and remove from active actions
-        """
-        tokens_due = self.expiry.pop(int(current_time), [])
-        for token in tokens_due:
-            action = self._active_actions.get(token.action_id)
-            if action is not None:
-                #delegate reversion to action's method
-                try:
-                    action.revert_token(self.model, token)
-                except Exception as exc:
-                    warnings.warn(f"Action.revert_token failed for action {token.action_id}: {exc}")
-
-                #decrement token counters and clean mappings 
-                self._action_token_counts[token.action_id] -= 1
-                if self._action_token_counts[token.action_id] <= 0:
-                    #if no more tokens on this action, remove from active 
-                    del self._action_token_counts[token.action_id]
-                    del self._active_actions[token.action_id]
-            else:
-                warnings.warn(f"No registered action object for token.action_id {token.action_id}")
-
-    def step(self, current_time: int, recorder_snapshot: Dict[str, np.ndarray]):
-        """
-        One step for the LHD where it discovers events, builds candidates, selects calls, and applies interventions
+        One step for the LHD where it:
+        1) Processes old interventions
+        2) Observes reported cases through surveillance
+        3)
         """
 
-        #1 expire old interventions
-        self.process_expirations(current_time)
+        t = int(t)
 
-        #2 discover new events
-        discovered_event_ind = self.discover_exposures(recorder_snapshot)
+        # 1) Process old interventions that are expiring
+        expired = self.process_expirations(t)
 
-        #3 gather action candidates through algorithms
-        (action_types_arr, nodes_arr, prios_arr, contact_types_arr, costs_arr, params_arr) = self.gather_candidates(recorder_snapshot, discovered_event_ind)
-        if nodes_arr.size == 0:
-            return
+        # 2) Conduct surveillance on daily updates
+        batch = self.observe(
+            t=t, epi_state=epi_state, scheduled_actions=scheduled_surv_actions
+        )
 
-        #4 select actions maximizing value/hour (prio / cost)
-        costs_arr = np.maximum(costs_arr, self.min_candidate_cost)
-        value_per_hour = prios_arr/costs_arr
-        order = np.argsort(-value_per_hour)
+        # 3) Integrate findings to knowledge state
+        self.state.process_batch(batch)
 
-        #allocate actions by value until hours are exhausted 
-        hours_available = float(self.daily_personhours)
-        hours_spent = 0.0
-        selected_indices = []
-        for ind in order:
-            c = float(costs_arr[ind])
-            if hours_spent + c <= hours_available:
-                hours_spent += c
-                selected_indices.append(ind)
-            else:
-                continue
+        # 4) Have algorithms propose actions to take
+        proposals = []
+        for algo in self.algorithms:
+            proposals.extend(algo.propose(self.state))
 
-        #5 group selected actions by action_type, contact_type and schedule
-        grouped = defaultdict(list)
-        grouped_costs = defaultdict(float)
-        grouped_params = defaultdict(list)
-        for ind in selected_indices:
-            atype = action_types_arr[ind]
-            ctype = contact_types_arr[ind]
-            key = (atype, ctype)
-            grouped[key].append(int(nodes_arr[ind]))
-            grouped_costs[key] += float(costs_arr[ind])
-            grouped_params[key].append(params_arr[ind] if params_arr is not None else None)
+        # 5) Use planner to allocate resources to proposals
+        plan: ActionPlan = self.planner.select(proposals, capacity=self.daily_capacity)
 
-        #create an action for each group and schedule
-        for (atype, ctype), nodes in grouped.items():
-            factory = self.action_factories.get(atype)
-            if factory is None:
-                #skip if no action factory registered
-                continue
-            #choose params and pass merged dict or None
-            params_list_group = grouped_params[(atype, ctype)]
-            merged_params = None
-            for p in params_list_group:
-                if isinstance(p, dict):
-                    merged_params = merged_params or {}
-                    merged_params.update(p)
+        # 7) Pass ActionPlan to executor
+        exec_summary: ExecutionSummary = self.executor.execute(lhd=self, t=t, plan=plan)
+        exec_summary.tokens_expired = expired
 
-            #create action instance 
-            #use sum of costs or average priority for group
-            group_cost = grouped_costs[(atype, ctype)]
-            group_prio = float(np.mean([prios_arr[ind] for ind in selected_indices if action_types_arr[ind] == atype and contact_types_arr[ind] == ctype]))
-            action = factory(np.asarray(nodes, dtype = np.int32), ctype, group_prio, group_cost, merged_params)
-            self.schedule_action(action, current_time, resource_cost = group_cost)
+        # 8) Record results of the day
+        self._log_day(
+            t=t,
+            batch=batch,
+            proposals=proposals,
+            plan=plan,
+            summary=exec_summary,
+            run_number=self.model.replicate_ind,
+        )
 
-        return
+        return batch
+
+    # Results writer helper
+    def _log_day(
+        self,
+        *,
+        t: int,
+        batch: Dict[str, np.ndarray],
+        proposals: List[ActionProposal],
+        plan: ActionPlan,
+        run_number: int,
+        summary: ExecutionSummary,
+    ) -> None:
+        rep = np.asarray(
+            batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32
+        )
+        proposed_actions = Counter([p.action for p in proposals])
+        selected_actions = Counter([p.action for p in plan.selected])
+
+        # Extract nodes for specific actions
+        nodes_isolated_today = [
+            p.target
+            for p in plan.selected
+            if p.action == "isolate" and p.target_kind == "node"
+        ]
+        nodes_contact_traced_today = [
+            p.target
+            for p in plan.selected
+            if p.action == "trace" and p.target_kind == "node"
+        ]
+
+        # Extract newly discovered nodes from tracing
+        trace_src = batch.get("trace_src", np.empty(0, dtype=np.int32))
+        trace_tgt = batch.get("trace_tgt", np.empty(0, dtype=np.int32))
+        newly_discovered_trace_nodes = (
+            np.unique(np.concatenate([trace_src, trace_tgt])).tolist()
+            if trace_src.size > 0
+            else []
+        )
+
+        row = {
+            "run_number": run_number,
+            "t": int(t),
+            "policy_name": self.policy_name,
+            "capacity_available": int(plan.capacity_available),
+            "capacity_used": int(plan.capacity_used),
+            "reported_cases_today": int(rep.size),
+            "new_cases_today": int(
+                getattr(self.state, "new_cases_today", np.empty(0, np.int32)).size
+            ),
+            "known_cases_total": int(len(getattr(self.state, "known_case_list", []))),
+            "new_edges_today": int(getattr(self.state, "new_edges_today", 0)),
+            "known_edges_total": int(len(getattr(self.state, "known_edges", []))),
+            "proposals_total": int(len(proposals)),
+            "selected_total": int(len(plan.selected)),
+            "tokens_scheduled": int(summary.tokens_scheduled),
+            "tokens_expired": int(summary.tokens_expired),
+            "isolation_actions_taken_today": summary.applied_by_action.get(
+                "isolate", 0
+            ),
+            "nodes_isolated_today": nodes_isolated_today,
+            "tracing_actions_taken_today": summary.info_orders_by_action.get(
+                "trace", 0
+            ),
+            "nodes_contact_traced_today": nodes_contact_traced_today,
+            "newly_reported_cases_today": rep.tolist(),
+            "newly_discovered_trace_nodes_today": newly_discovered_trace_nodes,
+        }
+
+        # flatten action counts
+        for k, v in proposed_actions.items():
+            row[f"proposed_{k}"] = int(v)
+        for k, v in selected_actions.items():
+            row[f"selected_{k}"] = int(v)
+        for k, v in summary.applied_by_action.items():
+            row[f"applied_{k}"] = int(v)
+        for k, v in summary.info_orders_by_action.items():
+            row[f"info_{k}"] = int(v)
+
+        self._results_rows.append(row)
+        self._lhd_daily_log.append(row)
+
+    def lhd_daily_log_to_df(self) -> pd.DataFrame:
+        return pd.DataFrame(self._lhd_daily_log)
+
+    def results_to_df(self) -> pd.DataFrame:
+        # Export results to dataframe
+        return pd.DataFrame(self._results_rows)
+
+    def action_log_to_df(self) -> pd.DataFrame:
+        # Export detailed node-level actions to dataframe
+        return pd.DataFrame(self._action_log)
+
+    def _schedule_token(self, tok: MultiplierToken) -> None:
+        self._expiry_tokens_by_day[int(tok.expires_at)].append(tok)
+
+    def _as_nodes(self, targets) -> np.ndarray:
+        return np.asarray(targets, dtype=np.int32)
+
+    # Reset Helper
     def reset_for_run(self):
         """
-        Reset LHD state for new model run 
+        Reset LHD state for new model run
         """
-        self.expiry = {}
-        self.action_log = []
-        self._active_actions = {}
-        self._action_token_counts = {}
+
+        self._expiry_tokens_by_day.clear()
+        self._results_rows.clear()
+        self._action_log.clear()
+        self._lhd_daily_log.clear()
+        if hasattr(self, "surveillance") and self.surveillance is not None:
+            self.surveillance.reset_for_run(seed=self.surveillance.seed, is_vax = self.model.is_vaccinated)
+        if hasattr(self, "state") and self.state is not None:
+            self.state.reset_for_run()

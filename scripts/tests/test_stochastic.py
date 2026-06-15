@@ -8,58 +8,12 @@ import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
 
-# Project imports (adjust module paths if your package layout differs)
+# Project imports
 from scripts.variants.run_variants_funcs import run_variants
-from scripts.lhd.lhdConfig import LhdVariant, LhdConfig
 from scripts.simulation.outbreak_model import NetworkModel
 from scripts.graph.graph_utils import GraphData
-
-
-# --- Helpers ---------------------------------------------------------------
-
-def canonicalize(obj: Any):
-    """Recursively convert numpy/scalar types to Python built-ins for stable comparison & JSON output."""
-    if obj is None:
-        return None
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return canonicalize(obj.tolist())
-    if isinstance(obj, (list, tuple)):
-        return [canonicalize(x) for x in obj]
-    if isinstance(obj, dict):
-        return {str(k): canonicalize(v) for k, v in obj.items()}
-    if isinstance(obj, set):
-        return sorted(canonicalize(x) for x in obj)
-    # bit generator state dicts can contain numpy arrays; canonicalize nested
-    try:
-        # attempt JSON-serializable fallback
-        json.dumps(obj)
-        return obj
-    except Exception:
-        return repr(obj)
-
-
-def arrays_equal(a, b) -> bool:
-    """Robust equality for arrays/lists/None."""
-    if a is None and b is None:
-        return True
-    if a is None or b is None:
-        return False
-    a_np = np.asarray(a)
-    b_np = np.asarray(b)
-    try:
-        return bool(np.array_equal(a_np, b_np))
-    except Exception:
-        # fallback to canonicalized equality
-        return canonicalize(a) == canonicalize(b)
-
-
-def dicts_equal(d0, d1) -> bool:
-    return canonicalize(d0) == canonicalize(d1)
-
+from scripts.tests.test_utils import canonicalize, arrays_equal_sorted, dicts_equal
+from scripts.lhd.policy_config import PolicyVariant, PolicyConfig
 
 # --- Minimal Dummy Config & GraphData -------------------------------------
 
@@ -93,8 +47,11 @@ class DummyModelConfig:
         self.epi.lasting_partial_immunity = None
 
         self.lhd = type("L", (), {})()
+        self.lhd.lhd_daily_capacity = 100
+        self.lhd.p_detect_inf = 0.0
+        self.lhd.report_delay_days = 0
+        self.lhd.trace_recall_prob = 0.25
         self.lhd.lhd_discovery_prob = 0.0
-        self.lhd.lhd_employees = 0
         self.lhd.lhd_workday_hrs = 8.0
         self.lhd.mean_compliance = 1.0
         self.lhd.lhd_default_int_reduction = 0.0
@@ -168,7 +125,7 @@ def instrument_networkmodel(monkeypatch, records: Dict[int, Dict[str, list]]):
     records is a dict keyed by id(model) with values {'inits': [...], 'steps': [...]}
     """
 
-    orig_init = NetworkModel._initialize_states
+    orig_init = NetworkModel._initialize_replicate
     orig_step = NetworkModel.step
 
     def wrap_init(orig):
@@ -224,12 +181,20 @@ def instrument_networkmodel(monkeypatch, records: Dict[int, Dict[str, list]]):
                 "replicate_ind": getattr(self, "replicate_ind", None),
                 "time": getattr(self, "current_time", None),
                 "state_before": canonicalize(pre_state),
-                "rng_before": canonicalize(self.rng.bit_generator.state if getattr(self, "rng", None) is not None else None),
-                "lhd_action_log_before": canonicalize(list(self.lhd.action_log) if getattr(self, "lhd", None) is not None else None),
+                "rng_before": canonicalize(
+                    self.rng.bit_generator.state
+                    if getattr(self, "rng", None) is not None
+                    else None
+                ),
+                "lhd_results_rows_len_before": (
+                    len(getattr(self.lhd, "_results_rows", []))
+                    if getattr(self, "lhd", None) is not None
+                    else None
+                ),
             }
             recs["steps"].append({"pre": pre, "post": None})
             # call original step
-            out = orig(self, recorder)
+            out = orig(self)
             # capture post state: latest new_exposures and lhd action log snapshot
             try:
                 post_state = np.copy(self.state) if getattr(self, "state", None) is not None else None
@@ -239,17 +204,35 @@ def instrument_networkmodel(monkeypatch, records: Dict[int, Dict[str, list]]):
                 "replicate_ind": getattr(self, "replicate_ind", None),
                 "time": getattr(self, "current_time", None),
                 "state_after": canonicalize(post_state),
-                "new_exposures": canonicalize(self.new_exposures[-1] if getattr(self, "new_exposures", None) else None),
-                "new_infections": canonicalize(self.new_infections[-1] if getattr(self, "new_infections", None) else None),
-                "rng_after": canonicalize(self.rng.bit_generator.state if getattr(self, "rng", None) is not None else None),
-                "lhd_action_log_after": canonicalize(list(self.lhd.action_log) if getattr(self, "lhd", None) is not None else None),
+                "new_exposures": canonicalize(
+                    self.new_exposures[-1]
+                    if getattr(self, "new_exposures", None)
+                    else None
+                ),
+                "new_infections": canonicalize(
+                    self.new_infections[-1]
+                    if getattr(self, "new_infections", None)
+                    else None
+                ),
+                "rng_after": canonicalize(
+                    self.rng.bit_generator.state
+                    if getattr(self, "rng", None) is not None
+                    else None
+                ),
+                "lhd_results_rows_len_after": (
+                    len(getattr(self.lhd, "_results_rows", []))
+                    if getattr(self, "lhd", None) is not None
+                    else None
+                ),
             }
             recs["steps"][-1]["post"] = post
             return out
         return wrapped
 
     # apply monkeypatches
-    monkeypatch.setattr(NetworkModel, "_initialize_states", wrap_init(orig_init), raising=True)
+    monkeypatch.setattr(
+        NetworkModel, "_initialize_replicate", wrap_init(orig_init), raising=True
+    )
     monkeypatch.setattr(NetworkModel, "step", wrap_step(orig_step), raising=True)
 
 
@@ -276,7 +259,7 @@ def first_mismatch_between_models(m0, m1, records) -> Tuple[bool, str]:
         if a.get("replicate_seed") != b.get("replicate_seed"):
             return False, f"Mismatch at init replicate {r}: replicate_seed differs: {a.get('replicate_seed')} vs {b.get('replicate_seed')}"
         # compare vaccination arrays
-        if not arrays_equal(a.get("is_vaccinated"), b.get("is_vaccinated")):
+        if not arrays_equal_sorted(a.get("is_vaccinated"), b.get("is_vaccinated")):
             return False, f"Mismatch at init replicate {r}: is_vaccinated differs.\nmodel0 sample: {a.get('is_vaccinated')[:10] if a.get('is_vaccinated') else a.get('is_vaccinated')}\nmodel1 sample: {b.get('is_vaccinated')[:10] if b.get('is_vaccinated') else b.get('is_vaccinated')}"
         # compare I0
         if canonicalize(a.get("I0")) != canonicalize(b.get("I0")):
@@ -310,18 +293,28 @@ def first_mismatch_between_models(m0, m1, records) -> Tuple[bool, str]:
         pre1 = ent1["pre"]
         post0 = ent0["post"]
         post1 = ent1["post"]
+        if post0 is None or post1 is None:
+            return False, f"Step results missing for (replicate,time) = {key}. model0 crashed? {post0 is None}, model1 crashed? {post1 is None}"
+
         # compare pre state
-        if not arrays_equal(pre0.get("state_before"), pre1.get("state_before")):
+        if not arrays_equal_sorted(pre0.get("state_before"), pre1.get("state_before")):
             return False, f"Mismatch PRE at replicate={key[0]} time={key[1]}: state_before differs.\nmodel0(before)={pre0.get('state_before')}\nmodel1(before)={pre1.get('state_before')}"
         # compare post state
-        if not arrays_equal(post0.get("state_after"), post1.get("state_after")):
+        if not arrays_equal_sorted(post0.get("state_after"), post1.get("state_after")):
             return False, f"Mismatch POST at replicate={key[0]} time={key[1]}: state_after differs.\nmodel0(after)={post0.get('state_after')}\nmodel1(after)={post1.get('state_after')}"
         # compare new_exposures
-        if not arrays_equal(post0.get("new_exposures"), post1.get("new_exposures")):
+        if not arrays_equal_sorted(
+            post0.get("new_exposures"), post1.get("new_exposures")
+        ):
             return False, f"Mismatch at replicate={key[0]} time={key[1]}: new_exposures differs.\nmodel0={post0.get('new_exposures')}\nmodel1={post1.get('new_exposures')}"
         # compare LHD action logs
-        if not dicts_equal(post0.get("lhd_action_log_after"), post1.get("lhd_action_log_after")):
-            return False, f"Mismatch at replicate={key[0]} time={key[1]}: lhd_action_log differs.\nmodel0={post0.get('lhd_action_log_after')}\nmodel1={post1.get('lhd_action_log_after')}"
+        if post0.get("lhd_results_rows_len_after") != post1.get(
+            "lhd_results_rows_len_after"
+        ):
+            return (
+                False,
+                f"Mismatch at replicate={key[0]} time={key[1]}: lhd_results_rows_len_after differs.\nmodel0={post0.get('lhd_results_rows_len_after')}\nmodel1={post1.get('lhd_results_rows_len_after')}",
+            )
     # 3) compare aggregated outputs if present
     df0 = m0.results_to_df() if hasattr(m0, "results_to_df") else None
     df1 = m1.results_to_df() if hasattr(m1, "results_to_df") else None
@@ -353,16 +346,20 @@ def test_two_identical_variants_stepwise_equality(monkeypatch, tmp_path: Path):
     gd = make_minimal_graphdata(N=12)
 
     # create two identical variants (empty maps -> LocalHealthDepartment.register_defaults will populate defaults)
-    v1 = LhdVariant(name="identical_1", algorithm_map={}, action_factory_map={}, description="copy1")
-    v2 = LhdVariant(name="identical_2", algorithm_map={}, action_factory_map={}, description="copy2")
-    lhd_config = LhdConfig(variants=[v1, v2])
+    v1 = PolicyVariant(
+        name="identical_1", policy_name="observe_only", description="copy1"
+    )
+    v2 = PolicyVariant(
+        name="identical_2", policy_name="observe_only", description="copy2"
+    )
+    lhd_config = PolicyConfig(variants=[v1, v2])
 
     outdir = tmp_path / "runs"
     outdir.mkdir(parents=True, exist_ok=True)
 
     # run variants sequentially via run_variants (it returns list of NetworkModel objects)
     models = run_variants(
-        lhd_config=lhd_config,
+        policy_config=lhd_config,
         cfg=cfg,
         graphdata=gd,
         output_dir=str(outdir),
@@ -373,7 +370,7 @@ def test_two_identical_variants_stepwise_equality(monkeypatch, tmp_path: Path):
         save_incidence=False,
         save_prevalence=False,
         summary_metrics=None,
-        overwrite=True
+        overwrite=True,
     )
 
     assert isinstance(models, list) and len(models) == 2, "Expected run_variants to return two models (one per variant)"

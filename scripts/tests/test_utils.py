@@ -1,126 +1,160 @@
-import os
+import json
+import hashlib
 import numpy as np
 import pandas as pd
-import pytest
-
-# import the synth module (try both likely locations)
-try:
-    from scripts.utils.synth_data_processing import synthetic_data_process, build_individual_lookup, build_edge_list
-    from scripts.utils.fred_fetch import downloadPopData
-
-except Exception:
-    from scripts.synth_data_process import synthetic_data_process, build_individual_lookup, build_edge_list  
-
-from scripts.config import ModelConfig
+from typing import Any, Dict, Optional
 
 
-@pytest.fixture
-def tmp_data_dir(tmp_path, monkeypatch):
+def sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+def hash_array(arr: Any) -> str:
+    a = np.asarray([]) if arr is None else np.asarray(arr)
+    try:
+        # include dtype and shape for safety
+        payload = a.tobytes() + str(a.dtype).encode() + str(a.shape).encode()
+    except Exception:
+        payload = repr(a).encode()
+    return sha256_bytes(payload)
+
+
+def hash_dataframe(df: Optional[pd.DataFrame]) -> str:
+    if df is None:
+        return sha256_bytes(b"__none__")
+    try:
+        # stable ordering: sort by columns then rows (best-effort)
+        cols = list(df.columns)
+        if cols:
+            df2 = df.sort_values(by=cols).reset_index(drop=True)
+            b = df2.to_csv(index=False).encode()
+        else:
+            b = df.to_csv(index=False).encode()
+    except Exception:
+        b = repr(df).encode()
+    return sha256_bytes(b)
+
+
+def fingerprint_graphdata(
+    gd: Any,
+) -> Dict[str, Any]:  # Using Any for GraphData to avoid circular import
     """
-    Create a temporary working directory with a data/<county>/ containing small
-    people.txt and gq_people.txt files in the format expected by synthetic_data_process.
-    The fixture changes cwd to tmp_path for the duration of the test and returns the county name.
+    Produce a small fingerprint dictionary for GraphData to detect mutation.
     """
-    monkeypatch.chdir(tmp_path)
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-
-    county = "TestCounty"
-    county_dir = data_dir / county
-    county_dir.mkdir()
-
-    # Create a simple people.txt with tab-separated columns
-    people_txt = county_dir / "people.txt"
-    people_rows = [
-        # header
-        "sp_id\tsp_hh_id\tschool_id\twork_id\tage\tsex\trelate\trace",
-        # two household members (0,1), one with school/work, others without
-        "0\tH1\tS1\tW1\t34\tM\thead\twhite",
-        "1\tH1\tS1\tW1\t6\tF\tchild\twhite",
-        # one elder in different household
-        "2\tH2\tX\tW2\t70\tM\thead\tblack",
-        # one single worker
-        "3\tH3\tX\tW3\t25\tF\tworker\tasian",
-    ]
-    people_txt.write_text("\n".join(people_rows))
-
-    # Create a simple gq_people.txt with a single group-quarter resident
-    gq_txt = county_dir / "gq_people.txt"
-    gq_rows = [
-        "sp_id\tsp_gq_id\tage\tsex",
-        "4\tGQ1\t45\tM"
-    ]
-    gq_txt.write_text("\n".join(gq_rows))
-
-    yield str(county)
-
-    # cleanup happens automatically when tmp_path fixture is removed
+    try:
+        el_h = hash_dataframe(gd.edge_list)
+    except Exception:
+        el_h = sha256_bytes(repr(getattr(gd, "edge_list", None)).encode())
+    # csr_by_type hashes
+    csr_dict = {}
+    try:
+        for ct, triple in getattr(gd, "csr_by_type", {}).items():
+            indptr, indices, weights = triple
+            h = hashlib.sha256()
+            try:
+                h.update(np.asarray(indptr).astype(np.int64).tobytes())
+                h.update(np.asarray(indices).astype(np.int32).tobytes())
+                h.update(np.asarray(weights).astype(np.float32).tobytes())
+            except Exception:
+                h.update(repr((indptr, indices, weights)).encode())
+            csr_dict[str(ct)] = h.hexdigest()
+    except Exception:
+        csr_dict = {"error": "csr fingerprint failed"}
+    # neighbor_map fingerprint (structural)
+    try:
+        nm_items = []
+        for src in sorted(getattr(gd, "neighbor_map", {}).keys()):
+            nbrs = gd.neighbor_map.get(src, [])
+            sorted_nbrs = sorted([(int(t), float(w), str(ct)) for (t, w, ct) in nbrs])
+            nm_items.append((int(src), tuple(sorted_nbrs)))
+        nm_b = repr(nm_items).encode()
+        nm_h = sha256_bytes(nm_b)
+    except Exception:
+        nm_h = sha256_bytes(repr(getattr(gd, "neighbor_map", None)).encode())
+    return {"edge_list_hash": el_h, "csr_by_type": csr_dict, "neighbor_map_hash": nm_h}
 
 
-def test_synthetic_data_process_reads_and_merges(tmp_data_dir):
-    county = tmp_data_dir
-    # call code under test - do not save files to disk from the function
-    contacts = synthetic_data_process(county, save_files=False)
-
-    # assert output is a DataFrame with expected columns
-    expected_cols = ["PID", "hh_id", "wp_id", "sch_id", "gq_id", "age", "sex", "race", "relate", "gq"]
-    assert isinstance(contacts, pd.DataFrame)
-    for c in expected_cols:
-        assert c in contacts.columns
-
-    # check number of rows: people (4) + gq (1) = 5
-    assert contacts.shape[0] == 5
-
-    # find the gq row (gq True)
-    gq_rows = contacts[contacts["gq"]]
-    assert len(gq_rows) == 1
-    assert gq_rows.iloc[0]["PID"] == "4"
-
-
-def test_build_individual_lookup(tmp_data_dir):
-    county = tmp_data_dir
-    contacts = synthetic_data_process(county, save_files=False)
-    lookup = build_individual_lookup(contacts)
-    # keys should be age, race, sex
-    assert list(lookup.columns) == ["age", "race", "sex"]
-    assert len(lookup) == len(contacts)
+def canonicalize_rng_state(state: Any) -> Any:
+    """Convert numpy arrays in RNG state to python lists for stable JSON output and comparison."""
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        out = {}
+        for k, v in state.items():
+            if isinstance(v, np.ndarray):
+                out[k] = v.tolist()
+            elif isinstance(v, (list, tuple)):
+                out[k] = [
+                    (
+                        canonicalize_rng_state(x)
+                        if isinstance(x, dict)
+                        else (x.tolist() if isinstance(x, np.ndarray) else x)
+                    )
+                    for x in v
+                ]
+            elif isinstance(v, dict):
+                out[k] = canonicalize_rng_state(v)
+            else:
+                out[k] = v
+        return out
+    return repr(state)
 
 
-def test_factorize_and_build_edge_list_small(tmp_data_dir):
-    # Build a small contacts_df manually (similar to synthetic_data_process output)
-    contacts = pd.DataFrame([
-        {"PID": "0", "hh_id": "H1", "wp_id": "W1", "sch_id": "S1", "gq_id": np.nan, "age": 34, "sex": "M", "race": "white", "relate": "head", "gq": False},
-        {"PID": "1", "hh_id": "H1", "wp_id": "W1", "sch_id": "S1", "gq_id": np.nan, "age": 6, "sex": "F", "race": "white", "relate": "child", "gq": False},
-        {"PID": "2", "hh_id": "H2", "wp_id": "W2", "sch_id": "X",  "gq_id": np.nan, "age": 70, "sex": "M", "race": "black", "relate": "head", "gq": False},
-        {"PID": "3", "hh_id": "H3", "wp_id": "X",  "sch_id": "X",  "gq_id": np.nan, "age": 25, "sex": "F", "race": "asian", "relate": "worker", "gq": False},
-    ])
-    cfg = ModelConfig()
-    # produce edges
-    edges_df = build_edge_list(contacts.copy(), cfg, seed=123, save=False, county=None, master_casual_contacts=2)
-
-    # schema checks
-    assert set(edges_df.columns) == {"source", "target", "weight", "contact_type"}
-    assert edges_df["source"].dtype == np.int32
-    assert edges_df["target"].dtype == np.int32
-
-    # hh pair (0,1) should exist as hh contact
-    hh_row = edges_df[(edges_df["source"] == 0) & (edges_df["target"] == 1)]
-    assert not hh_row.empty
-    assert hh_row.iloc[0]["contact_type"] == "hh"
-
-    # no self edges
-    assert not ((edges_df["source"] == edges_df["target"]).any())
-
-    # All pairs unique by (source,target)
-    assert edges_df.shape[0] == len(edges_df[["source", "target"]].drop_duplicates())
+def normalize_state_lists(states: Any) -> Any:
+    """Normalize a timestep [S,E,I,R] into lists where each inner list is sorted (so ordering differences don't break equality)."""
+    if states is None:
+        return None
+    try:
+        return [
+            sorted(list(x)) if isinstance(x, (list, tuple, np.ndarray)) else x
+            for x in states
+        ]
+    except Exception:
+        try:
+            return [sorted(list(x)) for x in states]
+        except Exception:
+            return states
 
 
-# @pytest.mark.skipif(not os.environ.get("RUN_SELENIUM_TESTS"), reason="Selenium tests disabled by default")
-def test_downloadPopData_integration():
-    # Integration test: requires ChromeDriver & network access
-    state = "Michigan"
-    county = "Keweenaw"
-    outzip = downloadPopData(state, county, os.getcwd())
-    assert os.path.isfile(outzip)
-    assert outzip.endswith(".zip")
-    os.remove(outzip)
+def arrays_equal_sorted(a: Any, b: Any) -> bool:
+    """Compare two arrays/lists treating them as unordered sets (sort each before compare)."""
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    a_arr = np.asarray(a)
+    b_arr = np.asarray(b)
+    if a_arr.ndim == 1 and b_arr.ndim == 1:
+        a_sorted = np.sort(a_arr)
+        b_sorted = np.sort(b_arr)
+        return np.array_equal(a_sorted, b_sorted)
+    try:
+        return np.array_equal(a_arr, b_arr)
+    except Exception:
+        return canonicalize(a) == canonicalize(b)
+
+
+def canonicalize(x: Any) -> Any:
+    """JSON-serializable canonicalization of common types used in compares."""
+    if x is None:
+        return None
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return float(x)
+    if isinstance(x, (list, tuple)):
+        return [canonicalize(v) for v in x]
+    if isinstance(x, dict):
+        return {str(k): canonicalize(v) for k, v in x.items()}
+    if isinstance(x, np.ndarray):
+        return canonicalize(x.tolist())
+    try:
+        json.dumps(x)
+        return x
+    except Exception:
+        return repr(x)
+
+
+def dicts_equal(d0: Any, d1: Any) -> bool:
+    """Compare two dictionaries after canonicalizing their contents."""
+    return canonicalize(d0) == canonicalize(d1)

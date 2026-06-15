@@ -75,6 +75,14 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
         .click(download_button)
         .perform())
 
+    
+    (webdriver.ActionChains(driver)
+        .scroll_to_element(download_button)
+        .scroll_by_amount(0, 1000)
+        .click(download_button)
+        .click(download_button)
+        .perform())
+
     # Wait for download to finish (very basic!)
     import time
 
@@ -90,9 +98,11 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
     latest_zip = max(zip_files, key=os.path.getmtime)
 
     # find the numeric prefix as it is important
-    match = re.search(r"(\d+).*\.zip$", latest_zip)
+    match = re.search(r"/(\d+)", latest_zip)
     if match:
         county_prefix = match.group(1)
+    print(match)
+    print(county_prefix)
 
     # Create new zip path name the folder
     new_zip_path = os.path.join(data_dir, f"{county}.zip")
@@ -111,6 +121,17 @@ def downloadPopData(state, county, projectDirectory = os.getcwd()):
                     zout.writestr(new_name, source.read())
         os.remove(latest_zip)
     print(f"Data for {county} County, {state} saved to {new_zip_path}")
+
+    # Fix multi-download issue by checking for more and deleting
+    leftover_zip_pattern = os.path.join(data_dir, f"{county_prefix}*.zip")
+    leftover_zip_files = glob.glob(leftover_zip_pattern)
+
+    for old_zip in leftover_zip_files:
+        try:
+            os.remove(old_zip)
+            print(f"Deleted leftover zip file: {old_zip}")
+        except FileNotFoundError:
+            pass
 
     return(new_zip_path)
 

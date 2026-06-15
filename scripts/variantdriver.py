@@ -1,4 +1,4 @@
-#scripts/variantdriver.py
+# scripts/variantdriver.py
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
@@ -14,9 +14,9 @@ import pandas as pd
 
 # imports from your codebase
 from scripts.variants.run_variants_funcs import prepare_run, run_parameter_set
-from scripts.lhd.lhdConfig import LhdConfig, LHD_CONFIGURATION
+from scripts.lhd.policy_config import PolicyConfig, POLICY_CONFIGURATION
 from scripts.config import ModelConfig
-
+from scripts.PostRunProcessing.results_formatting import export_prcc_inputs_for_matlab
 from scripts.visualization.viz import (
     plot_metric_boxplot,
     plot_trajectories_by_variant,
@@ -26,7 +26,7 @@ from scripts.visualization.viz import (
 def run_experiment(
     csv_path: str,
     n_samples: int,
-    lhd_config: LhdConfig,
+    policy_config: PolicyConfig,
     output_dir: Union[str, Path],
     *,
     base_cfg: Optional[ModelConfig] = None,
@@ -39,6 +39,7 @@ def run_experiment(
     save_summary: bool = True,
     save_incidence: bool = False,
     save_prevalence: bool = False,
+    save_lhd_results: bool = False,
     summary_metrics: Optional[List[str]] = None,
     overwrite_runs: bool = True,#Run results
     clean_dir: bool = False
@@ -59,9 +60,7 @@ def run_experiment(
 
     out_base.mkdir(parents = True, exist_ok = True)
 
-
-
-    #1) Prepare run
+    # 1) Prepare run
     print("[run_experiment] Initializing run data... ")
     contacts_df, configs_list, master_gd = prepare_run(
         csv_path = csv_path,
@@ -76,16 +75,16 @@ def run_experiment(
     n_configs = len(configs_list)
     print(f"[run_experiment] {n_configs} Models Initialized")
 
-    #2) Execute individual runs
+    # 2) Execute individual runs
     indices = list(range(n_configs))
     statuses: List[Dict[str, Any]] = []
 
-    #check worker count
-    #If None, use one less than maximum CPUs 
+    # check worker count
+    # If None, use one less than maximum CPUs
     if workers is None:
         workers = max(1, mp.cpu_count()-1)
 
-    #If more than 1 workers, attempt parallel process
+    # If more than 1 workers, attempt parallel process
     if workers > 1:
         print(f"[run_experiment] Attempting parallel run with {workers} workers")
         try:
@@ -94,7 +93,7 @@ def run_experiment(
                     exe.submit(
                         run_parameter_set,
                         contacts_df,
-                        lhd_config,
+                        policy_config,
                         configs_list[i],
                         master_gd,
                         str(out_base),
@@ -104,6 +103,7 @@ def run_experiment(
                         save_summary=save_summary,
                         save_incidence=save_incidence,
                         save_prevalence=save_prevalence,
+                        save_lhd_results = save_lhd_results,
                         summary_metrics=summary_metrics,
                         overwrite=overwrite_runs,
                     ): i
@@ -123,14 +123,14 @@ def run_experiment(
                     }
                     statuses.append(res)
 
-        #anticipating problem pickling LHD objects
+        # anticipating problem pickling LHD objects
         except Exception as exc:
             print(f"[run_experiment] Parallel execution failed ({exc}); falling back to sequential execution.")
             statuses = []
             for i in indices:
                 res = run_parameter_set(
                     contacts_df,
-                    lhd_config,
+                    policy_config,
                     configs_list[i],
                     master_gd,
                     str(out_base),
@@ -140,19 +140,20 @@ def run_experiment(
                     save_summary=save_summary,
                     save_incidence=save_incidence,
                     save_prevalence=save_prevalence,
+                    save_lhd_results = save_lhd_results,
                     summary_metrics=summary_metrics,
                     overwrite=overwrite_runs,
                 )
                 statuses.append(res)
-            
-    #Run in sequence
+
+    # Run in sequence
     else:
         print("[run_experiment] Running sequentially...")
         statuses = []
         for i in indices:
             res = run_parameter_set(
                 contacts_df,
-                lhd_config,
+                policy_config,
                 configs_list[i],
                 master_gd,
                 str(out_base),
@@ -162,12 +163,13 @@ def run_experiment(
                 save_summary=save_summary,
                 save_incidence=save_incidence,
                 save_prevalence=save_prevalence,
+                save_lhd_results = save_lhd_results,
                 summary_metrics=summary_metrics,
                 overwrite=overwrite_runs
             )
             statuses.append(res)
 
-    #Write a run status manifest
+    # Write a run status manifest
     sorted_statuses = sorted(statuses, key = lambda x: int(x.get("index", -1)))
     try:
         with open(out_base / "run_status.json", "w") as fh:
@@ -175,8 +177,7 @@ def run_experiment(
     except Exception:
         pass
 
-
-    #3) Aggregate per-run results to a single file 
+    # 3) Aggregate per-run results to a single file
     print("[run_experiment] Runs completed, aggregating data...")
     aggregated_paths: Dict[str, str] = {}
 
@@ -190,7 +191,7 @@ def run_experiment(
             lhs_df = None
 
     def _collect_and_concat(fname: str) -> Optional[pd.DataFrame]:
-        #Quick helper function to aggregate files by name to a big pd
+        # Quick helper function to aggregate files by name to a big pd
         parts = []
         for i in indices:
             run_dir = out_base / f"model_{int(i):04d}"
@@ -233,13 +234,19 @@ def run_experiment(
             _atomic_write_parquet(df_all, outp)
             aggregated_paths["prevalence"] = str(outp)
 
+    if save_lhd_results:
+        df_all = _collect_and_concat("lhd_results.parquet")
+        if df_all is not None:
+            outp = out_base / "aggregated_lhd_results.parquet"  
+            _atomic_write_parquet(df_all, outp)
+            aggregated_paths["lhd_results"] = str(outp)
+
     if clean_dir:
         print("[run_experiment] cleaning per-model run directories...")
         for i in indices:
             run_dir = out_base / f"model_{int(i):04d}"
             if run_dir.exists() and run_dir.is_dir():
-                    shutil.rmtree(run_dir)
-
+                shutil.rmtree(run_dir)
 
     return {
         "run_dir": str(out_base),
@@ -258,27 +265,49 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
 
 if __name__ == "__main__":
 
-    #Uses LHD_CONFIGURATION defined in scripts/lhd/lhdConfig.py
+    #Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
     result = run_experiment(
         csv_path="testLHS.csv",
-        n_samples=2,
-        lhd_config=LHD_CONFIGURATION,
-        output_dir="model_runs/experiment_002",
+        n_samples=50,
+        policy_config=POLICY_CONFIGURATION,
+        output_dir="model_runs/TESTMODELRUN",
         base_cfg=None,
-        seed=3,
-        workers=1,
+        seed=5,
+        workers=5,
         save_summary=True,
         save_incidence=True,
-        save_prevalence=False,
+        save_prevalence=True,
         clean_dir=True
     )
-    print("Done. aggregated:", result["aggregated_paths"])
+    print("Done. aggregated:", result["run_dir"])
 
-    # summary = pd.read_parquet("model_runs/experiment_002/aggregated_summary.parquet")
-    # inc = pd.read_parquet("model_runs/experiment_002/aggregated_incidence.parquet")
+    structured_paths = []
+    for filepath in result['aggregated_paths'].values():
+        if "aggregated_summary" in filepath:
+            export_prcc_inputs_for_matlab(
+                results_path = filepath,
+                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
+                kind = "summary",
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "summary"),
+                aggregate_replicates = True
+            )
+        elif "aggregated_incidence" in filepath:
+            export_prcc_inputs_for_matlab(
+                results_path = filepath,
+                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
+                kind = "timeseries",
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "incidence"),
+                aggregate_replicates = True
 
-    # fig, ax = plot_metric_boxplot(summary, metric="outbreakSize", variant_col="variant")
-    # plt.show()
+                
+            )
+        elif "aggregated_prevalence" in filepath:
+            export_prcc_inputs_for_matlab(
+                results_path = filepath,
+                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
+                kind = "timeseries",
+                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "prevalence"),
+                aggregate_replicates = True
 
-    # fig, axes = plot_trajectories_by_variant(inc, variant_col="variant")
-    # plt.show()
+            )
+        

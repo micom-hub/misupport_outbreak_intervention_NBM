@@ -1,4 +1,4 @@
-#scripts/lhd/actions.py
+# scripts/lhd/actions.py
 import numpy as np
 from typing import TYPE_CHECKING, Optional, Dict, Any, List
 import uuid
@@ -31,14 +31,20 @@ class ActionBase:
         self.reversible = True #subclasses can override
 
     def apply(self, model: NetworkModel, current_time: int) -> List[ActionToken]:
-        """
-        Apply action to the model, return a list of ActionTokens describing state changes
+        """Apply the action to the given NetworkModel at the current time.
+
+        Subclasses must implement this method. It should modify the model's state
+        (e.g., multipliers, individual states) and return a list of ActionToken objects
+        that describe the changes made and can be used for later reversion.
         """
         raise NotImplementedError
 
     def revert_token(self, model: NetworkModel, token: ActionToken) -> None:
-        """
-        Reverts a previously-applied token for a reversible action
+        """Reverts a previously-applied ActionToken for a reversible action.
+
+        Subclasses should implement this method to undo the changes described by the
+        given ActionToken on the NetworkModel. This method is called when an action
+        expires or is explicitly cancelled.
         """
 
 
