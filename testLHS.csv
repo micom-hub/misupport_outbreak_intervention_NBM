@@ -1,5 +1,5 @@
 ﻿Parameter,Minimum,Maximum,Integer
-epi.base_transmission_prob,0.1,0.25,0
+epi.base_transmission_prob,0.05,0.30,0
 population.wp_contacts,1,20,1
 population.sch_contacts,1,20,1
 population.cas_contacts,1,20,1

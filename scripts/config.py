@@ -56,7 +56,7 @@ class SimulationParams:
     )
     overwrite_master: bool = True
     simulation_duration: int = 100
-    I0: Union[List[int], int] = 1  # list for indices or int for randoms
+    I0: Union[List[int], int] = 2  # list for indices or int for randoms
     seed: int = 2026
     county: str = "Keweenaw"
     state: str = "Michigan"
