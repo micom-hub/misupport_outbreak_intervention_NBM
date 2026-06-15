@@ -55,7 +55,7 @@ POLICY_CONFIGURATION = PolicyConfig(variants=[
 ```
 #### Step 2: Run  Variant Driver
 ```bash
-python -m scripts.variantdriver
+python scripts/variantdriver.py
 ```
 This script will iterate through the defined variants, running the model across the specified parameter space or stochastic replicates.
 
@@ -67,8 +67,25 @@ To perform a global sensitivity analysis using Latin Hypercube Sampling (LHS) an
 3.  **Execute Pipeline:** Use the full pipeline shell script to run the full simulation, post-processing, and PRCC analysis:
     ```bash
     chmod +x scripts/parameter_sweep_pipeline.sh
-    ./scripts/parameter_sweep_pipeline.sh --run-dir model_runs/'__name_of_your_experiment_here__' --all --baseline-policy observe_only
+    ./scripts/parameter_sweep_pipeline.sh --run-dir model_runs/MY_EXPERIMENT --all --baseline-policy observe_only
     ```
+
+#### Pipeline Options
+| Argument | Description | Default |
+| :--- | :--- | :--- |
+| `--run-dir` | **Required.** Path to the experiment output directory. | N/A |
+| `--all` | Runs all steps: PRCC generation, parsing, analysis, and plotting. | (Default) |
+| `--prcc-long` | Runs MATLAB PRCC and parses `.mat` files to Parquet. | Off |
+| `--prcc-analysis` | Generates PRCC heatmaps and statistical summary tables. | Off |
+| `--trajectory-plots`| Generates epidemiological time-series plots. | Off |
+| `--baseline-policy` | Policy name to use as a reference for comparison plots. | None |
+| `--method` | PRCC correction method (`bhfdr`, `bonferroni`, `ztest`). | `bhfdr` |
+| `--sigonly` | If set, only significant parameters are included in analysis. | Off |
+| `--topk` | Number of top influential parameters to show in rankings. | 15 |
+
+**Environment Variables:**
+- `MATLAB_BIN`: Path to the MATLAB executable (defaults to `matlab`).
+- `ALPHA`: Significance threshold for PRCC analysis (defaults to `0.05`).
 
 *Note: To monitor run progress, navigate to your designated model run directory, where runs will be generated in order numbered 1-n_samples*
 ---
@@ -101,4 +118,3 @@ The model uses a MATLAB post-processing suite located in `scripts/PostRunProcess
 For this to work, ensure MATLAB is installed along with the statistics and machine learning toolkit, and is available in your system path.
 
 ---
-
