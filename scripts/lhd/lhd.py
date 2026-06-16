@@ -128,6 +128,15 @@ class LocalHealthDepartment:
                     "contact_types": self.default_iso_contact_types,
                 },
             },
+            "isolate_transmission_cliques": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": {
+                    "reduction": self.default_iso_reduction,
+                    "duration": self.default_iso_duration,
+                    "contact_types": self.default_iso_contact_types,
+                },
+            },
         }
         self.algorithms, self.planner, self.policy_name = build_policy(
             self.policy_name, default_algo_params=default_algo_params

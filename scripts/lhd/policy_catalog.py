@@ -10,6 +10,7 @@ from scripts.lhd.algorithms_state import (
     TestContactsOfKnownCases,
     TraceEdgeEndpoints,
     IsolateNeighborsOfHighDegreeCases,
+    IsolateTransmissionCliques,
 )
 from scripts.lhd.planner import GreedyPlanner
 
@@ -71,6 +72,7 @@ ALGO_REGISTRY = {
     "test_contacts_of_known_cases": TestContactsOfKnownCases,
     "trace_edge_endpoints": TraceEdgeEndpoints,
     "isolate_neighbors_of_high_degree_cases": IsolateNeighborsOfHighDegreeCases,
+    "isolate_transmission_cliques": IsolateTransmissionCliques,
 }
 
 # Registry of planners currently implemented
@@ -189,6 +191,24 @@ POLICIES: Dict[str, Dict[str, Any]] = {
             "their high-degree contacts with a network-crawling approach to expand knowledge. This "
             "aims to quickly reduce transmission from key individuals while continuously improving "
             "the LHD's understanding of the outbreak's structure."
+        ),
+    },
+    "clique_crawl_containment": {
+        "planner": "greedy",
+        "algorithms": [
+            ("isolate_new_cases", {"priority": 3.0}),
+            ("isolate_transmission_cliques", {"priority": 2.5}),
+            ("trace_new_cases", {"priority": 2.0}),
+            ("trace_edge_endpoints", {"priority": 1.5}),
+            ("isolate_neighbors_of_high_degree_cases", {"priority": 1.0}),
+        ],
+        "description": (
+            "Computational: Combines 'IsolateTransmissionCliques' for chain containment with 'TraceEdgeEndpoints' "
+            "for forward network crawling. It also incorporates 'IsolateNeighborsOfHighDegreeCases' to extend "
+            "isolation coverage to immediate contacts of high-impact cases found in the network.\n"
+            "LHD Emulation: This policy emulates a proactive containment strategy. By identifying infection chains "
+            "(cliques) and crawling outwards to find new contacts, it attempts to 'fence in' the outbreak by "
+            "isolating both the perceived transmission path and its immediate connectivity hubs."
         ),
     },
 }

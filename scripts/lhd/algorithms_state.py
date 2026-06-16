@@ -200,3 +200,53 @@ class IsolateNeighborsOfHighDegreeCases(AlgorithmBase):
                     )
                 )
         return proposals
+
+
+class IsolateTransmissionCliques(AlgorithmBase):
+    """
+    Identify transmission cliques that contain newly reported cases and
+    propose isolation for all members of those cliques.
+    """
+
+    name = "isolate_transmission_cliques"
+
+    def __init__(
+        self,
+        *,
+        cost_per_node: int = 1,
+        priority: float = 1.0,
+        params: Optional[Dict[str, Any]] = None,
+    ):
+        self.cost_per_node = int(cost_per_node)
+        self.priority = float(priority)
+        self.params = params or {}
+
+    def propose(self, state) -> List[ActionProposal]:
+        new_cases = getattr(state, "new_cases_today", np.empty(0, np.int32))
+        if new_cases.size == 0:
+            return []
+
+        new_cases_set = set(new_cases)
+        # state.get_transmission_cliques returns List[Dict[str, Any]]
+        # Each dict has 'index_case' and 'members' (list of IDs)
+        cliques = state.get_transmission_cliques()
+
+        proposals = []
+        for clique in cliques:
+            members = clique["members"]
+            # Trigger isolation for the whole clique if any member is a new case today
+            if any(m in new_cases_set for m in members):
+                for node in members:
+                    proposals.append(
+                        ActionProposal(
+                            action="isolate",
+                            target_kind="node",
+                            target=int(node),
+                            priority=self.priority,
+                            cost_units=self.cost_per_node,
+                            params=self.params,
+                            source_algo=self.name,
+                            reason=f"member of transmission chain triggered by new case, index case: {clique['index_case']}",
+                        )
+                    )
+        return proposals

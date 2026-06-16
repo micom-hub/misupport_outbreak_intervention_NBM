@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, TYPE_CHECKING
+from collections import defaultdict
+from typing import Dict, List, Any, TYPE_CHECKING, Set
 
 if TYPE_CHECKING:
     from scripts.simulation.outbreak_model import NetworkModel
@@ -115,7 +116,39 @@ def get_known_network_snapshot(
                     }
                 )
 
-    # 3. (Optional) Add hidden cases that exist in truth but aren't in LHD knowledge
+    # 3. Identify Perceived Transmission Cliques
+    # A clique (transmission chain) is a tree/branch starting from an index case.
+    # We define a potential transmission edge as a trace edge (u -> v) where both are reported cases.
+    reported_ids: Set[int] = {
+        nid for nid, meta in known_nodes.items() if meta["is_reported"]
+    }
+    perceived_adj = defaultdict(list)
+    has_parent = set()
+
+    for edge in known_edges:
+        u, v = edge["u"], edge["v"]
+        if u in reported_ids and v in reported_ids:
+            # Trace source u is perceived as potentially infecting v
+            perceived_adj[u].append(v)
+            has_parent.add(v)
+
+    index_case_ids = [nid for nid in reported_ids if nid not in has_parent]
+    cliques = []
+    for root in index_case_ids:
+        # Traverse to find all descendants in the perceived transmission network
+        clique_members = []
+        stack = [root]
+        visited = {root}
+        while stack:
+            curr = stack.pop()
+            clique_members.append(curr)
+            for child in perceived_adj.get(curr, []):
+                if child not in visited:
+                    visited.add(child)
+                    stack.append(child)
+        cliques.append({"index_case": root, "members": sorted(clique_members)})
+
+    # 4. (Optional) Add hidden cases that exist in truth but aren't in LHD knowledge
     if include_truth:
         for nid, stage in true_state_map.items():
             if nid not in known_nodes:
@@ -132,7 +165,12 @@ def get_known_network_snapshot(
     for nid, meta in known_nodes.items():
         meta["true_stage"] = true_state_map.get(nid, 0)
 
-    return {"t": t, "nodes": list(known_nodes.values()), "edges": known_edges}
+    return {
+        "t": t,
+        "nodes": list(known_nodes.values()),
+        "edges": known_edges,
+        "cliques": cliques,
+    }
 
 
 def get_knowledge_growth_df(model: "NetworkModel", run_number: int) -> pd.DataFrame:

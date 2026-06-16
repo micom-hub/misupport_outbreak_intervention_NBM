@@ -1,6 +1,6 @@
 # scripts/lhd/state.py
 from __future__ import annotations
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 from collections import defaultdict
 
 import numpy as np
@@ -147,6 +147,37 @@ class LHDState:
 
         # Use contact-tracing to assemble edges
         self.new_edges_today = int(self._process_trace_edges(batch, t=t))
+
+    def get_transmission_cliques(self) -> List[Dict[str, Any]]:
+        """
+        Returns perceived transmission cliques based on contact tracing edges.
+        A clique starts from an index case (no parent in trace edges) and follows descendants.
+        """
+        reported_ids = set(self.known_case_list)
+        perceived_adj = defaultdict(list)
+        has_parent = set()
+
+        for u, v, c, t, src in self.known_edges:
+            if u in reported_ids and v in reported_ids:
+                # u (trace source) is perceived as potentially infecting v
+                perceived_adj[u].append(v)
+                has_parent.add(v)
+
+        index_case_ids = [nid for nid in reported_ids if nid not in has_parent]
+        cliques = []
+        for root in index_case_ids:
+            clique_members = []
+            stack = [root]
+            visited = {root}
+            while stack:
+                curr = stack.pop()
+                clique_members.append(curr)
+                for child in perceived_adj.get(curr, []):
+                    if child not in visited:
+                        visited.add(child)
+                        stack.append(child)
+            cliques.append({"index_case": root, "members": sorted(clique_members)})
+        return cliques
 
     def _process_trace_edges(self, batch: Dict[str, np.ndarray], *, t: int) -> None:
         edges_added = 0
