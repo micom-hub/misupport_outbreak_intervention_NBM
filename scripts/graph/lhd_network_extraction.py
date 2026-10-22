@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, TYPE_CHECKING
+from collections import defaultdict
+from typing import Dict, List, Any, TYPE_CHECKING, Set
 
 if TYPE_CHECKING:
     from scripts.simulation.outbreak_model import NetworkModel
@@ -55,19 +56,32 @@ def get_known_network_snapshot(
         rep_nodes = batch.get("reported_cases", np.empty(0))
         rep_stages = batch.get("reported_stage", np.empty(0))
         rep_is_vax = batch.get("is_vax", np.empty(0))
+        rep_sources = batch.get("reported_sources", np.empty(0, dtype=object))
 
         for i in range(len(rep_nodes)):
             nid = int(rep_nodes[i])
+            source = rep_sources[i] if len(rep_sources) > i else ""
             if nid not in known_nodes:
                 known_nodes[nid] = {
                     "node_id": nid,
                     "report_time": batch_t,
                     "is_reported": True,
+                    "is_passively_reported": source in {"passive", "imported_passive"},
+                    "is_tested_positive": (source == "tested_positive"),
+                    "is_traced_contact": False,
                     "stage_at_report": int(rep_stages[i]) if len(rep_stages) > i else 0,
                     "is_vax": bool(rep_is_vax[i]) if len(rep_is_vax) > i else False,
                 }
             else:
                 known_nodes[nid]["is_reported"] = True
+                known_nodes[nid]["is_passively_reported"] = (
+    source in {"passive", "imported_passive"}
+)
+                known_nodes[nid]["is_tested_positive"] = source == "tested_positive"
+                known_nodes[nid]["is_traced_contact"] = False
+
+        # Keep track of all reported nodes to distinguish from traced-only nodes
+        all_reported_nodes = set(known_nodes.keys())
 
         # Process trace edges
         src = batch.get("trace_src", np.empty(0, np.int32))
@@ -77,11 +91,15 @@ def get_known_network_snapshot(
         for i in range(len(src)):
             u, v, c = int(src[i]), int(tgt[i]), int(ct[i])
             for nid in (u, v):
-                if nid not in known_nodes:
+                # If this node is not already a reported case, mark it as a traced contact
+                if nid not in all_reported_nodes and nid not in known_nodes:
                     known_nodes[nid] = {
                         "node_id": nid,
                         "report_time": -1,
                         "is_reported": False,
+                        "is_passively_reported": False,
+                        "is_tested_positive": False,
+                        "is_traced_contact": True,
                         "stage_at_report": 0,
                         "is_vax": False,
                     }
@@ -100,22 +118,45 @@ def get_known_network_snapshot(
                     }
                 )
 
-    # 2. Supplement with intervention info from LHD daily logs
-    if run_number < len(model.all_lhd_daily_logs):
-        log_df = model.all_lhd_daily_logs[run_number]
-        if log_df is not None and not log_df.empty:
-            history_logs = log_df[log_df["t"] <= t]
-            ever_isolated = set()
-            ever_traced = set()
-            for _, row in history_logs.iterrows():
-                ever_isolated.update(row.get("nodes_isolated_today", []))
-                ever_traced.update(row.get("nodes_contact_traced_today", []))
+   # 3. Identify undirected investigation components.
+    known_adj = defaultdict(set)
+    component_nodes = set()
 
-            for nid, meta in known_nodes.items():
-                meta["is_isolated"] = nid in ever_isolated
-                meta["is_traced"] = nid in ever_traced
+    for edge in known_edges:
+        u = int(edge["u"])
+        v = int(edge["v"])
+        component_nodes.add(u)
+        component_nodes.add(v)
+        known_adj[u].add(v)
+        known_adj[v].add(u)
 
-    # 3. (Optional) Add hidden cases that exist in truth but aren't in LHD knowledge
+    components = []
+    visited = set()
+
+    for root in sorted(component_nodes):
+        if root in visited:
+            continue
+
+        stack = [root]
+        visited.add(root)
+        members = []
+
+        while stack:
+            current = stack.pop()
+            members.append(current)
+            for neighbor in known_adj.get(current, set()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+
+        components.append(
+            {
+                "index_case": min(members),
+                "members": sorted(members),
+            }
+        )
+
+    # 4. (Optional) Add hidden cases that exist in truth but aren't in LHD knowledge
     if include_truth:
         for nid, stage in true_state_map.items():
             if nid not in known_nodes:
@@ -123,15 +164,22 @@ def get_known_network_snapshot(
                     "node_id": nid,
                     "report_time": -1,
                     "is_reported": False,
-                    "is_isolated": False,
-                    "is_traced": False,
+                    "is_passively_reported": False,
+                    "is_tested_positive": False,
+                    "is_traced_contact": False,
                 }
 
     # Attach true stage to all nodes found
     for nid, meta in known_nodes.items():
         meta["true_stage"] = true_state_map.get(nid, 0)
 
-    return {"t": t, "nodes": list(known_nodes.values()), "edges": known_edges}
+    return {
+        "t": t,
+        "nodes": list(known_nodes.values()),
+        "edges": known_edges,
+        "components": components,
+        "cliques":components # alias it for compatibility
+    }
 
 
 def get_knowledge_growth_df(model: "NetworkModel", run_number: int) -> pd.DataFrame:
@@ -169,9 +217,16 @@ def build_lhd_igraph(model: "NetworkModel", run_number: int, t: int):
     g = ig.Graph(directed=False)
     g.add_vertices(len(node_ids))
     g.vs["name"] = [str(nid) for nid in node_ids]
-    g.vs["is_reported"] = [n["is_reported"] for n in sorted_nodes]
-    g.vs["is_isolated"] = [n.get("is_isolated", False) for n in sorted_nodes]
-    g.vs["is_traced"] = [n.get("is_traced", False) for n in sorted_nodes]
+    g.vs["is_reported"] = [bool(n.get("is_reported", False)) for n in sorted_nodes]
+    g.vs["is_passively_reported"] = [
+        n.get("is_passively_reported", False) for n in sorted_nodes
+    ]
+    g.vs["is_tested_positive"] = [
+        n.get("is_tested_positive", False) for n in sorted_nodes
+    ]
+    g.vs["is_traced_contact"] = [
+        n.get("is_traced_contact", False) for n in sorted_nodes
+    ]
 
     edges = [(id_map[e["u"]], id_map[e["v"]]) for e in snap["edges"]]
     g.add_edges(edges)

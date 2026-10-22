@@ -59,7 +59,7 @@ ALPHA="${ALPHA:-0.05}"
 
 # Hard-coded conda env
 CONDA_ENV="LHDsim"
-PYTHON_BIN="python3"
+PYTHON_BIN="python"
 
 # flags
 DO_PRCC_LONG=0
@@ -74,7 +74,7 @@ SIGONLY=0
 TOPK="15"
 
 abspath() {
-  python3 -c "import os,sys; print(os.path.abspath(sys.argv[1]))" "$1"
+  python -c "import os,sys; print(os.path.abspath(sys.argv[1]))" "$1"
 }
 
 run_python() {
@@ -154,11 +154,16 @@ fi
 # Step 0: run variantdriver
 # -------------------------
 
-echo "[pipeline] Step 0: running variantdriver.py"
-run_python -m scripts.variantdriver
+# Normalize and check against variantdriver default
+RUN_DIR_ABS="$(abspath "$RUN_DIR")"
+DEFAULT_DIR="model_runs/TESTMODELRUN"
+if [[ "$RUN_DIR_ABS" != "$(abspath "$DEFAULT_DIR")" ]]; then
+  echo "[pipeline] Overwriting variantdriver.py output_dir ($DEFAULT_DIR) with $RUN_DIR"
+fi
+RUN_DIR="$RUN_DIR_ABS"
 
-# Use the run_dir passed by user
-RUN_DIR="$(abspath "$RUN_DIR")"
+echo "[pipeline] Step 0: running variantdriver.py"
+run_python -m scripts.variantdriver --output-dir "$RUN_DIR"
 
 # Wait briefly for filesystem writes if needed (helps on networked FS)
 for i in {1..10}; do

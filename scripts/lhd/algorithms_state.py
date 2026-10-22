@@ -21,6 +21,12 @@ class IsolateNewCases(AlgorithmBase):
 
     def propose(self, state) -> List[ActionProposal]:
         nodes = np.asarray(getattr(state, "new_cases_today", np.empty(0, np.int32)), dtype=np.int32)
+        # filter out those already isolated
+        nodes = np.asarray(
+    [int(node) for node in nodes if not state.is_isolated(int(node))],
+    dtype=np.int32,
+)
+
         if nodes.size == 0:
             return []
         return [
@@ -46,9 +52,23 @@ class TraceNewCases(AlgorithmBase):
         self.params = params or {}
 
     def propose(self, state) -> List[ActionProposal]:
-        nodes = np.asarray(getattr(state, "new_cases_today", np.empty(0, np.int32)), dtype=np.int32)
+
+        nodes = np.asarray(
+            getattr(state, "new_cases_today", np.empty(0, np.int32)),
+            dtype=np.int32,
+        )
+        nodes = np.asarray(
+            [
+                int(node)
+                for node in nodes
+                if not state.is_trace_pending(int(node))
+                and not state.has_been_traced(int(node))
+            ],
+            dtype=np.int32,
+        )
         if nodes.size == 0:
             return []
+
         return [
             ActionProposal(
                 action="trace",
@@ -92,7 +112,13 @@ class TestContactsOfKnownCases(AlgorithmBase):
             for nbr_info in state.neighbors(case_id):
                 nbr_id = nbr_info[0]
                 # Only test if they aren't already a known case or currently being tested
-                if not state.known_case[nbr_id] and nbr_id not in state.pending_tests:
+                # check that it's not already isolated
+                if state.is_isolated(int(nbr_id)):
+                  continue
+                if (
+    not state.known_case[nbr_id]
+    and not state.is_test_pending(nbr_id)
+):
                     proposals.append(
                         ActionProposal(
                             action="test",
@@ -132,10 +158,13 @@ class TraceEdgeEndpoints(AlgorithmBase):
         for u, v, _, t_disc, _ in state.known_edges:
             if t_disc == state.last_t:
                 # Only propose tracing endpoints that aren't already known cases
-                if not state.known_case[u]:
-                    newly_found_nodes.add(u)
-                if not state.known_case[v]:
-                    newly_found_nodes.add(v)
+              for node in (u, v):
+                  node = int(node)
+                  if state.is_trace_pending(node):
+                      continue
+                  if state.has_been_traced(node):
+                      continue
+                  newly_found_nodes.add(node)
 
         if not newly_found_nodes:
             return []
@@ -199,4 +228,57 @@ class IsolateNeighborsOfHighDegreeCases(AlgorithmBase):
                         reason=f"contact of high-degree case {cid} (deg={degree})",
                     )
                 )
+        return proposals
+
+
+class IsolateTransmissionCliques(AlgorithmBase):
+    """
+    Identify transmission cliques that contain newly reported cases and
+    propose isolation for all members of those cliques.
+    """
+
+    name = "isolate_transmission_cliques"
+
+    def __init__(
+        self,
+        *,
+        cost_per_node: int = 1,
+        priority: float = 1.0,
+        params: Optional[Dict[str, Any]] = None,
+    ):
+        self.cost_per_node = int(cost_per_node)
+        self.priority = float(priority)
+        self.params = params or {}
+
+    def propose(self, state) -> List[ActionProposal]:
+        new_cases = getattr(state, "new_cases_today", np.empty(0, np.int32))
+        if new_cases.size == 0:
+            return []
+
+        new_cases_set = set(new_cases)
+        # state.get_investigation_components returns List[Dict[str, Any]]
+        # Each dict has 'index_case' and 'members' (list of IDs)
+        cliques = state.get_investigation_components()
+
+        proposals = []
+        for clique in cliques:
+            members = clique["members"]
+            # Trigger isolation for the whole clique if any member is a new case today
+            if any(m in new_cases_set for m in members):
+                for node in members:
+                    proposals.append(
+                        ActionProposal(
+                            action="isolate",
+                            target_kind="node",
+                            target=int(node),
+                            priority=self.priority,
+                            cost_units=self.cost_per_node,
+                            params=self.params,
+                            source_algo=self.name,
+                            reason=(
+                       "member of known investigation component triggered by "
+                        f"new case; component anchor: {clique['index_case']}"
+                            )
+                        )
+                    )
         return proposals

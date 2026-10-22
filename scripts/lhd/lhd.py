@@ -54,22 +54,29 @@ class LocalHealthDepartment:
         # baseline surveillance parameters
         self.p_detect_inf = self.model.config.lhd.p_detect_inf
         self.report_delay_days = self.model.config.lhd.report_delay_days
+        self.p_detect_imported_daily = (
+            self.model.config.lhd.p_detect_imported_daily
+        )
+        self.imported_detection_start_day = (
+            self.model.config.lhd.imported_detection_start_day
+        )
 
         # Default parameter values (control + info)
         self.min_factor = 1e-6
         self.default_iso_reduction = float(self.model.config.lhd.lhd_default_int_reduction)
         self.default_iso_duration = int(self.model.config.lhd.lhd_default_int_duration)
+        # Isolation deliberately leaves household and group-quarter contacts unchanged.
         self.default_iso_contact_types = ["cas", "sch", "wp"]
 
         self.default_trace_params = {
-            "delay_days": 0,  # do day-of tracing
+            "delay_days": 1, # Traces occur the day after report
             "recall_prob": float(self.model.config.lhd.trace_recall_prob),
             "max_per_case": 25,  # limit on total recalled
             "contact_types": ["hh", "sch", "wp"],
         }
 
         self.default_test_params = {
-            "delay_days": 0, #day-of testing
+            "delay_days": 1, # tests occur day after report
             "sens_pre": 0.5, #pick up half of pre-infectious
             "sens_inf": 0.99, #pick up 99% of post-infectious
             "spec": 1.0, #no false-positives (yet)
@@ -85,6 +92,8 @@ class LocalHealthDepartment:
             is_vax=self.model.is_vaccinated,
             p_detect_inf=self.p_detect_inf,
             report_delay_days=self.report_delay_days,
+            p_detect_imported_daily=self.p_detect_imported_daily,
+            imported_detection_start_day=self.imported_detection_start_day,
         )
 
         # Instantiate LHDState
@@ -128,6 +137,15 @@ class LocalHealthDepartment:
                     "contact_types": self.default_iso_contact_types,
                 },
             },
+            "isolate_transmission_cliques": {
+                "cost_per_node": 1,
+                "priority": 1.0,
+                "params": {
+                    "reduction": self.default_iso_reduction,
+                    "duration": self.default_iso_duration,
+                    "contact_types": self.default_iso_contact_types,
+                },
+            },
         }
         self.algorithms, self.planner, self.policy_name = build_policy(
             self.policy_name, default_algo_params=default_algo_params
@@ -147,12 +165,28 @@ class LocalHealthDepartment:
     # -------------------------------------------
     def process_expirations(self, t: int) -> int:
         """
-        Revert control tokens due at day t. Returns count expired.
+        Revert control tokens due at day t.
+
+        `state.isolated_until` uses exclusive expiration semantics:
+        isolated_until[node] > t means the node is actively isolated on day t.
         """
-        due = self._expiry_tokens_by_day.pop(int(t), [])
+        t = int(t)
+        due = self._expiry_tokens_by_day.pop(t, [])
+
+        touched_nodes = []
         for tok in due:
             tok.revert(self.model)
-        return int(len(due))
+            if getattr(tok, "action", None) == "isolate":
+                touched_nodes.append(
+                    np.asarray(tok.nodes, dtype=np.int32)
+                )
+
+        if touched_nodes:
+            touched = np.unique(np.concatenate(touched_nodes))
+            expired_mask = self.state.isolated_until[touched] <= t
+            self.state.isolated_until[touched[expired_mask]] = -1
+
+        return len(due)
 
     # ------------
     # Surveillance
@@ -190,6 +224,13 @@ class LocalHealthDepartment:
         # reduction is fraction removed (reduction .2 means .8 left)
         reduction = min(max(reduction, 0.0), 1.0)
         factor = max(self.min_factor, 1.0 - reduction)
+        # when does the iso expire
+        expires_at = int(t + duration) if duration > 0 else int(t + 1)
+        # Track the latest active isolation expiration for each node.
+        self.state.isolated_until[nodes] = np.maximum(
+            self.state.isolated_until[nodes],
+            expires_at,
+)
 
         # apply in/out multipliers
         for ct in cts:
@@ -201,7 +242,7 @@ class LocalHealthDepartment:
         tokens_added = 0
         if duration > 0:
             tok = MultiplierToken(
-                expires_at=int(t + duration),
+                expires_at=expires_at,
                 nodes=nodes.copy(),
                 contact_types=tuple(cts),
                 in_factor=factor,
@@ -237,8 +278,37 @@ class LocalHealthDepartment:
         passed_params = params if isinstance(params, dict) else {}
         merged = {**self.default_trace_params, **passed_params}
 
-        self.surveillance.order_trace(t=int(t), cases=cases, params=merged)
+        # factor in reporting delay
+        delay = max(1, int(merged.get("delay_days", 1)))
+        merged["delay_days"] = delay
+        due_day = int(t + delay)
 
+        # determine eligible nodes
+        eligible = np.asarray(
+            [
+                int(node)
+                for node in np.unique(cases)
+                if not self.state.is_trace_pending(int(node)) # already ordered
+                and not self.state.has_been_traced(int(node)) # already traced
+            ],
+            dtype=np.int32,
+        )
+
+        if eligible.size == 0:
+            return 0, 0
+
+        # order the trace and mark it as pending
+        for node in eligible:
+            self.state.mark_trace_pending(int(node), due_day)
+
+        self.surveillance.order_trace(
+            t=int(t),
+            cases=eligible,
+            params=merged,
+        )
+
+        cases = eligible
+        # add to the action log
         for node in cases:
             self._action_log.append(
                 {"t": t, "node": int(node), "action": "trace", "params": merged}
@@ -254,8 +324,35 @@ class LocalHealthDepartment:
             return 0, 0
         merged = dict(self.default_test_params)
         merged.update(params or {})
-        self.surveillance.order_test(t=int(t), nodes=nodes, params=merged)
 
+        # factor in delay
+        delay = max(1, int(merged.get("delay_days", 1)))
+        merged["delay_days"] = delay
+        due_day = int(t + delay)
+        # determine testing eligiblity
+        eligible = np.asarray(
+            [
+                int(node)
+                for node in np.unique(nodes)
+                if not self.state.is_test_pending(int(node))
+                and not self.state.known_case[int(node)]
+            ],
+            dtype=np.int32,
+        )
+
+        if eligible.size == 0:
+            return 0, 0
+
+        for node in eligible:
+            self.state.mark_test_pending(int(node), due_day)
+        # order the test
+        self.surveillance.order_test(
+            t=int(t),
+            nodes=eligible,
+            params=merged,
+        )
+        # append to the action log
+        nodes = eligible
         for node in nodes:
             self._action_log.append(
                 {"t": t, "node": int(node), "action": "test", "params": merged}
