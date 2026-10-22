@@ -1,27 +1,28 @@
 # scripts/variantdriver.py
 from __future__ import annotations
-from pathlib import Path
-from typing import List, Optional, Dict, Any, Union
-import json
-import os
-import traceback
-import concurrent.futures
-import multiprocessing as mp
-import shutil
-import argparse
 
+import argparse
+import concurrent.futures
+import json
+import multiprocessing as mp
+import os
+import shutil
+import traceback
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 
+from scripts.config import ModelConfig
+from scripts.lhd.policy_config import POLICY_CONFIGURATION, PolicyConfig
+from scripts.PostRunProcessing.results_formatting import export_prcc_inputs_for_matlab
+
 # imports from your codebase
 from scripts.variants.run_variants_funcs import prepare_run, run_parameter_set
-from scripts.lhd.policy_config import PolicyConfig, POLICY_CONFIGURATION
-from scripts.config import ModelConfig
-from scripts.PostRunProcessing.results_formatting import export_prcc_inputs_for_matlab
 from scripts.visualization.viz import (
     plot_metric_boxplot,
-    plot_trajectories_by_variant,
     plot_paired_difference_trajectory,
+    plot_trajectories_by_variant,
 )
 
 
@@ -55,12 +56,52 @@ def run_experiment(
     3) Aggregate results across each run into a
         #if clean_dir, deletes variant subdirectories
     """
+
+    # Internal helper to return failed runs
+    def _failure_status(i: int, exc: Exception) -> Dict[str, Any]:
+      return {
+          "index": int(i),
+          "run_dir": str(out_base / f"model_{int(i):04d}"),
+          "success": False,
+          "error": str(exc),
+          "trace": traceback.format_exc(),
+      }
     out_base = Path(output_dir).expanduser().resolve()
 
     if out_base.is_dir() and overwrite_runs:
         shutil.rmtree(str(out_base))
 
     out_base.mkdir(parents=True, exist_ok=True)
+
+    # Write an experiment manifest file
+    experiment_manifest = {
+        "csv_path": str(Path(csv_path).expanduser().resolve()),
+        "n_samples": int(n_samples),
+        "seed": int(seed) if seed is not None else None,
+        "workers": workers,
+        "save_summary": bool(save_summary),
+        "save_incidence": bool(save_incidence),
+        "save_prevalence": bool(save_prevalence),
+        "save_lhd_results": bool(save_lhd_results),
+        "summary_metrics": summary_metrics,
+        "policies": [
+            {
+                "variant_name": variant.name,
+                "policy_name": variant.policy_name,
+                "lhd_overrides": dict(variant.lhd_overrides),
+                "description": variant.description,
+            }
+            for variant in policy_config.variants
+        ],
+        "base_config": (
+            base_cfg.to_dict()
+            if base_cfg is not None
+            else ModelConfig().to_dict()
+        ),
+    }
+
+    with open(out_base / "experiment_manifest.json", "w") as fh:
+        json.dump(experiment_manifest, fh, indent=2, default=str)
 
     # 1) Prepare run
     print("[run_experiment] Initializing run data... ")
@@ -114,17 +155,11 @@ def run_experiment(
             for fut in concurrent.futures.as_completed(futures):
                 i = futures[fut]
                 try:
-                    res = fut.result()
-                except Exception as exc:
-                    res = {
-                        "index": int(i),
-                        "run_dir": str(out_base / f"model_{int(i):04d}"),
-                        "success": False,
-                        "error": str(exc),
-                        "trace": traceback.format_exc(),
-                    }
-                    statuses.append(res)
+                  res = fut.result()
 
+                except Exception as exc:
+                  res = _failure_status(i, exc)
+                statuses.append(res)
         # anticipating problem pickling LHD objects
         except Exception as exc:
             print(
@@ -150,11 +185,12 @@ def run_experiment(
                 )
                 statuses.append(res)
 
-    # Run in sequence
+    # Sequential run branch
     else:
         print("[run_experiment] Running sequentially...")
         statuses = []
         for i in indices:
+          try:
             res = run_parameter_set(
                 contacts_df,
                 policy_config,
@@ -171,7 +207,10 @@ def run_experiment(
                 summary_metrics=summary_metrics,
                 overwrite=overwrite_runs,
             )
-            statuses.append(res)
+          except Exception as exc:
+            res = _failure_status(i, exc)
+          
+          statuses.append(res)
 
     # Write a run status manifest
     sorted_statuses = sorted(statuses, key=lambda x: int(x.get("index", -1)))
@@ -216,6 +255,7 @@ def run_experiment(
         big = pd.concat(parts, ignore_index=True, sort=False)
 
         return big
+
 
     if save_summary:
         df_all = _collect_and_concat("summary.parquet")

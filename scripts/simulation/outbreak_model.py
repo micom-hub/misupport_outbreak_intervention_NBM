@@ -1,20 +1,23 @@
 # scripts/simulation/outbreak_model.py
 from __future__ import annotations
+
 import os
+import warnings
+from typing import List, Optional
+
+import igraph as ig
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import igraph as ig
-from typing import Optional, List
-import matplotlib.pyplot as plt
+from line_profiler import profile
 from numba import njit
 from numba.typed import List as NumbaList
-import warnings
-from line_profiler import profile
 
-from scripts.utils.rng_utility import derive_seed_from_base
 from scripts.config import ModelConfig
+from scripts.graph.graph_utils import GraphData
 from scripts.lhd.lhd import LocalHealthDepartment
-from scripts.graph.graph_utils import GraphData 
+from scripts.utils.rng_utility import derive_seed_from_base
+
 
 # Define numba loop outside of model, called by determine_new_exposures
 @njit
@@ -164,6 +167,8 @@ class NetworkModel:
         self.all_lhd_results = [None] * self.n_replicates
 
         self.all_vax_status = [None] * self.n_replicates
+        # Imported infectious nodes are sampled independently for each replicate.
+        self.all_imported_ids = [None] * self.n_replicates        
 
         # Results that are saved go to run_dir
         self.results_folder = run_dir 
@@ -229,24 +234,42 @@ class NetworkModel:
         self.new_exposures = []
         self.new_infections = []
 
-        # pick random I0 if none provided
-        initial_infectious = self.config.sim.I0
-        self.I0 = initial_infectious
-        if isinstance(initial_infectious, int):
-            initial_infectious = self.rng.choice(self.N, size = initial_infectious, replace = False).tolist()
-            self.I0 = initial_infectious
-        self.state[initial_infectious] = 2
-        self.infectious_periods[initial_infectious] = self.assign_infectious_period(initial_infectious)
+        # Imported cases are represented by an integer count and sampled separately
+        # for each stochastic replicate.
+        n_imported = int(self.config.sim.I0)
+        if n_imported > self.N:
+            raise ValueError(
+                f"sim.I0 ({n_imported}) cannot exceed population size N ({self.N})"
+            )
 
-        S = list(set(range(self.N)) - set(initial_infectious))
+        if n_imported > 0:
+            imported_ids = np.sort(
+                self.rng.choice(self.N, size=n_imported, replace=False).astype(np.int32)
+            )
+        else:
+            imported_ids = np.empty(0, dtype=np.int32)
+
+        # Keep a replicate-local copy. `I0` remains as a compatibility alias.
+        self.imported_ids = imported_ids
+        self.I0 = imported_ids.tolist()
+        self.all_imported_ids[self.replicate_ind] = imported_ids.copy()
+
+        self.state[imported_ids] = 2
+        if imported_ids.size:
+            self.infectious_periods[imported_ids] = self.assign_infectious_period(
+                imported_ids
+            )
+
+        imported_set = set(imported_ids.tolist())
+        S = [n for n in range(self.N) if n not in imported_set]
         E = []
-        I = initial_infectious  # noqa: E741
-        R =  []
+        I = imported_ids.tolist()
+        R = []
 
         self.states_over_time.append([S,E,I,R])
         self.new_exposures.append(np.empty(0, dtype = np.int32))
-        self.new_infections.append(initial_infectious)
-
+        # Imported cases are not incident local infections.
+        self.new_infections.append(np.empty(0, dtype=np.int32))
         # Reset run flags
         self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
@@ -447,32 +470,6 @@ class NetworkModel:
         recovered = np.where(self.state == 3)[0]
         self.time_in_state[recovered] += 1
 
-        # R -> S with waning immunity
-        cid = self.config.epi.conferred_immunity_duration
-        if cid is not None:
-            try:
-                cid_val = float(cid)
-            except Exception:
-                cid_val = None
-
-            if cid_val is not None and cid_val >= 0:
-                # Revert those with greater time_in_state to sus
-                waned_mask = (self.state == 3) & (self.time_in_state >= cid_val)
-                if waned_mask.any():
-                    waned_nodes = np.where(waned_mask)[0]
-                    # move to sus and reset everything
-                    self.state[waned_nodes] = 0
-                    self.time_in_state[waned_nodes] = 0
-                    self.incubation_periods[waned_nodes] = np.nan
-                    self.infectious_periods[waned_nodes] = np.nan
-                    # check if there is lasting immunity, and reduce in multiplier
-                    lasting = self.config.epi.lasting_partial_immunity
-                    if lasting:
-                        lasting = np.clip(lasting, 0, 1)
-                        reduced_sus = (1-lasting)
-                        for ct in self.contact_types:
-                            self.in_multiplier[ct][waned_nodes] *= reduced_sus
-
         # Save timestep data
         S = list(np.where(self.state == 0)[0])
         E = list(np.where(self.state == 1)[0])
@@ -483,10 +480,11 @@ class NetworkModel:
         self.new_infections.append(to_infectious)
 
         epi_state = {
-            "new_pre_ids": newly_exposed.copy(), #Newly exposed/pre-infectious
-            "new_inf_ids": to_infectious.astype(np.int32, copy=False), #New I
-            "pre_ids": np.array(E, dtype = np.int32), #all E
-            "inf_ids": np.array(I, dtype = np.int32) #all I
+            "new_pre_ids": newly_exposed.copy(),
+            "new_inf_ids": to_infectious.astype(np.int32, copy=False),
+            "pre_ids": np.array(E, dtype=np.int32),
+            "inf_ids": np.array(I, dtype=np.int32),
+            "imported_inf_ids": self.imported_ids.copy(),
         }
 
         return trans_src, newly_exposed, trans_ct, epi_state
@@ -547,8 +545,7 @@ class NetworkModel:
         Args: metrics, a list of metrics to output, must match expected metrics allowed for. Currently supports:
         - peakPrev (maximum fraction I/N)
         - peakTime (time of peakPrev)
-        - outbreakSize (unique number of nodes infected, including I0)
-
+        - outbreakSize (unique locally acquired infections, excluding imported I0 cases)
         Returns: pandas dataframe of summary outputs
         """
         if metrics is None:
@@ -594,6 +591,14 @@ class NetworkModel:
 
             states_list = self.all_states_over_time[run] or []
 
+            imported_ids = np.asarray(
+            self.all_imported_ids[run]
+            if self.all_imported_ids[run] is not None
+            else np.empty(0, np.int32),
+            dtype=np.int32,
+        )
+            imported_set = set(imported_ids.tolist())
+
             # Build prevalence time series
             prevalences = []
             for timestep in states_list:
@@ -603,7 +608,7 @@ class NetworkModel:
                     try:
                         # Gather infectious nodes
                         I_nodes = timestep[2]
-                        nI = int(len(I_nodes))
+                        nI = int(sum(1 for node in I_nodes if int(node) not in imported_set))
                     except Exception:
                         nI = 0
                 prevalences.append(float(nI) / float(self.N))
@@ -625,18 +630,23 @@ class NetworkModel:
                 if "peakTime" in metrics:
                     row["peakTime"] = peakTime_val
 
-            # Outbreak size -- unique infected nodes (I0 plus all ever exposed)
+            # Outbreak size is the number of unique locally acquired infections.
+            # Imported cases are fixed introductions and are not counted as outcomes.
             if "outbreakSize" in metrics:
                 exposures_list = self.all_new_exposures[run]
-
                 aggregate = _aggregate_exposures(exposures_list)
 
-                # Combine I0 with all exposures for outbreak size
-                init_I0 = np.array(self.I0, dtype = int)
+                if aggregate.size:
+                    local_infections = np.setdiff1d(
+                        np.unique(aggregate),
+                        imported_ids,
+                        assume_unique=False,
+                    )
+                    outbreak_size = int(local_infections.size)
+                else:
+                    outbreak_size = 0
 
-                unique_infectious = np.unique(np.concatenate([init_I0, aggregate]))
-                outbreakSize = int(len(unique_infectious))
-                row["outbreakSize"] = outbreakSize
+                row["outbreakSize"] = outbreak_size
 
             # Add row to rows
             rows.append(row)
@@ -672,6 +682,8 @@ class NetworkModel:
 
         n_runs = int(self.n_replicates)
 
+
+
         # Fixed horizon across all runs: include day 0 through day Tmax
         Tmax = int(self.Tmax)
         T = Tmax + 1
@@ -684,16 +696,36 @@ class NetworkModel:
             for run in range(n_runs):
                 states_list = self.all_states_over_time[run] or []
                 max_t = min(T, len(states_list))
+
+                imported_ids = np.asarray(
+                self.all_imported_ids[run]
+                if self.all_imported_ids[run] is not None
+                else np.empty(0, np.int32),
+                dtype=np.int32)
+                imported_set = set(imported_ids.tolist())
+
                 for t in range(max_t):
-                    timestep = states_list[t]
-                    try:
-                        nI = int(len(timestep[2]))
-                    except Exception:
-                        try:
-                            nI = int(np.asarray(timestep[2]).size)
-                        except Exception:
-                            nI = 0
-                    data[run, t] = float(nI) / float(self.N)
+                  timestep = states_list[t]
+                  try:
+                    nI = int(
+                      sum(
+                          1
+                          for node in timestep[2]
+                          if int(node) not in imported_set
+                      )
+                  )
+                  except Exception:
+                      try:
+                        nI = int(
+                            sum(
+                                1
+                                for node in np.asarray(timestep[2]).tolist()
+                                if int(node) not in imported_set
+                            )
+                        )
+                      except Exception:
+                          nI = 0
+                  data[run, t] = float(nI) / float(self.N)
 
             # trailing entries remain 0.0 automatically
 
@@ -710,13 +742,6 @@ class NetworkModel:
                             count = int(len(arr))
                     except Exception:
                         count = 0
-
-                    # By your existing convention: treat t_0 incidence as I0 if exposures count is 0
-                    if t == 0 and count == 0:
-                        I0 = getattr(self, "I0", None)
-                        count = int(len(I0)) if I0 is not None else 0
-
-                    data[run, t] = float(count) / float(self.N)
 
             # trailing entries remain 0.0 automatically
 

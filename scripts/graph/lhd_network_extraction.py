@@ -66,7 +66,7 @@ def get_known_network_snapshot(
                     "node_id": nid,
                     "report_time": batch_t,
                     "is_reported": True,
-                    "is_passively_reported": (source == "passive"),
+                    "is_passively_reported": source in {"passive", "imported_passive"},
                     "is_tested_positive": (source == "tested_positive"),
                     "is_traced_contact": False,
                     "stage_at_report": int(rep_stages[i]) if len(rep_stages) > i else 0,
@@ -74,7 +74,9 @@ def get_known_network_snapshot(
                 }
             else:
                 known_nodes[nid]["is_reported"] = True
-                known_nodes[nid]["is_passively_reported"] = source == "passive"
+                known_nodes[nid]["is_passively_reported"] = (
+    source in {"passive", "imported_passive"}
+)
                 known_nodes[nid]["is_tested_positive"] = source == "tested_positive"
                 known_nodes[nid]["is_traced_contact"] = False
 
@@ -108,45 +110,51 @@ def get_known_network_snapshot(
                 edge_seen.add(key)
                 known_edges.append(
                     {
-                        "u": u,
-                        "v": v,
+                        "u": a,
+                        "v": b,
                         "ct_id": c,
                         "discovery_time": batch_t,
                         "source": "trace",
                     }
                 )
 
-    # 3. Identify Perceived Transmission Cliques
-    # A clique (transmission chain) is a tree/branch starting from an index case.
-    # We define a potential transmission edge as a trace edge (u -> v) where both are reported cases.
-    reported_ids: Set[int] = {
-        nid for nid, meta in known_nodes.items() if meta["is_reported"]
-    }
-    perceived_adj = defaultdict(list)
-    has_parent = set()
+   # 3. Identify undirected investigation components.
+    known_adj = defaultdict(set)
+    component_nodes = set()
 
     for edge in known_edges:
-        u, v = edge["u"], edge["v"]
-        if u in reported_ids and v in reported_ids:
-            # Trace source u is perceived as potentially infecting v
-            perceived_adj[u].append(v)
-            has_parent.add(v)
+        u = int(edge["u"])
+        v = int(edge["v"])
+        component_nodes.add(u)
+        component_nodes.add(v)
+        known_adj[u].add(v)
+        known_adj[v].add(u)
 
-    index_case_ids = [nid for nid in reported_ids if nid not in has_parent]
-    cliques = []
-    for root in index_case_ids:
-        # Traverse to find all descendants in the perceived transmission network
-        clique_members = []
+    components = []
+    visited = set()
+
+    for root in sorted(component_nodes):
+        if root in visited:
+            continue
+
         stack = [root]
-        visited = {root}
+        visited.add(root)
+        members = []
+
         while stack:
-            curr = stack.pop()
-            clique_members.append(curr)
-            for child in perceived_adj.get(curr, []):
-                if child not in visited:
-                    visited.add(child)
-                    stack.append(child)
-        cliques.append({"index_case": root, "members": sorted(clique_members)})
+            current = stack.pop()
+            members.append(current)
+            for neighbor in known_adj.get(current, set()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+
+        components.append(
+            {
+                "index_case": min(members),
+                "members": sorted(members),
+            }
+        )
 
     # 4. (Optional) Add hidden cases that exist in truth but aren't in LHD knowledge
     if include_truth:
@@ -169,7 +177,8 @@ def get_known_network_snapshot(
         "t": t,
         "nodes": list(known_nodes.values()),
         "edges": known_edges,
-        "cliques": cliques,
+        "components": components,
+        "cliques":components # alias it for compatibility
     }
 
 
@@ -205,7 +214,7 @@ def build_lhd_igraph(model: "NetworkModel", run_number: int, t: int):
     node_ids = [n["node_id"] for n in sorted_nodes]
     id_map = {nid: i for i, nid in enumerate(node_ids)}
 
-    g = ig.Graph(directed=True)
+    g = ig.Graph(directed=False)
     g.add_vertices(len(node_ids))
     g.vs["name"] = [str(nid) for nid in node_ids]
     g.vs["is_reported"] = [bool(n.get("is_reported", False)) for n in sorted_nodes]

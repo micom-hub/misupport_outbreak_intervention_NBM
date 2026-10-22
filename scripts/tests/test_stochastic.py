@@ -53,7 +53,6 @@ class DummyModelConfig:
         self.lhd.trace_recall_prob = 0.25
         self.lhd.lhd_discovery_prob = 0.0
         self.lhd.lhd_workday_hrs = 8.0
-        self.lhd.mean_compliance = 1.0
         self.lhd.lhd_default_int_reduction = 0.0
         self.lhd.lhd_default_int_duration = 0
         self.lhd.lhd_default_call_duration = 0.1

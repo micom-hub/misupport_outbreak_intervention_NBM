@@ -1,22 +1,20 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict, replace
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, Dict, Any
 from datetime import datetime
 import json
 
 
 @dataclass(frozen=True)
 class EpiParams:
-    base_transmission_prob: float = 0.5
+    base_transmission_prob: float = 0.25
     incubation_period: float = 10.5
     infectious_period: float = 5.0
     gamma_alpha: float = 20.0
     incubation_period_vax: float = 10.5
     infectious_period_vax: float = 5.0
     relative_infectiousness_vax: float = 0.05
-    conferred_immunity_duration: Optional[float] = None
-    lasting_partial_immunity: Optional[float] = None
-    vax_efficacy: float = 0.3
+    vax_efficacy: float = 0.7
     vax_uptake: float = 0.85
     susceptibility_multiplier_under_five: float = 1.0
     susceptibility_multiplier_elderly: float = 1.0
@@ -38,29 +36,36 @@ class PopulationParams:
 @dataclass(frozen=True)
 class LHDParams:
     policy_name: str = "observe_only"
-    lhd_daily_capacity: int = 100
+    lhd_daily_capacity: int = 1000
     mean_compliance: float = 1.0
-    lhd_default_call_cost: float = 1
     lhd_default_int_reduction: float = 0.9 #frac removed
     lhd_default_int_duration: int = 10
-    p_detect_inf: float = 0.25
+    # Probability that an infection is detected at E->I 
+    p_detect_inf: float = 0.4
+    # Daily ascertainment probability for an imported case that remains
+    # infectious and has not already been detected.
+    p_detect_imported_daily: float = 0.15
+
+    # First simulation day on which imported cases may be ascertained.
+    # Because transmission occurs before the LHD step, a value of 1 does not
+    # permit pre-transmission day-zero isolation.
+    imported_detection_start_day: int = 1
     report_delay_days: int = 1
-    trace_recall_prob: float = 0.25
+    trace_recall_prob: float = 0.4
 
 
 @dataclass(frozen=True)
 class SimulationParams:
-    n_replicates: int = 20  # Stochastic Replicates
+    n_replicates: int = 10  # Stochastic Replicates
     run_name: str = field(
         default_factory=lambda: "RUN_" + datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
     )
     overwrite_master: bool = True
     simulation_duration: int = 100
-    I0: Union[List[int], int] = 2  # list for indices or int for randoms
+    I0: int = 2  # Number of imported infectious cases
     seed: int = 2026
     county: str = "Keweenaw"
     state: str = "Michigan"
-    resample_network_per_run: bool = False
     master_casual_candidates: int = 100
     save_master: bool = True
     record_exposure_events: bool = True
@@ -147,8 +152,10 @@ class ModelConfig:
             raise ValueError("sim.n_replicates must be >= 1")
         if self.lhd.lhd_daily_capacity < 0:
             raise ValueError("lhd.lhd_daily_capacity must be >= 0")
-        if not isinstance(self.sim.I0, (list, int)):
-            raise ValueError("sim.I0 must be an integer or list")
+        if not isinstance(self.sim.I0, int) or isinstance(self.sim.I0, bool):
+            raise ValueError("sim.I0 must be an integer count of imported cases")
+        if self.sim.I0 < 0:
+            raise ValueError("sim.I0 must be >= 0")
         if not (self.sim.master_casual_candidates >= self.population.cas_contacts):
             raise ValueError(
                 "sim.master_casual_candidates must exceed population.cas_contacts for sampling purposes"

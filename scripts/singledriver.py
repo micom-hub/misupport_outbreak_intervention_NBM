@@ -11,24 +11,23 @@ The script:
 
 import os
 from pathlib import Path
-from typing import Optional, Union, Dict, Any
+from typing import Any, Dict, Optional, Union
+
 import pandas as pd
 from line_profiler import profile
 
-
 from scripts.config import ModelConfig
 from scripts.graph.graph_utils import (
-    build_minimal_graphdata_from_edge_list,
     build_graph_data,
+    build_minimal_graphdata_from_edge_list,
     sample_from_master_graphdata,
 )
-
 from scripts.simulation.outbreak_model import NetworkModel
-from scripts.utils.synth_data_processing import synthetic_data_process, build_edge_list
 from scripts.utils.fred_fetch import downloadPopData
+from scripts.utils.synth_data_processing import build_edge_list, synthetic_data_process
 from scripts.visualization.network_visualization import (
-    visualize_lhd_evolution,
     lhd_evolution_movie,
+    visualize_lhd_evolution,
 )
 
 # Prepare and structure contact data

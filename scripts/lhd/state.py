@@ -1,7 +1,8 @@
 # scripts/lhd/state.py
 from __future__ import annotations
-from typing import Dict, List, Tuple, Any
+
 from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -56,7 +57,7 @@ class LHDState:
         # undirected edge key for (i, j, ct)
         self._edge_seen = set()
 
-        # edge log, (i, j, ct_id, discovered_time, information_source)
+        # Undirected edge log, stored as (min(i,j),max(i,j),ct_id,time,info source)
         self.known_edges: List[tuple[int, int, int, int, str]] = []
 
         # adjacency i -> list of (j, ct_id, discovered_time, information_source)
@@ -68,9 +69,12 @@ class LHDState:
         self.isolated_until = np.full(self.N, -1, dtype=np.int32)
         self.quarantined_until = np.full(self.N, -1, dtype=np.int32)
 
-        # Pending requests
-        self.pending_tests = defaultdict(list)
-        self.pending_traces = defaultdict(list)
+        # node -> due day
+        self.pending_tests: Dict[int, int] = {}
+        self.pending_traces: Dict[int, int] = {}
+
+        # Nodes we've already traced are tracked
+        self.traced_nodes = set()
 
     # Surveillance Batches -> Updating LHD Knowledge
     def process_batch(self, batch: Dict[str, np.ndarray]) -> None:
@@ -87,6 +91,23 @@ class LHDState:
         self.last_t = t
         self.new_cases_today = np.empty(0, dtype=np.int32)
         self.new_edges_today = 0
+
+        # Clear the requests that surveillance module says happened today
+        tests_completed = np.asarray(
+            batch.get("tests_completed", np.empty(0, np.int32)),
+            dtype=np.int32,
+        )
+        for node in tests_completed:
+            self.pending_tests.pop(int(node), None)
+        # sanme with traces
+        traces_completed = np.asarray(
+            batch.get("traces_completed", np.empty(0, np.int32)),
+            dtype=np.int32,
+        )
+        for node in traces_completed:
+            node = int(node)
+            self.pending_traces.pop(node, None)
+            self.traced_nodes.add(node)
 
         cases = np.asarray(
             batch.get("reported_cases", np.empty(0, np.int32)), dtype=np.int32
@@ -147,38 +168,64 @@ class LHDState:
 
         # Use contact-tracing to assemble edges
         self.new_edges_today = int(self._process_trace_edges(batch, t=t))
+    def get_investigation_components(self) -> List[Dict[str, Any]]:
+      """
+      Return connected components of the undirected LHD-known contact graph.
+
+      These are investigation components, not inferred transmission chains:
+      tracing establishes contact but does not establish transmission direction.
+      """
+      if not self.known_edges:
+          return []
+
+      adj = defaultdict(set)
+      nodes = set()
+
+      for u, v, _ct, _t, _src in self.known_edges:
+          u = int(u)
+          v = int(v)
+          nodes.add(u)
+          nodes.add(v)
+          adj[u].add(v)
+          adj[v].add(u)
+
+      components = []
+      visited = set()
+
+      for root in sorted(nodes):
+          if root in visited:
+              continue
+
+          stack = [root]
+          visited.add(root)
+          members = []
+
+          while stack:
+              current = stack.pop()
+              members.append(current)
+              for neighbor in adj.get(current, set()):
+                  if neighbor not in visited:
+                      visited.add(neighbor)
+                      stack.append(neighbor)
+
+          components.append(
+              {
+                  "index_case": min(members),
+                  "members": sorted(members),
+              }
+          )
+
+      return components
 
     def get_transmission_cliques(self) -> List[Dict[str, Any]]:
         """
-        Returns perceived transmission cliques based on contact tracing edges.
-        A clique starts from an index case (no parent in trace edges) and follows descendants.
+        Actually just runs get_investigation_components
+
+        The returned structures are undirected investigation components, not
+        transmission cliques and not inferred transmission trees.
         """
-        reported_ids = set(self.known_case_list)
-        perceived_adj = defaultdict(list)
-        has_parent = set()
-
-        for u, v, c, t, src in self.known_edges:
-            if u in reported_ids and v in reported_ids:
-                # u (trace source) is perceived as potentially infecting v
-                perceived_adj[u].append(v)
-                has_parent.add(v)
-
-        index_case_ids = [nid for nid in reported_ids if nid not in has_parent]
-        cliques = []
-        for root in index_case_ids:
-            clique_members = []
-            stack = [root]
-            visited = {root}
-            while stack:
-                curr = stack.pop()
-                clique_members.append(curr)
-                for child in perceived_adj.get(curr, []):
-                    if child not in visited:
-                        visited.add(child)
-                        stack.append(child)
-            cliques.append({"index_case": root, "members": sorted(clique_members)})
-        return cliques
-
+        return self.get_investigation_components()
+  
     def _process_trace_edges(self, batch: Dict[str, np.ndarray], *, t: int) -> None:
         edges_added = 0
 
@@ -204,7 +251,7 @@ class LHDState:
             self._edge_seen.add(key)
             edges_added += 1
 
-            self.known_edges.append((u, v, c, int(t), "trace"))
+            self.known_edges.append((a, b, c, int(t), "trace"))
             # adjacency in both directions
             self.known_adj[a].append((b, c, int(t), "trace"))
             self.known_adj[b].append((a, c, int(t), "trace"))
@@ -215,6 +262,27 @@ class LHDState:
     def neighbors(self, node: int) -> List[Tuple[int, int, int, str]]:
         """Return known neighbors of a node in the known graph."""
         return self.known_adj.get(int(node), [])
+
+    # Helpers to track nodes statuses
+    def mark_test_pending(self, node: int, due_day: int) -> None:
+        self.pending_tests[int(node)] = int(due_day)
+
+    def mark_trace_pending(self, node: int, due_day: int) -> None:
+        self.pending_traces[int(node)] = int(due_day)
+
+    def is_test_pending(self, node: int) -> bool:
+        return int(node) in self.pending_tests
+
+    def is_trace_pending(self, node: int) -> bool:
+        return int(node) in self.pending_traces
+
+    def is_isolated(self, node: int, t: Optional[int] = None) -> bool:
+        if t is None:
+            t = self.last_t
+        return int(self.isolated_until[int(node)]) > int(t)
+
+    def has_been_traced(self, node: int) -> bool:
+        return int(node) in self.traced_nodes
 
     # Helper function to reset LHDState between runs
     def reset_for_run(self) -> None:
@@ -240,3 +308,7 @@ class LHDState:
 
         self.pending_tests.clear()
         self.pending_traces.clear()
+        self.traced_nodes.clear()
+
+
+

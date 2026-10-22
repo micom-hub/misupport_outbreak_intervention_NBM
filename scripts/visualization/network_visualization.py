@@ -118,11 +118,6 @@ def plot_lhd_network_snapshot(
             "linewidth": 0.6,
             "curved": True,
             "tension": 5.0,  # maps to igraph's "edge_curved"
-            "arrow": {
-                "marker": ">",  # typical arrow head
-                "width": 6.0,
-                # height can be omitted to default to 1.3*width, or provide a number
-            },
         },
     }
 
@@ -180,7 +175,7 @@ def plot_overlay_snapshot(
     node_ids = [n["node_id"] for n in sorted_nodes]
     id_map = {nid: i for i, nid in enumerate(node_ids)}
 
-    g = ig.Graph(directed=True)
+    g = ig.Graph(directed=False)
     g.add_vertices(len(node_ids))
     g.vs["name"] = [str(nid) for nid in node_ids]
 
@@ -210,7 +205,7 @@ def plot_overlay_snapshot(
             markers.append("o")  # Circle
 
         # 3. Border based on active isolation
-        if lhd.state.isolated_until[nid] >= t:
+        if lhd.state.isolated_until[nid] > t:
             edgecolors.append("#000000")
             linewidths.append(2.5)
         else:
@@ -255,7 +250,6 @@ def plot_overlay_snapshot(
             "color": edge_colors,
             "linewidth": 1.0,
             "linestyle": edge_styles,
-            "arrow": {"marker": ">", "width": 6},
         },
     }
 
@@ -264,7 +258,7 @@ def plot_overlay_snapshot(
 
     ipx.plot(g, ax=ax, layout=layout_coords, style=style)
     ax.set_title(
-        f"LHD/Truth Overlay - Day {t}\nDiamonds=Tested+, Thick Border=Isolated, Red Solid=Perceived Transmission"
+        f"LHD/Truth Overlay - Day {t}\nDiamonds=Tested+, Thick Border=Isolated"
     )
     ax.axis("off")
 
@@ -286,7 +280,7 @@ def plot_comparison_snapshot(
     node_ids = [n["node_id"] for n in sorted_nodes]
     id_map = {nid: i for i, nid in enumerate(node_ids)}
 
-    g = ig.Graph(directed=True)
+    g = ig.Graph(directed=False)
     g.add_vertices(len(node_ids))
     g.vs["name"] = [str(nid) for nid in node_ids]
     g.vs["is_reported"] = [bool(n.get("is_reported", False)) for n in sorted_nodes]
@@ -377,7 +371,6 @@ def plot_comparison_snapshot(
             "color": edge_colors_lhd,
             "linewidth": 0.8,
             "curved": False,
-            "arrow": {"marker": ">", "width": 6},
         },
     }
 

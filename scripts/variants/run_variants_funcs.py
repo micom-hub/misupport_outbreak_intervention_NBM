@@ -1,22 +1,26 @@
 # scripts/variants/run_variants_funcs.py
 from __future__ import annotations
-from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Union
 
-from line_profiler import profile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+import json
+import re
 
 import pandas as pd
-from scripts.utils.rng_utility import derive_seed_from_base
-from scripts.variants.csv_to_lhs import csv_to_cfg
-from scripts.graph.graph_utils import (GraphData,
-    build_minimal_graphdata_from_edge_list,
+from line_profiler import profile
+
+from scripts.config import ModelConfig
+from scripts.graph.graph_utils import (
+    GraphData,
     build_graph_data,
+    build_minimal_graphdata_from_edge_list,
     sample_from_master_graphdata,
 )
-from scripts.singledriver import prepare_contacts, read_or_build_master
-from scripts.config import ModelConfig
 from scripts.lhd.policy_config import PolicyConfig, validate_variant
 from scripts.simulation.outbreak_model import NetworkModel
+from scripts.singledriver import prepare_contacts, read_or_build_master
+from scripts.utils.rng_utility import derive_seed_from_base
+from scripts.variants.csv_to_lhs import csv_to_cfg
 
 
 def prepare_run(
@@ -142,11 +146,36 @@ def run_variants(
     prevalence_dfs = []
     lhd_daily_dfs = []
 
+    # safely configure variant config directory
+    variant_config_dir = run_dir / "variant_configs"
+    variant_config_dir.mkdir(parents=True, exist_ok=True)
+
+    variant_manifest = {
+        "model_index": run_index,
+        "base_seed": int(seed),
+        "variants": [],
+    }
+
     # Loop across each variant, instantiate and simulate model, run, write result
     for variant in policy_config.variants:
         validate_variant(variant)
 
         cfg_var = _cfg_with_policy_variant(cfg, variant)
+
+        # record variant metadata and save to variant directory
+        safe_name = _safe_filename(variant.name)
+        resolved_config_path = variant_config_dir / f"{safe_name}.json"
+        cfg_var.to_json(str(resolved_config_path))
+        variant_record = {
+            "variant_name": variant.name,
+            "policy_name": variant.policy_name,
+            "description": variant.description,
+            "lhd_overrides": dict(variant.lhd_overrides),
+            "resolved_config_path": str(
+                resolved_config_path.relative_to(run_dir)
+            ),
+            "resolved_config": cfg_var.to_dict(),
+}
 
         model = NetworkModel(
             config = cfg_var,
@@ -158,7 +187,14 @@ def run_variants(
         try:
             model.simulate()
         except Exception as exc:
-            print(f"[run_variants] simulation failed for variant '{variant.name}':{exc}")
+            # error if a sim fails
+            raise RuntimeError(
+                f"Simulation failed for variant '{variant.name}' "
+                f"in model_{run_index:04d}"
+            ) from exc
+
+        variant_record["seed_metadata"] = dict(model._seed_metadata)
+        variant_manifest["variants"].append(variant_record)
 
         if save_summary:
             df_summary = model.results_to_df(metrics)
@@ -218,6 +254,9 @@ def run_variants(
 
     if save_lhd_results and lhd_daily_dfs:
         pd.concat(lhd_daily_dfs, ignore_index=True, sort=False).to_parquet(str(run_dir / "lhd_results.parquet"))
+    # write variant provenance 
+    with open(run_dir / "variant_manifest.json", "w") as fh:
+      json.dump(variant_manifest, fh, indent=2, default=str)
 
     return models
 
@@ -271,7 +310,7 @@ def run_parameter_set(
         base_seed, f"run_{i}"
     )  # Use a derived seed for each run
 
-    run_graphdata_seed = derive_seed_from_base(run_seed)
+    run_graphdata_seed = derive_seed_from_base(run_seed, "graphdata")
 
     # 2) Sample master graphdata and build run graphdata
     sampled_edges_df = sample_from_master_graphdata(
@@ -287,6 +326,12 @@ def run_parameter_set(
         seed = run_graphdata_seed,
         N = int(contacts_df.shape[0])
     )
+
+    run_dir = out_base / f"model_{int(i):04d}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    sampled_edges_path = run_dir / "SampledEdgelist.parquet"
+    sampled_edges_df.to_parquet(sampled_edges_path, index=False)
 
     # 3) Initialize and simulate model
     models = run_variants(
@@ -313,6 +358,19 @@ def run_parameter_set(
         "success":True,
         "models_run": len(models)
     }
+    
+    run_metadata = {
+        "model_index": int(i),
+        "base_seed": int(base_seed),
+        "run_seed": int(run_seed),
+        "graphdata_seed": int(run_graphdata_seed),
+        "sampled_edge_list": "SampledEdgelist.parquet",
+        "config": cfg.to_dict(),
+        "n_variants": len(policy_config.variants),
+    }
+
+    with open(run_dir / "run_metadata.json", "w") as fh:
+        json.dump(run_metadata, fh, indent=2, default=str)
 
 
 # Helper to generate variants
@@ -325,3 +383,8 @@ def _cfg_with_policy_variant(cfg: ModelConfig, variant) -> ModelConfig:
     if getattr(variant, "lhd_overrides", None):
         patch["lhd"].update(dict(variant.lhd_overrides))
     return cfg.copy_with(patch)
+
+# safe filename 
+def _safe_filename(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_")
+    return value or "variant"
