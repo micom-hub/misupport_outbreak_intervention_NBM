@@ -276,12 +276,12 @@ if __name__ == "__main__":
     # Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
     result = run_experiment(
         csv_path="testLHS.csv",
-        n_samples=50,
+        n_samples=5,
         policy_config=POLICY_CONFIGURATION,
         output_dir=args.output_dir,
         base_cfg=None,
         seed=5,
-        workers=5,
+        workers=1,
         save_summary=True,
         save_incidence=True,
         save_prevalence=True,
