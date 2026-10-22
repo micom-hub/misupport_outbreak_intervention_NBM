@@ -667,28 +667,54 @@ class NetworkModel:
 
         return df[cols]
 
-    def timeseries_to_df(self, type: str = "prevalence") -> pd.DataFrame:
+    def timeseries_to_df(
+        self,
+        type: str = "prevalence",
+    ) -> pd.DataFrame:
         """
-        Returns a wide pandas dataframe with a time series for each stochastic run. Fills with 0s if run ends early
+        Return one wide time-series row for each stochastic replicate.
+
+        Runs that end before Tmax are padded with zeros through the fixed output
+        horizon of day 0 through day Tmax.
 
         Args:
-            type: "incidence" or "prevalence"
-                - prevalence = fraction infectious (I/N)
-                - incidence  = fraction newly exposed per day (new E / N), with t_0 including I0 by convention
+            type:
+                "prevalence":
+                    Fraction of the population currently infectious, excluding
+                    imported cases.
+
+                "incidence":
+                    Fraction of the population newly exposed on each day.
+                    Imported cases are not counted as incident local infections,
+                    so incidence at t_0 is zero.
+
+        Returns:
+            DataFrame with one row per stochastic replicate and columns:
+            run_number, t_0, t_1, ..., t_Tmax.
         """
         series_type = str(type).strip().lower()
+
         if series_type not in ("incidence", "prevalence"):
-            raise ValueError(f"type must be 'incidence' or 'prevalence' (got {type})")
+            raise ValueError(
+                "type must be 'incidence' or 'prevalence' "
+                f"(got {type})"
+            )
 
         n_runs = int(self.n_replicates)
 
-
-
-        # Fixed horizon across all runs: include day 0 through day Tmax
+        # Fixed horizon across all runs, including day zero.
         Tmax = int(self.Tmax)
         T = Tmax + 1
+
         if T <= 0:
-            return pd.DataFrame({"run_number": np.arange(n_runs, dtype=np.int64)})
+            return pd.DataFrame(
+                {
+                    "run_number": np.arange(
+                        n_runs,
+                        dtype=np.int64,
+                    )
+                }
+            )
 
         data = np.zeros((n_runs, T), dtype=np.float32)
 
@@ -698,56 +724,64 @@ class NetworkModel:
                 max_t = min(T, len(states_list))
 
                 imported_ids = np.asarray(
-                self.all_imported_ids[run]
-                if self.all_imported_ids[run] is not None
-                else np.empty(0, np.int32),
-                dtype=np.int32)
+                    (
+                        self.all_imported_ids[run]
+                        if self.all_imported_ids[run] is not None
+                        else np.empty(0, dtype=np.int32)
+                    ),
+                    dtype=np.int32,
+                )
                 imported_set = set(imported_ids.tolist())
 
                 for t in range(max_t):
-                  timestep = states_list[t]
-                  try:
-                    nI = int(
-                      sum(
-                          1
-                          for node in timestep[2]
-                          if int(node) not in imported_set
-                      )
-                  )
-                  except Exception:
-                      try:
-                        nI = int(
-                            sum(
-                                1
-                                for node in np.asarray(timestep[2]).tolist()
-                                if int(node) not in imported_set
-                            )
-                        )
-                      except Exception:
-                          nI = 0
-                  data[run, t] = float(nI) / float(self.N)
+                    timestep = states_list[t]
 
-            # trailing entries remain 0.0 automatically
+                    try:
+                        infectious_nodes = timestep[2]
+                    except (IndexError, TypeError):
+                        infectious_nodes = []
+
+                    try:
+                        n_infectious_local = sum(
+                            1
+                            for node in infectious_nodes
+                            if int(node) not in imported_set
+                        )
+                    except (TypeError, ValueError):
+                        n_infectious_local = 0
+
+                    data[run, t] = (
+                        float(n_infectious_local) / float(self.N)
+                    )
 
         else:  # incidence
             for run in range(n_runs):
                 exposures_list = self.all_new_exposures[run] or []
                 max_t = min(T, len(exposures_list))
+
                 for t in range(max_t):
-                    arr = exposures_list[t]
-                    try:
-                        if hasattr(arr, "size"):
-                            count = int(arr.size)
-                        else:
-                            count = int(len(arr))
-                    except Exception:
+                    exposures = exposures_list[t]
+
+                    if exposures is None:
                         count = 0
+                    else:
+                        try:
+                            count = int(np.asarray(exposures).size)
+                        except (TypeError, ValueError):
+                            count = 0
 
-            # trailing entries remain 0.0 automatically
+                    # Imported I0 cases are not locally acquired infections.
+                    # Consequently, t_0 remains zero.
+                    data[run, t] = float(count) / float(self.N)
 
-        col_names = [f"t_{i}" for i in range(T)]
-        df = pd.DataFrame(data, columns=col_names)
-        df.insert(0, "run_number", np.arange(n_runs, dtype=np.int64))
+        column_names = [f"t_{t}" for t in range(T)]
+        df = pd.DataFrame(data, columns=column_names)
+
+        df.insert(
+            0,
+            "run_number",
+            np.arange(n_runs, dtype=np.int64),
+        )
 
         return df
 

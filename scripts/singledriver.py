@@ -305,4 +305,4 @@ if __name__ == "__main__":
 
     # Visualize the LHD's network discovery and intervention evolution
     # visualize_lhd_evolution(model, run_number=0, plots = 100)
-    lhd_evolution_movie(model, run_number=4, frames=50)
+    # lhd_evolution_movie(model, run_number=4, frames=50)
