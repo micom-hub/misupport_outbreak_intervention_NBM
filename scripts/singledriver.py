@@ -29,6 +29,10 @@ from scripts.visualization.network_visualization import (
     lhd_evolution_movie,
     visualize_lhd_evolution,
 )
+from scripts.analysis.phase1_audit import(
+  audit_phase1_model,
+  print_phase1_audit,
+)
 
 # Prepare and structure contact data
 
@@ -268,8 +272,38 @@ def run_single_model(
     # Run simulation
     model.simulate()
 
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    model.results_to_df().to_csv(os.path.join(run_dir, "summary.csv"), index=False)
+    model.results_to_df().to_parquet(
+        run_dir / "summary.parquet",
+        index=False,
+    )
+
+    model.daily_epi_to_df().to_parquet(
+        run_dir / "daily_epi.parquet",
+        index=False,
+    )
+
+    model.event_log_to_df().to_parquet(
+        run_dir / "events.parquet",
+        index=False,
+    )
+
+    model.detection_summary_to_df().to_parquet(
+        run_dir / "detection_summary.parquet",
+        index=False,
+    )
+
+    model.timeseries_to_df("incidence").to_parquet(
+        run_dir / "incidence.parquet",
+        index=False,
+    )
+
+    model.timeseries_to_df("prevalence").to_parquet(
+        run_dir / "prevalence.parquet",
+        index=False,
+    )
+
 
     return model
 
@@ -287,22 +321,42 @@ def _validate_contacts_df(df: pd.DataFrame) -> None:
 
 if __name__ == "__main__":
     cfg = ModelConfig().copy_with(
-        {"sim": {"county": "Alcona", "display_plots": True, "I0": 3}}
+        {
+            "sim": {
+                "county": "Keweenaw",
+                "display_plots": False,
+                "I0": 2,
+                "n_replicates": 3,
+                "simulation_duration": 60,
+                "save_data_files": True,
+            },
+            "epi": {
+                "base_transmission_prob": 0.12,
+                "latent_period": 5.0,
+                "infectious_period": 6.0,
+                "symptomatic_fraction": 0.70,
+                "symptom_onset_delay_mean": 1.5,
+                "symptom_onset_shape": 4.0,
+                "vax_uptake": 0.0,
+            },
+            "lhd": {
+                "policy_name": "observe_only",
+                "p_detect_symptomatic_daily": 0.40,
+                "p_detect_asymptomatic_daily": 0.03,
+                "p_detect_imported_daily": 0.10,
+                "passive_report_delay_days": 1,
+            },
+        }
     )
-    contacts = prepare_contacts(cfg.sim.county, cfg.sim.state, save_files=True)
+
+    contacts = prepare_contacts(
+        cfg.sim.county,
+        cfg.sim.state,
+        save_files=True,
+    )
+
     model = run_single_model(
         contacts,
         cfg,
         seed=13,
-        policy_name="trace_and_test",
-        lhd_overrides={
-            "lhd_daily_capacity": 1000,
-            "lhd_default_int_reduction": 0.99,
-            "lhd_default_int_duration": 14,
-            "p_detect_inf": 0.80,
-        },
-    )
-
-    # Visualize the LHD's network discovery and intervention evolution
-    # visualize_lhd_evolution(model, run_number=0, plots = 100)
-    # lhd_evolution_movie(model, run_number=4, frames=50)
+        policy_name="observe_only")

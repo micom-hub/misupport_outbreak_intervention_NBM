@@ -16,6 +16,7 @@ from numba.typed import List as NumbaList
 from scripts.config import ModelConfig
 from scripts.graph.graph_utils import GraphData
 from scripts.lhd.lhd import LocalHealthDepartment
+from scripts.recorder.event_log import EventLedger
 from scripts.utils.rng_utility import derive_seed_from_base
 
 
@@ -165,8 +166,18 @@ class NetworkModel:
         self.all_stochastic_dieout = np.zeros(self.n_replicates, dtype = bool)
         self.all_end_days = np.ones(self.n_replicates, dtype = int)*self.Tmax
         self.all_lhd_results = [None] * self.n_replicates
-
         self.all_vax_status = [None] * self.n_replicates
+        # Unified event and daily epidemiological records.
+        self.event_ledger = EventLedger()
+        self.all_daily_epi = [None] * self.n_replicates
+        self.all_imported_ids = [None] * self.n_replicates
+        self.all_infection_generation = [None] * self.n_replicates
+        self.all_infector = [None] * self.n_replicates
+        self.all_infection_day = [None] * self.n_replicates
+        self.all_infectious_onset_day = [None] * self.n_replicates
+        self.all_symptom_onset_day = [None] * self.n_replicates
+        self.all_recovery_day = [None] * self.n_replicates
+        self.all_will_be_symptomatic = [None] * self.n_replicates
         # Imported infectious nodes are sampled independently for each replicate.
         self.all_imported_ids = [None] * self.n_replicates        
 
@@ -197,136 +208,457 @@ class NetworkModel:
         self.in_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
         self.out_multiplier = {ct: np.ones(self.N, dtype=np.float32) for ct in self.contact_types}
 
+    def record_event(
+        self,
+        *,
+        day: int,
+        event_type: str,
+        node_id: Optional[int] = None,
+        source_node_id: Optional[int] = None,
+        infection_origin: Optional[str] = None,
+        infection_generation: Optional[int] = None,
+        disease_stage: Optional[str] = None,
+        symptomatic: Optional[bool] = None,
+        detection_source: Optional[str] = None,
+        report_source: Optional[str] = None,
+        contact_type: Optional[str] = None,
+        result: Optional[str] = None,
+        value: Optional[float] = None,
+        metadata: Optional[dict] = None,
+        action_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        policy_phase: Optional[int] = None,
+    ) -> int:
+        """
+        Append an event while automatically filling infection metadata from
+        the current replicate when a node is supplied.
+        """
+        node = None if node_id is None else int(node_id)
+
+        if node is not None:
+            if (
+                infection_generation is None
+                and hasattr(self, "infection_generation")
+                and 0 <= node < self.N
+            ):
+                generation = int(self.infection_generation[node])
+                if generation >= 0:
+                    infection_generation = generation
+
+            if (
+                infection_origin is None
+                and hasattr(self, "infection_generation")
+                and 0 <= node < self.N
+            ):
+                generation = int(self.infection_generation[node])
+                if generation == 0:
+                    infection_origin = "imported"
+                elif generation > 0:
+                    infection_origin = "local"
+
+            if (
+                symptomatic is None
+                and hasattr(self, "is_symptomatic")
+                and 0 <= node < self.N
+            ):
+                symptomatic = bool(self.is_symptomatic[node])
+
+        policy_name = None
+        if hasattr(self, "lhd") and self.lhd is not None:
+            policy_name = getattr(self.lhd, "policy_name", None)
+
+        return self.event_ledger.append(
+            run_number=int(self.replicate_ind),
+            day=int(day),
+            event_type=event_type,
+            node_id=node,
+            source_node_id=source_node_id,
+            action_id=action_id,
+            task_id=task_id,
+            policy_name=policy_name,
+            policy_phase=policy_phase,
+            infection_origin=infection_origin,
+            infection_generation=infection_generation,
+            disease_stage=disease_stage,
+            symptomatic=symptomatic,
+            detection_source=detection_source,
+            report_source=report_source,
+            contact_type=contact_type,
+            result=result,
+            value=value,
+            metadata=metadata,
+        )
+
+    def event_log_to_df(self) -> pd.DataFrame:
+        return self.event_ledger.to_dataframe()
+
+    def daily_epi_to_df(self) -> pd.DataFrame:
+        frames = [
+            df
+            for df in self.all_daily_epi
+            if isinstance(df, pd.DataFrame) and not df.empty
+        ]
+
+        if not frames:
+            return pd.DataFrame()
+
+        return pd.concat(frames, ignore_index=True, sort=False)
+
     def _initialize_replicate(self, run: int):
         """
-        Set up new SEIR arrays and seed initial infectious individuals for each stochastic replicate
+        Initialize one stochastic replicate.
+
+        Imported cases begin infectious on day zero. All other people begin
+        susceptible. Symptomatic disposition and symptom-onset delays are
+        preassigned for all nodes so they remain stable within the replicate.
         """
         self.current_time = 0
         self.replicate_ind = int(run)
 
-        # Set run seed for the replicate, update RNGs
-        self.replicate_seed = int(derive_seed_from_base(self._base_seed, self.replicate_ind))
+        self.replicate_seed = int(
+            derive_seed_from_base(
+                self._base_seed,
+                self.replicate_ind,
+            )
+        )
         self.rng = np.random.default_rng(self.replicate_seed)
-        self.lhd_seed = int(derive_seed_from_base(self.replicate_seed, "lhd"))
-        self.surv_seed = int(derive_seed_from_base(self.replicate_seed, "surveillance"))
 
-        # store seeds for reproducibility
+        self.lhd_seed = int(
+            derive_seed_from_base(
+                self.replicate_seed,
+                "lhd",
+            )
+        )
+        self.surv_seed = int(
+            derive_seed_from_base(
+                self.replicate_seed,
+                "surveillance",
+            )
+        )
+
         self._seed_metadata = {
-            "base_seed":int(self._base_seed),
+            "base_seed": int(self._base_seed),
             "replicate_ind": int(self.replicate_ind),
             "replicate_seed": int(self.replicate_seed),
             "lhd_seed": int(self.lhd_seed),
-            "surveillance_seed":int(self.surv_seed)
+            "surveillance_seed": int(self.surv_seed),
         }
-        self._numba_legacy_seed_base = int(derive_seed_from_base(self.replicate_seed, "numba"))
 
-        # Set vaccinations
-        self.is_vaccinated = self.rng.random(self.N) < self.config.epi.vax_uptake
+        self._numba_legacy_seed_base = int(
+            derive_seed_from_base(
+                self.replicate_seed,
+                "numba",
+            )
+        )
 
-        # State tracking variables; S = 0, E = 1, I = 2, R = 3
-        self.state = np.zeros(self.N, dtype = np.int8) 
-        self.time_in_state = np.zeros(self.N, dtype = np.float32)
-        self.incubation_periods = np.full(self.N, np.nan, dtype = np.float32)
-        self.infectious_periods = np.full(self.N, np.nan, dtype = np.float32)
+        # Vaccination
+        self.is_vaccinated = (
+            self.rng.random(self.N)
+            < float(self.config.epi.vax_uptake)
+        )
 
-        # Per-run trajectories
-        self.states_over_time = [] 
+        # SEIR state: S=0, E=1, I=2, R=3
+        self.state = np.zeros(self.N, dtype=np.int8)
+        self.time_in_state = np.zeros(self.N, dtype=np.float32)
+        self.latent_periods = np.full(
+            self.N,
+            np.nan,
+            dtype=np.float32,
+        )
+        self.infectious_periods = np.full(
+            self.N,
+            np.nan,
+            dtype=np.float32,
+        )
+
+        # Infection history
+        self.infection_day = np.full(
+            self.N,
+            -1,
+            dtype=np.int32,
+        )
+        self.infectious_onset_day = np.full(
+            self.N,
+            -1,
+            dtype=np.int32,
+        )
+        self.recovery_day = np.full(
+            self.N,
+            -1,
+            dtype=np.int32,
+        )
+        self.infection_generation = np.full(
+            self.N,
+            -1,
+            dtype=np.int32,
+        )
+        self.infector = np.full(
+            self.N,
+            -1,
+            dtype=np.int32,
+        )
+        self.infection_contact_type = np.full(
+            self.N,
+            -1,
+            dtype=np.int16,
+        )
+
+        # Symptom disposition is assigned independently of whether infection
+        # eventually occurs.
+        self.will_be_symptomatic = (
+            self.rng.random(self.N)
+            < float(self.config.epi.symptomatic_fraction)
+        )
+
+        symptom_mean = float(
+            self.config.epi.symptom_onset_delay_mean
+        )
+        symptom_shape = float(
+            self.config.epi.symptom_onset_shape
+        )
+
+        if symptom_mean <= 0.0:
+            self.symptom_onset_delays = np.zeros(
+                self.N,
+                dtype=np.int32,
+            )
+        else:
+            symptom_draws = self.rng.gamma(
+                shape=symptom_shape,
+                scale=symptom_mean / symptom_shape,
+                size=self.N,
+            )
+            self.symptom_onset_delays = np.ceil(
+                symptom_draws
+            ).astype(np.int32)
+
+        self.symptom_onset_day = np.full(
+            self.N,
+            -1,
+            dtype=np.int32,
+        )
+        self.is_symptomatic = np.zeros(
+            self.N,
+            dtype=np.bool_,
+        )
+
+        # Per-replicate trajectories
+        self.states_over_time = []
         self.new_exposures = []
         self.new_infections = []
+        self.daily_epi_rows = []
 
-        # Imported cases are represented by an integer count and sampled separately
-        # for each stochastic replicate.
+        # Imported cases
         n_imported = int(self.config.sim.I0)
         if n_imported > self.N:
             raise ValueError(
-                f"sim.I0 ({n_imported}) cannot exceed population size N ({self.N})"
+                f"sim.I0 ({n_imported}) cannot exceed N ({self.N})"
             )
 
         if n_imported > 0:
             imported_ids = np.sort(
-                self.rng.choice(self.N, size=n_imported, replace=False).astype(np.int32)
+                self.rng.choice(
+                    self.N,
+                    size=n_imported,
+                    replace=False,
+                ).astype(np.int32)
             )
         else:
             imported_ids = np.empty(0, dtype=np.int32)
 
-        # Keep a replicate-local copy. `I0` remains as a compatibility alias.
         self.imported_ids = imported_ids
         self.I0 = imported_ids.tolist()
-        self.all_imported_ids[self.replicate_ind] = imported_ids.copy()
+        self.all_imported_ids[self.replicate_ind] = (
+            imported_ids.copy()
+        )
 
-        self.state[imported_ids] = 2
         if imported_ids.size:
-            self.infectious_periods[imported_ids] = self.assign_infectious_period(
-                imported_ids
+            self.state[imported_ids] = 2
+            self.infection_day[imported_ids] = 0
+            self.infectious_onset_day[imported_ids] = 0
+            self.infection_generation[imported_ids] = 0
+
+            self.infectious_periods[imported_ids] = (
+                self.assign_infectious_period(imported_ids)
             )
 
-        imported_set = set(imported_ids.tolist())
-        S = [n for n in range(self.N) if n not in imported_set]
-        E = []
-        I = imported_ids.tolist()
-        R = []
+            symptomatic_imports = imported_ids[
+                self.will_be_symptomatic[imported_ids]
+            ]
 
-        self.states_over_time.append([S,E,I,R])
-        self.new_exposures.append(np.empty(0, dtype = np.int32))
-        # Imported cases are not incident local infections.
-        self.new_infections.append(np.empty(0, dtype=np.int32))
-        # Reset run flags
+            if symptomatic_imports.size:
+                self.symptom_onset_day[symptomatic_imports] = (
+                    self.symptom_onset_delays[
+                        symptomatic_imports
+                    ]
+                )
+
+                onset_day_zero = symptomatic_imports[
+                    self.symptom_onset_day[
+                        symptomatic_imports
+                    ] <= 0
+                ]
+                self.is_symptomatic[onset_day_zero] = True
+
+            for node in imported_ids:
+                node = int(node)
+
+                self.record_event(
+                    day=0,
+                    event_type="importation",
+                    node_id=node,
+                    infection_origin="imported",
+                    infection_generation=0,
+                    disease_stage="infectious",
+                )
+
+                self.record_event(
+                    day=0,
+                    event_type="infectious_onset",
+                    node_id=node,
+                    infection_origin="imported",
+                    infection_generation=0,
+                    disease_stage="infectious",
+                )
+
+            for node in np.where(self.is_symptomatic)[0]:
+                self.record_event(
+                    day=0,
+                    event_type="symptom_onset",
+                    node_id=int(node),
+                    disease_stage="infectious",
+                    symptomatic=True,
+                )
+
+        imported_set = set(imported_ids.tolist())
+
+        susceptible = [
+            node
+            for node in range(self.N)
+            if node not in imported_set
+        ]
+        exposed = []
+        infectious = imported_ids.tolist()
+        recovered = []
+
+        self.states_over_time.append(
+            [susceptible, exposed, infectious, recovered]
+        )
+        self.new_exposures.append(
+            np.empty(0, dtype=np.int32)
+        )
+        self.new_infections.append(
+            np.empty(0, dtype=np.int32)
+        )
+
         self.simulation_end_day = self.Tmax
         self.stochastic_dieout = False
 
-        # Reset LHD intervention Multipliers
-        self.in_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
-        self.out_multiplier = {ct: np.ones(self.N, dtype = np.float32) for ct in self.contact_types}
+        self.in_multiplier = {
+            ct: np.ones(self.N, dtype=np.float32)
+            for ct in self.contact_types
+        }
+        self.out_multiplier = {
+            ct: np.ones(self.N, dtype=np.float32)
+            for ct in self.contact_types
+        }
 
-        # Pre-allocate transmission event space
-        if not hasattr(self, "_trans_src_buf") or self._trans_src_buf.shape[0] != self.N:
-            self._trans_src_buf = np.empty(self.N, dtype=np.int32)
-            self._trans_tgt_buf = np.empty(self.N, dtype=np.int32)
-            self._trans_ct_buf = np.empty(self.N, dtype=np.int16)
-        if not hasattr(self, "_infected_stamp") or self._infected_stamp.shape[0] != self.N:
-            self._infected_stamp = np.full(self.N, -1, dtype=np.int32)
+        if (
+            not hasattr(self, "_trans_src_buf")
+            or self._trans_src_buf.shape[0] != self.N
+        ):
+            self._trans_src_buf = np.empty(
+                self.N,
+                dtype=np.int32,
+            )
+            self._trans_tgt_buf = np.empty(
+                self.N,
+                dtype=np.int32,
+            )
+            self._trans_ct_buf = np.empty(
+                self.N,
+                dtype=np.int16,
+            )
+
+        if (
+            not hasattr(self, "_infected_stamp")
+            or self._infected_stamp.shape[0] != self.N
+        ):
+            self._infected_stamp = np.full(
+                self.N,
+                -1,
+                dtype=np.int32,
+            )
+
         self._infected_stamp.fill(-1)
 
-        # Set-up LHD
         self.lhd = LocalHealthDepartment(
             model=self,
             seed=self.lhd_seed,
             surv_seed=self.surv_seed,
             capacity=self.config.lhd.lhd_daily_capacity,
-            policy_name=getattr(self.config.lhd, "policy_name", "observe_only"),
+            policy_name=self.config.lhd.policy_name,
         )
-
         self.lhd.reset_for_run()
 
-        return
-    _initialize_states = _initialize_replicate  # Alias for compatibility
-
-    def assign_incubation_period(self, inds):
+        self._append_daily_epi(
+            day=0,
+            batch=None,
+            new_local_exposures=0,
+            new_infectious_onsets=0,
+            new_symptom_onsets=int(
+                np.count_nonzero(self.is_symptomatic)
+            ),
+        )
+   
+    def assign_latent_period(self, inds):
         """
-        Take a list of newly-assigned exposed indices and assign an incubation period
+        Assign E -> I durations to newly exposed nodes.
         """
-        inds = np.atleast_1d(inds)
-        if hasattr(self, "is_vaccinated") and self.is_vaccinated is not None:
-            is_vax_inds = np.asarray(self.is_vaccinated)[inds]
-        else:
-            is_vax_inds = np.zeros(inds.shape, dtype=bool)
-        mean_inc = np.where(is_vax_inds, float(self.config.epi.incubation_period_vax), float(self.config.epi.incubation_period))
+        inds = np.atleast_1d(inds).astype(
+            np.int32,
+            copy=False,
+        )
 
-        # shape is gamma_alpha, scale is mean/shape
-        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inc/self.config.epi.gamma_alpha)
+        is_vax_inds = self.is_vaccinated[inds]
+
+        mean_latent = np.where(
+            is_vax_inds,
+            float(self.config.epi.latent_period_vax),
+            float(self.config.epi.latent_period),
+        )
+
+        shape = float(self.config.epi.gamma_alpha)
+
+        return self.rng.gamma(
+            shape=shape,
+            scale=mean_latent / shape,
+        )
+
 
     def assign_infectious_period(self, inds):
         """
-        Take a list of newly-assigned infectious indices and assign an infectious period
+        Assign infectious durations to newly infectious nodes.
         """
-        inds = np.atleast_1d(inds)
-        if hasattr(self, "is_vaccinated") and self.is_vaccinated is not None:
-            is_vax_inds = np.asarray(self.is_vaccinated)[inds]
-        else:
-            is_vax_inds = np.zeros(inds.shape, dtype=bool)
-        mean_inf = np.where(is_vax_inds, float(self.config.epi.infectious_period_vax), float(self.config.epi.infectious_period))
+        inds = np.atleast_1d(inds).astype(
+            np.int32,
+            copy=False,
+        )
 
-        return self.rng.gamma(shape = self.config.epi.gamma_alpha, scale = mean_inf/self.config.epi.gamma_alpha)
+        is_vax_inds = self.is_vaccinated[inds]
+
+        mean_infectious = np.where(
+            is_vax_inds,
+            float(self.config.epi.infectious_period_vax),
+            float(self.config.epi.infectious_period),
+        )
+
+        shape = float(self.config.epi.gamma_alpha)
+
+        return self.rng.gamma(
+            shape=shape,
+            scale=mean_infectious / shape,
+        )
 
     def _prepare_numba_structures(self):
         """
@@ -436,107 +768,528 @@ class NetworkModel:
     @profile
     def step(self):
         """
-        Takes data from a previous step's self.state, and updates, expanding the graph as appropriate
+        Advance the epidemic by one day.
+
+        Daily order:
+          1. Infectious nodes transmit.
+          2. New local exposures enter E.
+          3. E nodes may enter I.
+          4. I nodes may recover.
+          5. Symptom onsets are updated.
+          6. End-of-step epidemiological truth is assembled for surveillance.
+
+        LHD surveillance and intervention occur after this method, so an action
+        selected on day t first affects transmission on day t+1.
         """
+        day = int(self.current_time)
 
-        # S -> E
-        trans_src, newly_exposed, trans_ct = self.determine_transmissions()
+        # 1. Transmission
+        trans_src, newly_exposed, trans_ct = (
+            self.determine_transmissions()
+        )
 
+        newly_exposed = np.asarray(
+            newly_exposed,
+            dtype=np.int32,
+        )
+        trans_src = np.asarray(
+            trans_src,
+            dtype=np.int32,
+        )
+        trans_ct = np.asarray(
+            trans_ct,
+            dtype=np.int16,
+        )
+
+        # 2. S -> E
         if newly_exposed.size > 0:
             self.state[newly_exposed] = 1
-            self.time_in_state[newly_exposed] = -1 #start at -1 since 1 is immediately added in E-> I 
-            self.incubation_periods[newly_exposed] = self.assign_incubation_period(newly_exposed)
+            self.time_in_state[newly_exposed] = -1
+            self.latent_periods[newly_exposed] = (
+                self.assign_latent_period(newly_exposed)
+            )
+            self.infection_day[newly_exposed] = day
 
-        # E -> I
+            source_generations = self.infection_generation[
+                trans_src
+            ]
+            self.infection_generation[newly_exposed] = (
+                source_generations + 1
+            )
+            self.infector[newly_exposed] = trans_src
+            self.infection_contact_type[newly_exposed] = trans_ct
+
+            for source, target, contact_type_id in zip(
+                trans_src,
+                newly_exposed,
+                trans_ct,
+            ):
+                source = int(source)
+                target = int(target)
+                contact_type_id = int(contact_type_id)
+
+                contact_type = self.id_to_ct.get(
+                    contact_type_id,
+                    str(contact_type_id),
+                )
+
+                self.record_event(
+                    day=day,
+                    event_type="exposure",
+                    node_id=target,
+                    source_node_id=source,
+                    infection_origin="local",
+                    infection_generation=int(
+                        self.infection_generation[target]
+                    ),
+                    disease_stage="exposed",
+                    contact_type=contact_type,
+                )
+
+        # 3. E -> I
         exposed = np.where(self.state == 1)[0]
         self.time_in_state[exposed] += 1
-        to_infectious = exposed[self.time_in_state[exposed] >= self.incubation_periods[exposed]]
 
-        if len(to_infectious) > 0:
+        to_infectious = exposed[
+            self.time_in_state[exposed]
+            >= self.latent_periods[exposed]
+        ].astype(np.int32, copy=False)
+
+        if to_infectious.size > 0:
             self.state[to_infectious] = 2
-            self.time_in_state[to_infectious] = -1 #1 added in next step
-            self.infectious_periods[to_infectious] = self.assign_infectious_period(to_infectious)
+            self.time_in_state[to_infectious] = -1
+            self.infectious_onset_day[to_infectious] = day
 
-        # I -> R
+            self.infectious_periods[to_infectious] = (
+                self.assign_infectious_period(to_infectious)
+            )
+
+            symptomatic_nodes = to_infectious[
+                self.will_be_symptomatic[to_infectious]
+            ]
+
+            if symptomatic_nodes.size:
+                self.symptom_onset_day[symptomatic_nodes] = (
+                    day
+                    + self.symptom_onset_delays[
+                        symptomatic_nodes
+                    ]
+                )
+
+            for node in to_infectious:
+                self.record_event(
+                    day=day,
+                    event_type="infectious_onset",
+                    node_id=int(node),
+                    disease_stage="infectious",
+                )
+
+        # 4. I -> R
         infectious = np.where(self.state == 2)[0]
         self.time_in_state[infectious] += 1
-        to_recovered = infectious[self.time_in_state[infectious] >= self.infectious_periods[infectious]]
 
-        if len(to_recovered) > 0:
+        to_recovered = infectious[
+            self.time_in_state[infectious]
+            >= self.infectious_periods[infectious]
+        ].astype(np.int32, copy=False)
+
+        if to_recovered.size > 0:
             self.state[to_recovered] = 3
-            self.time_in_state[to_recovered] = -1
+            self.time_in_state[to_recovered] = 0
+            self.recovery_day[to_recovered] = day
 
-        # Advance Recovered
+            for node in to_recovered:
+                self.record_event(
+                    day=day,
+                    event_type="recovery",
+                    node_id=int(node),
+                    disease_stage="recovered",
+                )
+
+        # Recovered nodes remain recovered for the early-outbreak horizon.
         recovered = np.where(self.state == 3)[0]
         self.time_in_state[recovered] += 1
 
-        # Save timestep data
-        S = list(np.where(self.state == 0)[0])
-        E = list(np.where(self.state == 1)[0])
-        I = list(np.where(self.state == 2)[0])  # noqa: E741
-        R = list(np.where(self.state == 3)[0])
-        self.states_over_time.append([S,E,I,R])
+        # 5. Symptom onset
+        symptom_candidates = np.where(
+            (self.state == 2)
+            & self.will_be_symptomatic
+            & (~self.is_symptomatic)
+            & (self.symptom_onset_day >= 0)
+            & (self.symptom_onset_day <= day)
+        )[0].astype(np.int32, copy=False)
+
+        if symptom_candidates.size > 0:
+            self.is_symptomatic[symptom_candidates] = True
+
+            for node in symptom_candidates:
+                self.record_event(
+                    day=day,
+                    event_type="symptom_onset",
+                    node_id=int(node),
+                    disease_stage="infectious",
+                    symptomatic=True,
+                )
+
+        # 6. Save truth state
+        susceptible_nodes = np.where(self.state == 0)[0]
+        exposed_nodes = np.where(self.state == 1)[0]
+        infectious_nodes = np.where(self.state == 2)[0]
+        recovered_nodes = np.where(self.state == 3)[0]
+
+        self.states_over_time.append(
+            [
+                susceptible_nodes.tolist(),
+                exposed_nodes.tolist(),
+                infectious_nodes.tolist(),
+                recovered_nodes.tolist(),
+            ]
+        )
         self.new_exposures.append(newly_exposed.copy())
-        self.new_infections.append(to_infectious)
+        self.new_infections.append(to_infectious.copy())
 
         epi_state = {
             "new_pre_ids": newly_exposed.copy(),
-            "new_inf_ids": to_infectious.astype(np.int32, copy=False),
-            "pre_ids": np.array(E, dtype=np.int32),
-            "inf_ids": np.array(I, dtype=np.int32),
-            "imported_inf_ids": self.imported_ids.copy(),
+            "new_inf_ids": to_infectious.copy(),
+            "pre_ids": exposed_nodes.astype(
+                np.int32,
+                copy=False,
+            ),
+            "inf_ids": infectious_nodes.astype(
+                np.int32,
+                copy=False,
+            ),
+            "symptomatic_ids": np.where(
+                self.is_symptomatic
+                & (self.state == 2)
+            )[0].astype(np.int32, copy=False),
+            "imported_ids": self.imported_ids.copy(),
+            "infection_generation":
+                self.infection_generation.copy(),
         }
 
-        return trans_src, newly_exposed, trans_ct, epi_state
+        return (
+            trans_src,
+            newly_exposed,
+            trans_ct,
+            epi_state,
+            int(symptom_candidates.size),
+        )
 
     def simulate(self):
-
         for run in range(self.n_replicates):
             transmissions_over_time = []
-            surv_over_time = []
+            surveillance_over_time = []
+
             self._initialize_replicate(run)
-            # store vaccination status for run
-            self.all_vax_status[run] = self.is_vaccinated.copy()
 
-            t = 0
-            while t < self.Tmax:
-                t += 1 #day 0 is recorded in initialization
-                self.current_time = t
+            self.all_vax_status[run] = (
+                self.is_vaccinated.copy()
+            )
 
-                # advance SEIR
-                trans_src, trans_tgt, trans_ct, epi_state = self.step()
+            day = 0
 
-                # Update transmission tracking
-                transmissions_over_time.append({
-                    "time":np.int32(self.current_time),
-                    "src":trans_src.copy(),
-                    "tgt": trans_tgt.copy(),
-                    "ct": trans_ct.copy()
-                })
+            while day < self.Tmax:
+                day += 1
+                self.current_time = day
 
-                # Pass updated epidemiological states to surveillance
-                batch = self.lhd.step(t=self.current_time, epi_state=epi_state)
+                (
+                    trans_src,
+                    trans_tgt,
+                    trans_ct,
+                    epi_state,
+                    new_symptom_onsets,
+                ) = self.step()
 
-                surv_over_time.append(batch)
+                transmissions_over_time.append(
+                    {
+                        "time": np.int32(day),
+                        "src": trans_src.copy(),
+                        "tgt": trans_tgt.copy(),
+                        "ct": trans_ct.copy(),
+                    }
+                )
 
-                # Run LHD step once
-                # self.lhd.step(self.current_time, snapshot)
+                batch = self.lhd.step(
+                    t=day,
+                    epi_state=epi_state,
+                )
+                surveillance_over_time.append(batch)
 
-                S, E, I, R = self.states_over_time[-1]  # noqa: E741
-                if not E and not I:
-                    self.simulation_end_day = t 
+                self._append_daily_epi(
+                    day=day,
+                    batch=batch,
+                    new_local_exposures=int(
+                        trans_tgt.size
+                    ),
+                    new_infectious_onsets=int(
+                        epi_state["new_inf_ids"].size
+                    ),
+                    new_symptom_onsets=int(
+                        new_symptom_onsets
+                    ),
+                )
+
+                _, exposed, infectious, _ = (
+                    self.states_over_time[-1]
+                )
+
+                if not exposed and not infectious:
+                    self.simulation_end_day = day
                     self.stochastic_dieout = True
                     break
 
-            # save per run data
-            self.all_transmissions[run] = transmissions_over_time
-            self.all_states_over_time[run] = [states.copy() for states in self.states_over_time]
-            self.all_stochastic_dieout[run] = self.stochastic_dieout
-            self.all_end_days[run] = self.simulation_end_day
-            self.all_new_exposures[run] = [ne.copy() for ne in self.new_exposures]
-            self.all_surveillance_batches[run] = surv_over_time
-            self.all_lhd_results[run] = self.lhd.results_to_df()
-            self.all_lhd_daily_logs[run] = self.lhd.lhd_daily_log_to_df()
+            self.all_transmissions[run] = (
+                transmissions_over_time
+            )
+            self.all_states_over_time[run] = [
+                states.copy()
+                for states in self.states_over_time
+            ]
+            self.all_stochastic_dieout[run] = (
+                self.stochastic_dieout
+            )
+            self.all_end_days[run] = (
+                self.simulation_end_day
+            )
+            self.all_new_exposures[run] = [
+                exposures.copy()
+                for exposures in self.new_exposures
+            ]
+            self.all_surveillance_batches[run] = (
+                surveillance_over_time
+            )
+            self.all_lhd_results[run] = (
+                self.lhd.results_to_df()
+            )
+            self.all_lhd_daily_logs[run] = (
+                self.lhd.lhd_daily_log_to_df()
+            )
+
+            self.all_daily_epi[run] = pd.DataFrame(
+                self.daily_epi_rows
+            )
+
+            self.all_infection_generation[run] = (
+                self.infection_generation.copy()
+            )
+            self.all_infector[run] = (
+                self.infector.copy()
+            )
+            self.all_infection_day[run] = (
+                self.infection_day.copy()
+            )
+            self.all_infectious_onset_day[run] = (
+                self.infectious_onset_day.copy()
+            )
+            self.all_symptom_onset_day[run] = (
+                self.symptom_onset_day.copy()
+            )
+            self.all_recovery_day[run] = (
+                self.recovery_day.copy()
+            )
+            self.all_will_be_symptomatic[run] = (
+                self.will_be_symptomatic.copy()
+            )
+
+    def _append_daily_epi(
+        self,
+        *,
+        day: int,
+        batch: Optional[dict],
+        new_local_exposures: int,
+        new_infectious_onsets: int,
+        new_symptom_onsets: int,
+    ) -> None:
+        """
+        Append one raw daily epidemiological summary row.
+        """
+        local_mask = self.infection_generation > 0
+        imported_mask = self.infection_generation == 0
+
+        local_exposed = int(
+            np.count_nonzero(
+                (self.state == 1) & local_mask
+            )
+        )
+        local_infectious = int(
+            np.count_nonzero(
+                (self.state == 2) & local_mask
+            )
+        )
+        local_recovered = int(
+            np.count_nonzero(
+                (self.state == 3) & local_mask
+            )
+        )
+
+        imported_infectious = int(
+            np.count_nonzero(
+                (self.state == 2) & imported_mask
+            )
+        )
+
+        cumulative_local_infections = int(
+            np.count_nonzero(local_mask)
+        )
+
+        currently_symptomatic = int(
+            np.count_nonzero(
+                self.is_symptomatic
+                & (self.state == 2)
+            )
+        )
+
+        if batch is None:
+            new_detections = 0
+            new_reports = 0
+            new_tests_completed = 0
+            new_positive_tests = 0
+        else:
+            new_detections = int(
+                np.asarray(
+                    batch.get(
+                        "detected_cases",
+                        np.empty(0, np.int32),
+                    )
+                ).size
+            )
+            new_reports = int(
+                np.asarray(
+                    batch.get(
+                        "reported_cases",
+                        np.empty(0, np.int32),
+                    )
+                ).size
+            )
+            new_tests_completed = int(
+                np.asarray(
+                    batch.get(
+                        "tests_completed",
+                        np.empty(0, np.int32),
+                    )
+                ).size
+            )
+            new_positive_tests = int(
+                np.count_nonzero(
+                    np.asarray(
+                        batch.get(
+                            "test_results_positive",
+                            np.empty(0, dtype=bool),
+                        ),
+                        dtype=bool,
+                    )
+                )
+            )
+
+        row = {
+            "run_number": int(self.replicate_ind),
+            "day": int(day),
+            "susceptible": int(
+                np.count_nonzero(self.state == 0)
+            ),
+            "local_exposed": local_exposed,
+            "local_infectious": local_infectious,
+            "local_recovered": local_recovered,
+            "imported_infectious": imported_infectious,
+            "new_local_exposures": int(
+                new_local_exposures
+            ),
+            "new_local_infectious_onsets": int(
+                new_infectious_onsets
+            ),
+            "cumulative_local_infections":
+                cumulative_local_infections,
+            "new_symptom_onsets": int(
+                new_symptom_onsets
+            ),
+            "currently_symptomatic":
+                currently_symptomatic,
+            "new_detections": new_detections,
+            "new_reports_received": new_reports,
+            "new_tests_completed": new_tests_completed,
+            "new_positive_tests": new_positive_tests,
+        }
+
+        self.daily_epi_rows.append(row)
+
+    def detection_summary_to_df(self) -> pd.DataFrame:
+        """
+        Summarize detection by imported/local origin and symptomatic disposition.
+        """
+        events = self.event_log_to_df()
+
+        detection_events = events[
+            events["event_type"] == "detection"
+        ].copy()
+
+        rows = []
+
+        for run in range(self.n_replicates):
+            generations = self.all_infection_generation[run]
+            will_symptomatic = (
+                self.all_will_be_symptomatic[run]
+            )
+
+            if generations is None:
+                continue
+
+            infected = np.where(generations >= 0)[0]
+            imported = np.where(generations == 0)[0]
+            local = np.where(generations > 0)[0]
+
+            run_detections = detection_events[
+                detection_events["run_number"] == run
+            ]
+            detected_nodes = set(
+                run_detections["node_id"]
+                .dropna()
+                .astype(int)
+                .tolist()
+            )
+
+            groups = {
+                "all_infected": infected,
+                "imported": imported,
+                "local": local,
+                "symptomatic_disposition": infected[
+                    will_symptomatic[infected]
+                ],
+                "asymptomatic_disposition": infected[
+                    ~will_symptomatic[infected]
+                ],
+            }
+
+            for group_name, nodes in groups.items():
+                node_set = set(
+                    np.asarray(
+                        nodes,
+                        dtype=np.int32,
+                    ).tolist()
+                )
+                detected_count = len(
+                    node_set & detected_nodes
+                )
+                total = len(node_set)
+
+                rows.append(
+                    {
+                        "run_number": int(run),
+                        "group": group_name,
+                        "n_infected": int(total),
+                        "n_detected": int(
+                            detected_count
+                        ),
+                        "detection_fraction": (
+                            float(detected_count)
+                            / float(total)
+                            if total > 0
+                            else np.nan
+                        ),
+                    }
+                )
+
+        return pd.DataFrame(rows)
 
     def results_to_df(self, metrics: List[str] = ["peakPrev", "peakTime", "outbreakSize"]) -> pd.DataFrame:
         """

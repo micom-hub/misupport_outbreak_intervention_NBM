@@ -40,7 +40,12 @@ class LHDState:
         # list of known cases
         self.known_case_list = []
         # time a case was reported, -1 if never reported
-        self.case_report_time = np.full(self.N, -1, dtype = np.int32)
+        self.case_detection_day = np.full(
+            self.N,
+            -1,
+            dtype=np.int32,
+        )        
+        self.case_report_time = np.full(self.N, -1,dtype=np.int32)
         # knowledge of case stage - 0/unknown, 1/pre-infectious, 2/infectious
         self.case_stage = np.zeros(self.N, dtype=np.int8) 
 
@@ -121,6 +126,10 @@ class LHDState:
                 batch.get("report_time", np.full(cases.size, t, np.int32)),
                 dtype=np.int32,
             )
+            detection_day = np.asarray(
+                batch.get("detection_day", np.full(cases.size, -1, np.int32),),
+                dtype=np.int32,
+            )
             age = np.asarray(
                 batch.get("age", np.full(cases.size, -1, np.int32)), dtype=np.int32
             )
@@ -141,6 +150,13 @@ class LHDState:
                 if rtime.size
                 else np.full(cases.size, np.int32(t), np.int32)
             )
+            detection_day = (detection_day[first_ind] 
+                if detection_day.size
+                    else np.full(
+                            cases.size,
+                            -1,
+                            dtype=np.int32))
+
             age = age[first_ind] if age.size else np.full(cases.size, -1, np.int32)
             sources = (  # This line now correctly filters the 'sources' array initialized above
                 sources[first_ind]
@@ -159,6 +175,7 @@ class LHDState:
 
                 self.known_case[new_cases] = True
                 self.case_report_time[new_cases] = rtime[new_mask]
+                self.case_detection_day[new_cases] = detection_day[new_mask]
                 self.case_stage[new_cases] = stage[new_mask]
                 self.case_age[new_cases] = age[new_mask]
                 self.case_is_vax[new_cases] = is_vax[new_mask]
@@ -291,6 +308,7 @@ class LHDState:
         self.new_edges_today = 0
 
         self.known_case.fill(False)
+        self.known_case_list.clear()
         self.case_report_time.fill(-1)
         self.case_stage.fill(0)
         self.case_age.fill(-1)
@@ -298,6 +316,7 @@ class LHDState:
         self.case_is_vax.fill(False)
         self.case_report_source.fill("")
         self.known_case_list.clear()
+        self.case_detection_day.fill(-1)
 
         self._edge_seen.clear()
         self.known_edges.clear()

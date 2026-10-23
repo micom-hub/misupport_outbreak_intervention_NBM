@@ -38,9 +38,9 @@ class DummyModelConfig:
         self.epi.susceptibility_multiplier_elderly = 1.0
         self.epi.relative_infectiousness_vax = 1.0
         self.epi.gamma_alpha = 2.0
-        self.epi.incubation_period = 1.0
+        self.epi.latent_period = 1.0
         self.epi.infectious_period = 1.0
-        self.epi.incubation_period_vax = 1.0
+        self.epi.latent_period_vax = 1.0
         self.epi.infectious_period_vax = 1.0
         self.epi.vax_uptake = float(vax_uptake)
         self.epi.conferred_immunity_duration = None
@@ -49,7 +49,7 @@ class DummyModelConfig:
         self.lhd = type("L", (), {})()
         self.lhd.lhd_daily_capacity = 100
         self.lhd.p_detect_inf = 0.0
-        self.lhd.report_delay_days = 0
+        self.lhd.passive_report_delay_days = 0
         self.lhd.trace_recall_prob = 0.25
         self.lhd.lhd_discovery_prob = 0.0
         self.lhd.lhd_workday_hrs = 8.0

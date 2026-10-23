@@ -11,7 +11,6 @@ from scripts.lhd.executor import Executor
 from scripts.lhd.tokens import MultiplierToken
 from scripts.lhd.response_types import ActionProposal, ActionPlan, ExecutionSummary
 
-
 if TYPE_CHECKING:
     from scripts.simulation.outbreak_model import NetworkModel
 
@@ -51,14 +50,23 @@ class LocalHealthDepartment:
         # capacity
         self.daily_capacity = int(capacity) if capacity is not None else int(self.model.config.lhd.lhd_daily_capacity)
 
-        # baseline surveillance parameters
-        self.p_detect_inf = self.model.config.lhd.p_detect_inf
-        self.report_delay_days = self.model.config.lhd.report_delay_days
+
+        lhd_cfg = self.model.config.lhd
+
+        self.p_detect_symptomatic_daily = (
+            lhd_cfg.p_detect_symptomatic_daily
+        )
+        self.p_detect_asymptomatic_daily = (
+            lhd_cfg.p_detect_asymptomatic_daily
+        )
         self.p_detect_imported_daily = (
-            self.model.config.lhd.p_detect_imported_daily
+            lhd_cfg.p_detect_imported_daily
         )
         self.imported_detection_start_day = (
-            self.model.config.lhd.imported_detection_start_day
+            lhd_cfg.imported_detection_start_day
+        )
+        self.passive_report_delay_days = (
+            lhd_cfg.passive_report_delay_days
         )
 
         # Default parameter values (control + info)
@@ -69,18 +77,38 @@ class LocalHealthDepartment:
         self.default_iso_contact_types = ["cas", "sch", "wp"]
 
         self.default_trace_params = {
-            "delay_days": 1, # Traces occur the day after report
-            "recall_prob": float(self.model.config.lhd.trace_recall_prob),
-            "max_per_case": 25,  # limit on total recalled
-            "contact_types": ["hh", "sch", "wp"],
+            "delay_days": int(
+                lhd_cfg.trace_delay_days
+            ),
+            "recall_prob": float(
+                lhd_cfg.trace_recall_prob
+            ),
+            "max_per_case": int(
+                lhd_cfg.trace_max_per_case
+            ),
+            "contact_types": [
+                "hh",
+                "sch",
+                "wp",
+            ],
         }
 
         self.default_test_params = {
-            "delay_days": 1, # tests occur day after report
-            "sens_pre": 0.5, #pick up half of pre-infectious
-            "sens_inf": 0.99, #pick up 99% of post-infectious
-            "spec": 1.0, #no false-positives (yet)
-            "report_delay_days": self.report_delay_days,
+            "delay_days": int(
+                lhd_cfg.test_turnaround_days
+            ),
+            "sensitivity_exposed": float(
+                lhd_cfg.test_sensitivity_exposed
+            ),
+            "sensitivity_infectious": float(
+                lhd_cfg.test_sensitivity_infectious
+            ),
+            "specificity": float(
+                lhd_cfg.test_specificity
+            ),
+            "report_delay_days": int(
+                lhd_cfg.test_report_delay_days
+            ),
         }
         # Instantiate surveillance object
         self.surveillance = SurveillanceModel(
@@ -90,11 +118,24 @@ class LocalHealthDepartment:
             N=self.model.N,
             ages=self.model.ages,
             is_vax=self.model.is_vaccinated,
-            p_detect_inf=self.p_detect_inf,
-            report_delay_days=self.report_delay_days,
-            p_detect_imported_daily=self.p_detect_imported_daily,
-            imported_detection_start_day=self.imported_detection_start_day,
+            p_detect_symptomatic_daily=(
+                self.p_detect_symptomatic_daily
+            ),
+            p_detect_asymptomatic_daily=(
+                self.p_detect_asymptomatic_daily
+            ),
+            p_detect_imported_daily=(
+                self.p_detect_imported_daily
+            ),
+            imported_detection_start_day=(
+                self.imported_detection_start_day
+            ),
+            passive_report_delay_days=(
+                self.passive_report_delay_days
+            ),
         )
+        # attach it
+        self.surveillance.attach_model(self.model)
 
         # Instantiate LHDState
         self.state = LHDState(N = self.model.N)

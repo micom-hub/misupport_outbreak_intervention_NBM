@@ -45,7 +45,6 @@ def base_policy_config():
             "sim": {"n_replicates": 1, "simulation_duration": 10, "I0": [0]},
             "lhd": {
                 "lhd_daily_capacity": 100,
-                "p_detect_inf": 1.0,  # Ensure detection
                 "report_delay_days": 0,  # No delay for simplicity
                 "lhd_default_int_reduction": 0.5,
                 "lhd_default_int_duration": 5,

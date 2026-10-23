@@ -4,8 +4,7 @@ population.wp_contacts,1,20,1
 population.sch_contacts,1,20,1
 population.cas_contacts,1,20,1
 population.hh_weight,0.5,0.9,0
-epi.incubation_period,1,20,0
+epi.latent_period,1,20,0
 epi.infectious_period,1,20,0
 epi.vax_efficacy,0.01,0.99,0
 epi.vax_uptake,0,0.99,0
-lhd.p_detect_inf,0.25,0.75,0
