@@ -54,14 +54,45 @@ class PopulationParams:
 
 @dataclass(frozen=True)
 class LHDParams:
-    policy_name: str = "observe_only"
-    lhd_daily_capacity: int = 1000
+    policy_name: str = "trace_and_test"
+    # Standardized operational work units available per day.
+    lhd_daily_capacity: float = 1000.0
 
-    # Retained for later operational development. Current Phase 1 isolation
-    # logic does not use heterogeneous compliance.
+    # ------------------------------------------------------------------
+    # Standardized work-unit costs
+    # ------------------------------------------------------------------
+    case_investigation_cost: float = 4.0
+    isolation_support_cost: float = 1.0
+    contact_interview_cost: float = 2.0
+    contact_notification_cost: float = 1.0
+    testing_referral_cost: float = 1.0
+    automated_notification_cost: float = 0.05
+    community_mitigation_cost: float = 20.0
+
+    # ------------------------------------------------------------------
+    # Base task priorities
+    # ------------------------------------------------------------------
+    case_investigation_priority: float = 5.0
+    isolation_support_priority: float = 4.5
+    contact_interview_priority: float = 3.0
+    contact_notification_priority: float = 2.5
+    testing_referral_priority: float = 2.0
+
+    # Added to effective priority for every day a task waits.
+    task_aging_priority_per_day: float = 0.25
+
+    # ------------------------------------------------------------------
+    # Task usefulness windows
+    # ------------------------------------------------------------------
+    case_investigation_deadline_days: int = 7
+    isolation_support_deadline_days: int = 3
+    contact_interview_deadline_days: int = 7
+    contact_notification_deadline_days: int = 7
+    testing_referral_deadline_days: int = 5
+
+    # Retained for later operational development.
     mean_compliance: float = 1.0
 
-    lhd_default_call_cost: float = 1.0
     lhd_default_int_reduction: float = 0.9
     lhd_default_int_duration: int = 10
 

@@ -166,6 +166,7 @@ class NetworkModel:
         self.all_stochastic_dieout = np.zeros(self.n_replicates, dtype = bool)
         self.all_end_days = np.ones(self.n_replicates, dtype = int)*self.Tmax
         self.all_lhd_results = [None] * self.n_replicates
+        self.all_lhd_tasks = [None] * self.n_replicates
         self.all_vax_status = [None] * self.n_replicates
         # Unified event and daily epidemiological records.
         self.event_ledger = EventLedger()
@@ -1065,7 +1066,9 @@ class NetworkModel:
             self.all_lhd_daily_logs[run] = (
                 self.lhd.lhd_daily_log_to_df()
             )
-
+            self.all_lhd_tasks[run] = (
+                self.lhd.tasks_to_df()
+            )
             self.all_daily_epi[run] = pd.DataFrame(
                 self.daily_epi_rows
             )
@@ -1290,6 +1293,41 @@ class NetworkModel:
                 )
 
         return pd.DataFrame(rows)
+
+    def lhd_tasks_to_df(self) -> pd.DataFrame:
+        frames = [
+            frame
+            for frame in self.all_lhd_tasks
+            if isinstance(frame, pd.DataFrame)
+            and not frame.empty
+        ]
+
+        if not frames:
+            return pd.DataFrame()
+
+        return pd.concat(
+            frames,
+            ignore_index=True,
+            sort=False,
+        )
+
+
+    def lhd_daily_to_df(self) -> pd.DataFrame:
+        frames = [
+            frame
+            for frame in self.all_lhd_daily_logs
+            if isinstance(frame, pd.DataFrame)
+            and not frame.empty
+        ]
+
+        if not frames:
+            return pd.DataFrame()
+
+        return pd.concat(
+            frames,
+            ignore_index=True,
+            sort=False,
+        )
 
     def results_to_df(self, metrics: List[str] = ["peakPrev", "peakTime", "outbreakSize"]) -> pd.DataFrame:
         """

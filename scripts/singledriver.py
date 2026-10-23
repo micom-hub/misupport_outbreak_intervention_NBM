@@ -29,10 +29,6 @@ from scripts.visualization.network_visualization import (
     lhd_evolution_movie,
     visualize_lhd_evolution,
 )
-from scripts.analysis.phase1_audit import(
-  audit_phase1_model,
-  print_phase1_audit,
-)
 
 # Prepare and structure contact data
 
@@ -294,6 +290,20 @@ def run_single_model(
         index=False,
     )
 
+    daily_lhd_df = model.lhd_daily_to_df()
+    tasks_df = model.lhd_tasks_to_df()
+
+    if not daily_lhd_df.empty:
+        daily_lhd_df.to_parquet(
+            run_dir / "daily_lhd.parquet",
+            index=False,
+        )
+
+    if not tasks_df.empty:
+        tasks_df.to_parquet(
+            run_dir / "lhd_tasks.parquet",
+            index=False,
+        )
     model.timeseries_to_df("incidence").to_parquet(
         run_dir / "incidence.parquet",
         index=False,
@@ -340,7 +350,6 @@ if __name__ == "__main__":
                 "vax_uptake": 0.0,
             },
             "lhd": {
-                "policy_name": "observe_only",
                 "p_detect_symptomatic_daily": 0.40,
                 "p_detect_asymptomatic_daily": 0.03,
                 "p_detect_imported_daily": 0.10,
@@ -359,4 +368,4 @@ if __name__ == "__main__":
         contacts,
         cfg,
         seed=13,
-        policy_name="observe_only")
+        policy_name="trace_and_test")
