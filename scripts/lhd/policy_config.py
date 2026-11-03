@@ -64,14 +64,29 @@ def validate_variant(v: PolicyVariant) -> None:
 # Example configuration: edit this list to compare policies by name
 POLICY_CONFIGURATION = PolicyConfig(
     variants=[
-        PolicyVariant(name="observe_only", policy_name="observe_only"),
-        PolicyVariant(name="isolate_only", policy_name="isolate_only"),
-        PolicyVariant(name="trace_only", policy_name="trace_only"),
-        PolicyVariant(name="trace_then_isolate", policy_name="trace_then_isolate"),
-        PolicyVariant(name="trace_and_test", policy_name="trace_and_test"),
-        PolicyVariant(name="network_crawl", policy_name="network_crawl"),
         PolicyVariant(
-            name="network_crawl_isolate", policy_name="network_crawl_isolate"
+            name="observe_only",
+            policy_name="observe_only",
+        ),
+        PolicyVariant(
+            name="case_isolation_only",
+            policy_name="case_isolation_only",
+        ),
+        PolicyVariant(
+            name="trace_centered_response",
+            policy_name="trace_centered_response",
+        ),
+        PolicyVariant(
+            name="immediate_scalable_mitigation",
+            policy_name="immediate_scalable_mitigation",
+        ),
+        PolicyVariant(
+            name="adaptive_escalation",
+            policy_name="adaptive_escalation",
+        ),
+        PolicyVariant(
+            name="perfect_information",
+            policy_name="perfect_information",
         ),
     ]
 )

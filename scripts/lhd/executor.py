@@ -75,6 +75,14 @@ class TaskExecutor:
                 target=target,
             )
 
+        if task_type == "automated_notification":
+            return self._automated_notification(
+                lhd=lhd,
+                day=day,
+                task=task,
+                target=target,
+            )
+
         return TaskExecutionResult(
             success=False,
             work_units_used=0.0,
@@ -98,7 +106,7 @@ class TaskExecutor:
             node_id=target,
         )
 
-        if lhd.workflow_profile["isolate_cases"]:
+        if lhd.policy_spec["isolate_cases"]:
             _, created = lhd.enqueue_task(
                 task_type="isolation_support",
                 target=target,
@@ -109,7 +117,7 @@ class TaskExecutor:
             )
             children += int(created)
 
-        if lhd.workflow_profile["trace_cases"]:
+        if lhd.tracing_enabled_for_new_case(target):
             _, created = lhd.enqueue_task(
                 task_type="contact_interview",
                 target=target,
@@ -219,7 +227,7 @@ class TaskExecutor:
 
         children = 0
 
-        if lhd.workflow_profile["test_contacts"]:
+        if lhd.policy_spec["test_contacts"]:
             _, created = lhd.enqueue_task(
                 task_type="testing_referral",
                 target=target,
@@ -234,6 +242,41 @@ class TaskExecutor:
             success=True,
             work_units_used=float(task.work_cost),
             child_tasks_created=children,
+        )
+        
+    def _automated_notification(
+        self,
+        *,
+        lhd,
+        day: int,
+        task: LHDTask,
+        target: int,
+    ) -> TaskExecutionResult:
+        applied, tokens = (
+            lhd._apply_automated_notification(
+                t=day,
+                nodes=np.asarray(
+                    [target],
+                    dtype=np.int32,
+                ),
+                params=task.params,
+            )
+        )
+
+        lhd.record_task_semantic_event(
+            day=day,
+            event_type="automated_contact_notified",
+            task=task,
+            node_id=target,
+            source_node_id=task.source_case,
+        )
+
+        # Notification itself is successful even if the target was already under
+        # an equal or stronger intervention.
+        return TaskExecutionResult(
+            success=True,
+            work_units_used=float(task.work_cost),
+            tokens_scheduled=int(tokens),
         )
 
     def _testing_referral(

@@ -268,6 +268,15 @@ class NetworkModel:
         if hasattr(self, "lhd") and self.lhd is not None:
             policy_name = getattr(self.lhd, "policy_name", None)
 
+        if (
+            policy_phase is None
+            and hasattr(self, "lhd")
+            and self.lhd is not None):
+            policy_phase = getattr(
+                self.lhd,
+                "policy_phase",
+                None,)
+
         return self.event_ledger.append(
             run_number=int(self.replicate_ind),
             day=int(day),
@@ -994,13 +1003,14 @@ class NetworkModel:
                 day += 1
                 self.current_time = day
 
-                (
-                    trans_src,
-                    trans_tgt,
-                    trans_ct,
-                    epi_state,
-                    new_symptom_onsets,
-                ) = self.step()
+                # apply pre-transmission intervention changes
+                self.lhd.pre_epi_step(day)
+
+                (trans_src,
+                trans_tgt,
+                trans_ct,
+                epi_state,
+                new_symptom_onsets) = self.step()
 
                 transmissions_over_time.append(
                     {
@@ -1303,7 +1313,32 @@ class NetworkModel:
         ]
 
         if not frames:
-            return pd.DataFrame()
+            return pd.DataFrame(
+                columns=[
+                    "run_number",
+                    "task_id",
+                    "task_type",
+                    "target_kind",
+                    "target",
+                    "source_case",
+                    "created_day",
+                    "earliest_start_day",
+                    "deadline_day",
+                    "base_priority",
+                    "work_cost",
+                    "status",
+                    "selected_day",
+                    "started_day",
+                    "completed_day",
+                    "expired_day",
+                    "cancelled_day",
+                    "expiration_reason",
+                    "cancellation_reason",
+                    "source_algorithm",
+                    "reason",
+                    "params",
+                ]
+            )
 
         return pd.concat(
             frames,
@@ -1457,6 +1492,437 @@ class NetworkModel:
                 df[c] = pd.NA
 
         return df[cols]
+
+    def factual_run_summary_to_df(
+        self,
+    ) -> pd.DataFrame:
+        """
+        Produce one summary row per stochastic replicate.
+
+        """
+        events = self.event_log_to_df()
+        daily_epi = self.daily_epi_to_df()
+        daily_lhd = self.lhd_daily_to_df()
+        tasks = self.lhd_tasks_to_df()
+
+        rows = []
+
+        def first_event_day(
+            run_events: pd.DataFrame,
+            event_type: str,
+            *,
+            origin: Optional[str] = None,
+        ):
+            subset = run_events[
+                run_events["event_type"]
+                == event_type
+            ]
+
+            if origin is not None:
+                subset = subset[
+                    subset["infection_origin"]
+                    == origin
+                ]
+
+            if subset.empty:
+                return pd.NA
+
+            return int(subset["day"].min())
+
+        for run in range(self.n_replicates):
+            run_events = events[
+                events["run_number"] == run
+            ].copy()
+
+            run_epi = daily_epi[
+                daily_epi["run_number"] == run
+            ].sort_values("day")
+
+            run_lhd = daily_lhd[
+                daily_lhd["run_number"] == run
+            ].sort_values("t")
+
+            if tasks.empty or "run_number" not in tasks.columns:
+                run_tasks = pd.DataFrame()
+            else:
+                run_tasks = tasks.loc[
+                    tasks["run_number"] == run
+                ].copy()
+
+            generation = np.asarray(
+                self.all_infection_generation[run]
+            )
+
+            total_local_infections = int(
+                np.count_nonzero(generation > 0)
+            )
+
+            first_detection_day = first_event_day(
+                run_events,
+                "detection",
+            )
+            first_report_day = first_event_day(
+                run_events,
+                "report_received",
+            )
+            first_imported_report_day = (
+                first_event_day(
+                    run_events,
+                    "report_received",
+                    origin="imported",
+                )
+            )
+            first_local_report_day = (
+                first_event_day(
+                    run_events,
+                    "report_received",
+                    origin="local",
+                )
+            )
+            first_investigation_day = (
+                first_event_day(
+                    run_events,
+                    "case_investigation_completed",
+                )
+            )
+            first_isolation_day = first_event_day(
+                run_events,
+                "isolation_started",
+            )
+            first_notification_day = (
+                first_event_day(
+                    run_events,
+                    "contact_notified",
+                )
+            )
+
+            exposure_events = run_events[
+                run_events["event_type"]
+                == "exposure"
+            ]
+
+            if pd.isna(first_report_day):
+                transmissions_before_report = int(
+                    len(exposure_events)
+                )
+            else:
+                transmissions_before_report = int(
+                    (
+                        exposure_events["day"]
+                        < int(first_report_day)
+                    ).sum()
+                )
+
+            if pd.isna(first_isolation_day):
+                transmissions_before_intervention = int(
+                    len(exposure_events)
+                )
+            else:
+                transmissions_before_intervention = int(
+                    (
+                        exposure_events["day"]
+                        < int(first_isolation_day)
+                    ).sum()
+                )
+
+            escalation_started = run_events[
+                run_events["event_type"]
+                == "escalation_started"
+            ]
+
+            if escalation_started.empty:
+                escalation_effective_day = pd.NA
+                transmissions_before_escalation = int(
+                    len(exposure_events)
+                )
+                transmissions_after_escalation = 0
+            else:
+                escalation_effective_day = int(
+                    escalation_started["day"].min()
+                )
+                transmissions_before_escalation = int(
+                    (
+                        exposure_events["day"]
+                        < escalation_effective_day
+                    ).sum()
+                )
+                transmissions_after_escalation = int(
+                    (
+                        exposure_events["day"]
+                        >= escalation_effective_day
+                    ).sum()
+                )
+
+            report_to_investigation = pd.Series(
+                dtype=float
+            )
+            report_to_isolation = pd.Series(
+                dtype=float
+            )
+            notification_delays = pd.Series(
+                dtype=float
+            )
+
+            if not run_tasks.empty:
+                investigations = run_tasks[
+                    run_tasks["task_type"]
+                    == "case_investigation"
+                ].copy()
+
+                if not investigations.empty:
+                    report_days = {
+                        int(node): int(day)
+                        for node, day in (
+                            run_events[
+                                run_events["event_type"]
+                                == "report_received"
+                            ][["node_id", "day"]]
+                            .dropna()
+                            .itertuples(index=False)
+                        )
+                    }
+
+                    investigations[
+                        "report_day"
+                    ] = investigations[
+                        "target"
+                    ].map(report_days)
+
+                    report_to_investigation = (
+                        investigations[
+                            "completed_day"
+                        ]
+                        - investigations[
+                            "report_day"
+                        ]
+                    ).dropna()
+
+                isolations = run_tasks[
+                    run_tasks["task_type"]
+                    == "isolation_support"
+                ].copy()
+
+                if not isolations.empty:
+                    report_days = {
+                        int(node): int(day)
+                        for node, day in (
+                            run_events[
+                                run_events["event_type"]
+                                == "report_received"
+                            ][["node_id", "day"]]
+                            .dropna()
+                            .itertuples(index=False)
+                        )
+                    }
+
+                    isolations["report_day"] = (
+                        isolations["target"].map(
+                            report_days
+                        )
+                    )
+                    report_to_isolation = (
+                        isolations["completed_day"]
+                        - isolations["report_day"]
+                    ).dropna()
+
+                notifications = run_tasks[
+                    run_tasks["task_type"].isin(
+                        [
+                            "contact_notification",
+                            "automated_notification",
+                        ]
+                    )
+                ].copy()
+
+                if not notifications.empty:
+                    notification_delays = (
+                        notifications[
+                            "completed_day"
+                        ]
+                        - notifications[
+                            "created_day"
+                        ]
+                    ).dropna()
+
+            peak_local_prevalence = (
+                int(
+                    run_epi[
+                        "local_infectious"
+                    ].max()
+                )
+                if not run_epi.empty
+                else 0
+            )
+            peak_local_incidence = (
+                int(
+                    run_epi[
+                        "new_local_exposures"
+                    ].max()
+                )
+                if not run_epi.empty
+                else 0
+            )
+
+            rows.append(
+                {
+                    "run_number": int(run),
+                    "policy_name": (
+                        run_lhd[
+                            "policy_name"
+                        ].iloc[0]
+                        if not run_lhd.empty
+                        else self.config.lhd.policy_name
+                    ),
+                    "total_local_infections":
+                        total_local_infections,
+                    "peak_local_prevalence_count":
+                        peak_local_prevalence,
+                    "peak_local_incidence_count":
+                        peak_local_incidence,
+                    "extinction_day": int(
+                        self.all_end_days[run]
+                    ),
+                    "stochastic_dieout": bool(
+                        self.all_stochastic_dieout[run]
+                    ),
+                    "first_detection_day":
+                        first_detection_day,
+                    "first_report_day":
+                        first_report_day,
+                    "first_imported_report_day":
+                        first_imported_report_day,
+                    "first_local_report_day":
+                        first_local_report_day,
+                    "first_investigation_day":
+                        first_investigation_day,
+                    "first_isolation_day":
+                        first_isolation_day,
+                    "first_contact_notification_day":
+                        first_notification_day,
+                    "transmissions_before_first_report":
+                        transmissions_before_report,
+                    "transmissions_before_first_intervention":
+                        transmissions_before_intervention,
+                    "transmissions_before_escalation":
+                        transmissions_before_escalation,
+                    "transmissions_after_escalation":
+                        transmissions_after_escalation,
+                    "total_work_units": (
+                        float(
+                            run_lhd[
+                                "capacity_used"
+                            ].sum()
+                        )
+                        if not run_lhd.empty
+                        else 0.0
+                    ),
+                    "peak_daily_work_units": (
+                        float(
+                            run_lhd[
+                                "capacity_used"
+                            ].max()
+                        )
+                        if not run_lhd.empty
+                        else 0.0
+                    ),
+                    "peak_pending_work_units": (
+                        float(
+                            run_lhd[
+                                "pending_work_units_end"
+                            ].max()
+                        )
+                        if not run_lhd.empty
+                        else 0.0
+                    ),
+                    "days_at_full_capacity": (
+                        int(
+                            (
+                                run_lhd[
+                                    "capacity_used"
+                                ]
+                                >= run_lhd[
+                                    "capacity_available"
+                                ] - 1e-9
+                            ).sum()
+                        )
+                        if not run_lhd.empty
+                        else 0
+                    ),
+                    "mean_report_to_investigation_delay": (
+                        float(
+                            report_to_investigation.mean()
+                        )
+                        if not report_to_investigation.empty
+                        else np.nan
+                    ),
+                    "mean_report_to_isolation_delay": (
+                        float(
+                            report_to_isolation.mean()
+                        )
+                        if not report_to_isolation.empty
+                        else np.nan
+                    ),
+                    "mean_contact_notification_delay": (
+                        float(
+                            notification_delays.mean()
+                        )
+                        if not notification_delays.empty
+                        else np.nan
+                    ),
+                    "escalation_order_day": (
+                        int(
+                            run_lhd[
+                                "escalation_order_day"
+                            ].dropna().iloc[0]
+                        )
+                        if (
+                            not run_lhd.empty
+                            and run_lhd[
+                                "escalation_order_day"
+                            ].notna().any()
+                        )
+                        else pd.NA
+                    ),
+                    "escalation_effective_day":
+                        escalation_effective_day,
+                    "maximum_generation": (
+                        int(generation.max())
+                        if np.any(generation >= 0)
+                        else pd.NA
+                    ),
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    def transmissions_to_df(
+        self,
+    ) -> pd.DataFrame:
+        events = self.event_log_to_df()
+
+        columns = [
+            "run_number",
+            "day",
+            "source_node_id",
+            "node_id",
+            "contact_type",
+            "infection_generation",
+            "policy_name",
+            "policy_phase",
+        ]
+
+        transmission_events = events[
+            events["event_type"] == "exposure"
+        ][columns].copy()
+
+        return transmission_events.rename(
+            columns={
+                "source_node_id": "source",
+                "node_id": "target",
+                "infection_generation":
+                    "target_generation",
+            }
+        )
 
     def timeseries_to_df(
         self,

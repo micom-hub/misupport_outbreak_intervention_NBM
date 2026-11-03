@@ -101,6 +101,11 @@ def run_variants(
     save_incidence: bool = False,
     save_prevalence: bool = False,
     save_lhd_results: bool = True,
+    save_daily_epi: bool = True,
+    save_events: bool = True,
+    save_tasks: bool = True,
+    save_transmissions: bool = True,
+    save_factual_summary: bool = True,
     summary_metrics: Optional[List[str]] = None
 ) -> List[NetworkModel]:
     """
@@ -145,6 +150,11 @@ def run_variants(
     incidence_dfs = []
     prevalence_dfs = []
     lhd_daily_dfs = []
+    daily_epi_dfs = []
+    event_dfs = []
+    task_dfs = []
+    transmission_dfs = []
+    factual_summary_dfs = []
 
     # safely configure variant config directory
     variant_config_dir = run_dir / "variant_configs"
@@ -185,7 +195,10 @@ def run_variants(
         )
 
         try:
+            # simulate
             model.simulate()
+
+
         except Exception as exc:
             # error if a sim fails
             raise RuntimeError(
@@ -210,6 +223,64 @@ def run_variants(
             df_prevalence = model.timeseries_to_df("prevalence")
             df_prevalence.insert(0, "variant_name", variant.name)
             prevalence_dfs.append(df_prevalence)
+
+        # helper to attach metadata to data
+        def _with_variant_metadata(df: pd.DataFrame) -> pd.DataFrame:
+            data = df.copy()
+
+            if "variant_name" not in data.columns:
+                data.insert(
+                    0,
+                    "variant_name",
+                    variant.name,
+                )
+
+            if "policy_name" not in data.columns:
+                data.insert(
+                    1,
+                    "policy_name",
+                    variant.policy_name,
+                )
+
+            return data
+
+        # attach metadata to runs
+        if save_daily_epi:
+            daily_epi_dfs.append(
+                _with_variant_metadata(
+                    model.daily_epi_to_df()
+                )
+            )
+
+        if save_events:
+            event_dfs.append(
+                _with_variant_metadata(
+                    model.event_log_to_df()
+                )
+            )
+
+        if save_tasks:
+            task_df = model.lhd_tasks_to_df()
+            if not task_df.empty:
+                task_dfs.append(
+                    _with_variant_metadata(task_df)
+                )
+
+        if save_transmissions:
+            transmission_dfs.append(
+                _with_variant_metadata(
+                    model.transmissions_to_df()
+                )
+            )
+
+        if save_factual_summary:
+            factual_summary_dfs.append(
+                _with_variant_metadata(
+                    model.factual_run_summary_to_df()
+                )
+            )
+
+
 
         if save_lhd_results:
             # LHD results can be stored in two ways:
@@ -254,6 +325,58 @@ def run_variants(
 
     if save_lhd_results and lhd_daily_dfs:
         pd.concat(lhd_daily_dfs, ignore_index=True, sort=False).to_parquet(str(run_dir / "lhd_results.parquet"))
+    if save_daily_epi and daily_epi_dfs:
+      pd.concat(
+          daily_epi_dfs,
+          ignore_index=True,
+          sort=False,
+      ).to_parquet(
+          run_dir / "daily_epi.parquet",
+          index=False,
+      )
+
+    if save_events and event_dfs:
+        pd.concat(
+            event_dfs,
+            ignore_index=True,
+            sort=False,
+        ).to_parquet(
+            run_dir / "events.parquet",
+            index=False,
+        )
+
+    if save_tasks and task_dfs:
+        pd.concat(
+            task_dfs,
+            ignore_index=True,
+            sort=False,
+        ).to_parquet(
+            run_dir / "tasks.parquet",
+            index=False,
+        )
+
+    if save_transmissions and transmission_dfs:
+        pd.concat(
+            transmission_dfs,
+            ignore_index=True,
+            sort=False,
+        ).to_parquet(
+            run_dir / "transmissions.parquet",
+            index=False,
+        )
+
+    if (
+        save_factual_summary
+        and factual_summary_dfs
+    ):
+        pd.concat(
+            factual_summary_dfs,
+            ignore_index=True,
+            sort=False,
+        ).to_parquet(
+            run_dir / "factual_run_summary.parquet",
+            index=False,
+        )
     # write variant provenance 
     with open(run_dir / "variant_manifest.json", "w") as fh:
       json.dump(variant_manifest, fh, indent=2, default=str)
@@ -275,6 +398,11 @@ def run_parameter_set(
     save_incidence: bool = False,
     save_prevalence: bool = False,
     save_lhd_results: bool = True,
+    save_daily_epi: bool = True,
+    save_events: bool = True,
+    save_tasks: bool = True,
+    save_transmissions: bool = True,
+    save_factual_summary: bool = True,
     summary_metrics: Optional[List[str]] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
@@ -348,6 +476,11 @@ def run_parameter_set(
         save_prevalence=save_prevalence,
         save_lhd_results = save_lhd_results,
         summary_metrics=summary_metrics,
+        save_daily_epi=save_daily_epi,
+        save_events=save_events,
+        save_tasks=save_tasks,
+        save_transmissions=save_transmissions,
+        save_factual_summary=save_factual_summary,
         overwrite=overwrite
     )
 
@@ -388,3 +521,4 @@ def _cfg_with_policy_variant(cfg: ModelConfig, variant) -> ModelConfig:
 def _safe_filename(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_")
     return value or "variant"
+

@@ -54,7 +54,7 @@ class PopulationParams:
 
 @dataclass(frozen=True)
 class LHDParams:
-    policy_name: str = "trace_and_test"
+    policy_name: str = "adaptive_escalation"
     # Standardized operational work units available per day.
     lhd_daily_capacity: float = 1000.0
 
@@ -89,6 +89,69 @@ class LHDParams:
     contact_interview_deadline_days: int = 7
     contact_notification_deadline_days: int = 7
     testing_referral_deadline_days: int = 5
+
+    # ------------------------------------------------------------------
+    # Policy phase and escalation
+    # ------------------------------------------------------------------
+
+    # Supported trigger metrics:
+    #   new_reports
+    #   rolling_mean_reports
+    #   rolling_report_growth
+    #   backlog_to_capacity_ratio
+    #   capacity_utilization
+    #   maximum_queue_age
+    escalation_trigger_metric: str = "new_reports"
+    escalation_trigger_threshold: float = 10.0
+    escalation_window_days: int = 3
+    escalation_consecutive_days: int = 1
+    escalation_minimum_reports: int = 3
+
+    # Delay between ordering and activation. Activation occurs before
+    # transmission on the effective day.
+    escalation_implementation_delay_days: int = 1
+
+    # Zero means active through the remainder of the simulation.
+    escalation_duration_days: int = 0
+
+    # Intervention profile used by immediate and adaptive escalation.
+    # Supported profiles:
+    #   combined_emergency
+    #   stay_home
+    #   school_closure
+    #   workplace_mitigation
+    #   gathering_restrictions
+    escalation_intervention_profile: str = "combined_emergency"
+
+    # Contact reductions are fractions removed.
+    emergency_school_reduction: float = 0.80
+    emergency_workplace_reduction: float = 0.60
+    emergency_casual_reduction: float = 0.70
+    emergency_household_reduction: float = 0.0
+    emergency_group_quarter_reduction: float = 0.0
+
+    # Phase-2 tracing behavior:
+    #   stop       -> create no new contact-interview tasks
+    #   targeted   -> continue only household tracing
+    #   continue   -> continue ordinary tracing
+    phase2_trace_mode: str = "stop"
+
+    # Whether old tracing-related tasks are cancelled when Phase 2 begins.
+    cancel_tracing_backlog_on_escalation: bool = True
+
+    # ------------------------------------------------------------------
+    # Automated notification
+    # ------------------------------------------------------------------
+    automated_notification_priority: float = 2.5
+    automated_notification_deadline_days: int = 3
+    automated_notification_reduction: float = 0.30
+    automated_notification_duration_days: int = 5
+
+    # ------------------------------------------------------------------
+    # Perfect-information benchmark
+    # ------------------------------------------------------------------
+    perfect_information_reduction: float = 1.0
+    perfect_information_isolation_duration_days: int = 30
 
     # Retained for later operational development.
     mean_compliance: float = 1.0
@@ -313,4 +376,51 @@ class ModelConfig:
             raise ValueError(
                 f"lhd.policy_name '{self.lhd.policy_name}' was not "
                 "found in policy_catalog.POLICIES"
+            )
+
+        #  Validation for emergency triggers
+        valid_trigger_metrics = {
+    "new_reports",
+    "rolling_mean_reports",
+    "rolling_report_growth",
+    "backlog_to_capacity_ratio",
+    "capacity_utilization",
+    "maximum_queue_age"}
+
+        if (
+            self.lhd.escalation_trigger_metric
+            not in valid_trigger_metrics
+        ):
+            raise ValueError(
+                "Unsupported escalation_trigger_metric: "
+                f"{self.lhd.escalation_trigger_metric}"
+            )
+
+        valid_profiles = {
+            "combined_emergency",
+            "stay_home",
+            "school_closure",
+            "workplace_mitigation",
+            "gathering_restrictions",
+        }
+
+        if (
+            self.lhd.escalation_intervention_profile
+            not in valid_profiles
+        ):
+            raise ValueError(
+                "Unsupported escalation_intervention_profile: "
+                f"{self.lhd.escalation_intervention_profile}"
+            )
+
+        valid_trace_modes = {
+            "stop",
+            "targeted",
+            "continue",
+        }
+
+        if self.lhd.phase2_trace_mode not in valid_trace_modes:
+            raise ValueError(
+                "lhd.phase2_trace_mode must be one of "
+                f"{sorted(valid_trace_modes)}"
             )

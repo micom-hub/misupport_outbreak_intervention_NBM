@@ -314,6 +314,16 @@ def run_single_model(
         index=False,
     )
 
+    model.factual_run_summary_to_df().to_parquet(
+        run_dir / "factual_run_summary.parquet",
+        index=False,
+    )
+
+    model.transmissions_to_df().to_parquet(
+        run_dir / "transmissions.parquet",
+        index=False,
+    )
+
 
     return model
 
@@ -350,10 +360,20 @@ if __name__ == "__main__":
                 "vax_uptake": 0.0,
             },
             "lhd": {
+                "policy_name": "adaptive_escalation",
+                "lhd_daily_capacity": 100.0,
                 "p_detect_symptomatic_daily": 0.40,
                 "p_detect_asymptomatic_daily": 0.03,
                 "p_detect_imported_daily": 0.10,
                 "passive_report_delay_days": 1,
+                "trace_recall_prob": 0.60,
+                "escalation_trigger_metric": "new_reports",
+                "escalation_trigger_threshold": 10.0,
+                "escalation_consecutive_days": 2,
+                "escalation_implementation_delay_days": 1,
+                "escalation_intervention_profile":
+                    "combined_emergency",
+                "phase2_trace_mode": "stop",
             },
         }
     )
@@ -368,4 +388,4 @@ if __name__ == "__main__":
         contacts,
         cfg,
         seed=13,
-        policy_name="trace_and_test")
+        policy_name="adaptive_escalation")

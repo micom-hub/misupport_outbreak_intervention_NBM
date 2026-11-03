@@ -43,6 +43,11 @@ def run_experiment(
     save_incidence: bool = False,
     save_prevalence: bool = False,
     save_lhd_results: bool = False,
+    save_daily_epi: bool = True,
+    save_events: bool = True,
+    save_tasks: bool = True,
+    save_transmissions: bool = True,
+    save_factual_summary: bool = True,
     summary_metrics: Optional[List[str]] = None,
     overwrite_runs: bool = True,  # Run results
     clean_dir: bool = False,
@@ -148,6 +153,11 @@ def run_experiment(
                         save_prevalence=save_prevalence,
                         save_lhd_results=save_lhd_results,
                         summary_metrics=summary_metrics,
+                        save_daily_epi=save_daily_epi,
+                        save_events=save_events,
+                        save_tasks=save_tasks,
+                        save_transmissions=save_transmissions,
+                        save_factual_summary=save_factual_summary,
                         overwrite=overwrite_runs,
                     ): i
                     for i in indices
@@ -181,6 +191,11 @@ def run_experiment(
                     save_prevalence=save_prevalence,
                     save_lhd_results=save_lhd_results,
                     summary_metrics=summary_metrics,
+                    save_daily_epi=save_daily_epi,
+                    save_events=save_events,
+                    save_tasks=save_tasks,
+                    save_transmissions=save_transmissions,
+                    save_factual_summary=save_factual_summary,
                     overwrite=overwrite_runs,
                 )
                 statuses.append(res)
@@ -205,6 +220,11 @@ def run_experiment(
                 save_prevalence=save_prevalence,
                 save_lhd_results=save_lhd_results,
                 summary_metrics=summary_metrics,
+                save_daily_epi=save_daily_epi,
+                save_events=save_events,
+                save_tasks=save_tasks,
+                save_transmissions=save_transmissions,
+                save_factual_summary=save_factual_summary,
                 overwrite=overwrite_runs,
             )
           except Exception as exc:
@@ -247,6 +267,21 @@ def run_experiment(
                 if "run_number" not in df.columns:
                     df.insert(0, "run_number", range(len(df)))
                 df.insert(0, "model_index", i)
+                if "run_number" in df.columns:
+                    df["pair_id"] = (
+                        "model_"
+                        + str(int(i)).zfill(4)
+                        + "__run_"
+                        + df["run_number"]
+                        .astype(int)
+                        .astype(str)
+                        .str.zfill(4)
+                    )
+                else:
+                    df["pair_id"] = (
+                        "model_"
+                        + str(int(i)).zfill(4)
+                    )
                 parts.append(df)
             except Exception as exc:
                 print(f"[run_experiment] Failed to read {fpath}: {exc}")
@@ -291,6 +326,65 @@ def run_experiment(
             run_dir = out_base / f"model_{int(i):04d}"
             if run_dir.exists() and run_dir.is_dir():
                 shutil.rmtree(run_dir)
+
+
+      # Output aggregation
+    additional_outputs = {
+        "daily_epi": (
+            save_daily_epi,
+            "daily_epi.parquet",
+            "aggregated_daily_epi.parquet",
+        ),
+        "events": (
+            save_events,
+            "events.parquet",
+            "aggregated_events.parquet",
+        ),
+        "tasks": (
+            save_tasks,
+            "tasks.parquet",
+            "aggregated_tasks.parquet",
+        ),
+        "transmissions": (
+            save_transmissions,
+            "transmissions.parquet",
+            "aggregated_transmissions.parquet",
+        ),
+        "factual_summary": (
+            save_factual_summary,
+            "factual_run_summary.parquet",
+            "aggregated_factual_summary.parquet",
+        ),
+    }
+
+    for (
+        output_name,
+        (
+            should_save,
+            per_run_filename,
+            aggregate_filename,
+        ),
+    ) in additional_outputs.items():
+        if not should_save:
+            continue
+
+        df_all = _collect_and_concat(
+            per_run_filename
+        )
+
+        if df_all is None:
+            continue
+
+        output_path = (
+            out_base / aggregate_filename
+        )
+        _atomic_write_parquet(
+            df_all,
+            output_path,
+        )
+        aggregated_paths[output_name] = str(
+            output_path
+        )
 
     return {
         "run_dir": str(out_base),
@@ -358,3 +452,4 @@ if __name__ == "__main__":
                 aggregate_replicates = True
 
             )
+
