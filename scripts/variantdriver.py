@@ -1,29 +1,174 @@
 # scripts/variantdriver.py
 from __future__ import annotations
 
-import argparse
 import concurrent.futures
-import json
 import multiprocessing as mp
-import os
 import shutil
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import pandas as pd
 
 from scripts.config import ModelConfig
-from scripts.lhd.policy_config import POLICY_CONFIGURATION, PolicyConfig
-from scripts.PostRunProcessing.results_formatting import export_prcc_inputs_for_matlab
-
-# imports from your codebase
-from scripts.variants.run_variants_funcs import prepare_run, run_parameter_set
-from scripts.visualization.viz import (
-    plot_metric_boxplot,
-    plot_paired_difference_trajectory,
-    plot_trajectories_by_variant,
+from scripts.lhd.policy_config import (
+    POLICY_CONFIGURATION,
+    PolicyConfig,
 )
+from scripts.utils.output_profiles import (
+    AGGREGATED_FILENAMES,
+    OUTPUT_FILENAMES,
+    atomic_write_parquet,
+    resolve_outputs,
+    write_json,
+)
+from scripts.variants.run_variants_funcs import (
+    ParameterSetResult,
+    VariantRunResult,
+    prepare_run,
+    run_parameter_set,
+)
+
+
+@dataclass
+class PolicyComparisonResult:
+    """Interactive paired-policy run on one shared graph."""
+
+    models: Dict[str, Any]
+    graphdata: Any
+    sampled_edges: pd.DataFrame
+    run_dir: Optional[Path]
+    output_paths: Dict[str, Path]
+
+
+@dataclass
+class ExperimentResult:
+    """Result of a multi-parameter-set experiment."""
+
+    run_dir: Path
+    n_parameter_sets: int
+    statuses: List[Dict[str, Any]]
+    aggregated_paths: Dict[str, Path]
+    models: Optional[
+        Dict[int, Dict[str, Any]]
+    ] = None
+
+
+def run_policy_comparison(
+    contacts_df: pd.DataFrame,
+    cfg: ModelConfig,
+    policy_config: PolicyConfig,
+    *,
+    output_dir: Optional[
+        Union[str, Path]
+    ] = None,
+    seed: Optional[int] = None,
+    output_profile: str = "none",
+    extra_outputs: Optional[
+        Iterable[str]
+    ] = None,
+    overwrite: bool = False,
+) -> PolicyComparisonResult:
+    """
+    Run all policies on one shared graph and return models by variant name.
+
+    This uses the same index-zero seed hierarchy as run_experiment().
+    """
+    from scripts.graph.graph_utils import (
+        build_graph_data,
+        build_minimal_graphdata_from_edge_list,
+        sample_from_master_graphdata,
+    )
+    from scripts.singledriver import (
+        read_or_build_master,
+    )
+    from scripts.utils.rng_utility import (
+        derive_seed_from_base,
+    )
+    from scripts.variants.run_variants_funcs import (
+        run_variants,
+    )
+
+    cfg.validate()
+
+    base_seed = int(
+        seed
+        if seed is not None
+        else cfg.sim.seed
+    )
+    run_seed = int(
+        derive_seed_from_base(
+            base_seed,
+            "run_0",
+        )
+    )
+    graph_seed = int(
+        derive_seed_from_base(run_seed)
+    )
+
+    if output_dir is None:
+        runtime_dir = Path(".")
+        result_dir = None
+    else:
+        result_dir = Path(
+            output_dir
+        ).expanduser().resolve()
+        result_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        runtime_dir = result_dir
+
+    master = read_or_build_master(
+        contacts_df=contacts_df,
+        cfg=cfg,
+        run_dir=runtime_dir,
+        seed=graph_seed,
+        save_master=False,
+    )
+
+    minimal_master = (
+        build_minimal_graphdata_from_edge_list(
+            master,
+            N=int(len(contacts_df)),
+        )
+    )
+
+    sampled_edges = sample_from_master_graphdata(
+        minimal_master,
+        cfg,
+        seed=graph_seed,
+    )
+
+    graphdata = build_graph_data(
+        edge_list=sampled_edges,
+        contacts_df=contacts_df,
+        config=cfg,
+        seed=graph_seed,
+        N=int(len(contacts_df)),
+    )
+
+    variant_result: VariantRunResult = run_variants(
+        policy_config=policy_config,
+        cfg=cfg,
+        graphdata=graphdata,
+        output_dir=result_dir,
+        i=0,
+        seed=run_seed,
+        output_profile=output_profile,
+        extra_outputs=extra_outputs,
+        overwrite=overwrite,
+        return_models=True,
+    )
+
+    return PolicyComparisonResult(
+        models=variant_result.models,
+        graphdata=graphdata,
+        sampled_edges=sampled_edges,
+        run_dir=variant_result.run_dir,
+        output_paths=variant_result.output_paths,
+    )
 
 
 def run_experiment(
@@ -34,422 +179,499 @@ def run_experiment(
     *,
     base_cfg: Optional[ModelConfig] = None,
     data_dir: str = "data",
-    overwrite_files: bool = True,  # Input files
-    save_files: bool = True,
     seed: Optional[int] = None,
     workers: Optional[int] = 1,
-    register_defaults: bool = False,
-    save_summary: bool = True,
-    save_incidence: bool = False,
-    save_prevalence: bool = False,
-    save_lhd_results: bool = False,
-    save_daily_epi: bool = True,
-    save_events: bool = True,
-    save_tasks: bool = True,
-    save_transmissions: bool = True,
-    save_factual_summary: bool = True,
-    summary_metrics: Optional[List[str]] = None,
-    overwrite_runs: bool = True,  # Run results
-    clean_dir: bool = False,
-) -> Dict[str, Any]:
+    output_profile: str = "core",
+    extra_outputs: Optional[
+        Iterable[str]
+    ] = None,
+    return_models: bool = False,
+    overwrite_contact_files: bool = False,
+    save_contact_files: bool = True,
+    save_master_graph: bool = False,
+    overwrite_run_dirs: bool = False,
+    clean_output_dir: bool = False,
+    clean_model_dirs: bool = False,
+) -> ExperimentResult:
     """
-    Runs the whole shebang for LHDsim variants
+    Run paired policies over an LHS parameter design.
 
-    1) Prepares runs from LHS with prepare_run
-    2) Runs run_parameter_set for each parameter-set
-        - Sequential or in parallel if workers > 1 (if None, uses max available)
-    3) Aggregate results across each run into a
-        #if clean_dir, deletes variant subdirectories
+    Returning live models is supported only for sequential execution.
     """
+    if return_models and workers not in {
+        None,
+        1,
+    }:
+        raise ValueError(
+            "return_models=True requires workers=1."
+        )
 
-    # Internal helper to return failed runs
-    def _failure_status(i: int, exc: Exception) -> Dict[str, Any]:
-      return {
-          "index": int(i),
-          "run_dir": str(out_base / f"model_{int(i):04d}"),
-          "success": False,
-          "error": str(exc),
-          "trace": traceback.format_exc(),
-      }
-    out_base = Path(output_dir).expanduser().resolve()
+    outputs = resolve_outputs(
+        output_profile,
+        extra_outputs,
+    )
 
-    if out_base.is_dir() and overwrite_runs:
-        shutil.rmtree(str(out_base))
+    base_cfg = base_cfg or ModelConfig()
+    base_cfg.validate()
 
-    out_base.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(
+        output_dir
+    ).expanduser().resolve()
 
-    # Write an experiment manifest file
-    experiment_manifest = {
-        "csv_path": str(Path(csv_path).expanduser().resolve()),
-        "n_samples": int(n_samples),
-        "seed": int(seed) if seed is not None else None,
-        "workers": workers,
-        "save_summary": bool(save_summary),
-        "save_incidence": bool(save_incidence),
-        "save_prevalence": bool(save_prevalence),
-        "save_lhd_results": bool(save_lhd_results),
-        "summary_metrics": summary_metrics,
-        "policies": [
-            {
-                "variant_name": variant.name,
-                "policy_name": variant.policy_name,
-                "lhd_overrides": dict(variant.lhd_overrides),
-                "description": variant.description,
-            }
-            for variant in policy_config.variants
-        ],
-        "base_config": (
-            base_cfg.to_dict()
-            if base_cfg is not None
-            else ModelConfig().to_dict()
-        ),
-    }
+    if output_dir.exists() and clean_output_dir:
+        shutil.rmtree(output_dir)
 
-    with open(out_base / "experiment_manifest.json", "w") as fh:
-        json.dump(experiment_manifest, fh, indent=2, default=str)
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    # 1) Prepare run
-    print("[run_experiment] Initializing run data... ")
-    contacts_df, configs_list, master_gd = prepare_run(
+    base_seed = int(
+        seed
+        if seed is not None
+        else base_cfg.sim.seed
+    )
+
+    contacts, configs, master_graphdata = prepare_run(
         csv_path=csv_path,
         n_samples=n_samples,
-        output_dir=str(out_base),
+        output_dir=output_dir,
         base_cfg=base_cfg,
         data_dir=data_dir,
-        overwrite_files=overwrite_files,
-        save_files=save_files,
-        seed=seed,
+        overwrite_files=overwrite_contact_files,
+        save_contact_files=save_contact_files,
+        save_master_graph=save_master_graph,
+        seed=base_seed,
     )
-    n_configs = len(configs_list)
-    print(f"[run_experiment] {n_configs} Models Initialized")
 
-    # 2) Execute individual runs
-    indices = list(range(n_configs))
+    indices = list(range(len(configs)))
+
+    write_json(
+        {
+            "csv_path": str(
+                Path(csv_path)
+                .expanduser()
+                .resolve()
+            ),
+            "n_parameter_sets": len(configs),
+            "base_seed": base_seed,
+            "workers": workers,
+            "output_profile": output_profile,
+            "outputs": sorted(outputs),
+            "policies": [
+                {
+                    "variant_name":
+                        variant.name,
+                    "policy_name":
+                        variant.policy_name,
+                    "lhd_overrides": dict(
+                        variant.lhd_overrides
+                    ),
+                    "description":
+                        variant.description,
+                }
+                for variant
+                in policy_config.variants
+            ],
+            "base_config":
+                base_cfg.to_dict(),
+        },
+        output_dir / "experiment_manifest.json",
+    )
+
+    if workers is None:
+        workers = max(
+            1,
+            mp.cpu_count() - 1,
+        )
+
     statuses: List[Dict[str, Any]] = []
 
-    # check worker count
-    # If None, use one less than maximum CPUs
-    if workers is None:
-        workers = max(1, mp.cpu_count() - 1)
+    retained_models: Optional[
+        Dict[int, Dict[str, Any]]
+    ] = (
+        {}
+        if return_models
+        else None
+    )
 
-    # If more than 1 workers, attempt parallel process
-    if workers > 1:
-        print(f"[run_experiment] Attempting parallel run with {workers} workers")
-        try:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as exe:
-                futures = {
-                    exe.submit(
-                        run_parameter_set,
-                        contacts_df,
-                        policy_config,
-                        configs_list[i],
-                        master_gd,
-                        str(out_base),
-                        i,
-                        seed=seed,
-                        register_defaults=register_defaults,
-                        save_summary=save_summary,
-                        save_incidence=save_incidence,
-                        save_prevalence=save_prevalence,
-                        save_lhd_results=save_lhd_results,
-                        summary_metrics=summary_metrics,
-                        save_daily_epi=save_daily_epi,
-                        save_events=save_events,
-                        save_tasks=save_tasks,
-                        save_transmissions=save_transmissions,
-                        save_factual_summary=save_factual_summary,
-                        overwrite=overwrite_runs,
-                    ): i
-                    for i in indices
-                }
-            for fut in concurrent.futures.as_completed(futures):
-                i = futures[fut]
-                try:
-                  res = fut.result()
+    if int(workers) > 1:
+        statuses = _run_parallel(
+            contacts=contacts,
+            configs=configs,
+            master_graphdata=master_graphdata,
+            policy_config=policy_config,
+            output_dir=output_dir,
+            indices=indices,
+            base_seed=base_seed,
+            workers=int(workers),
+            output_profile=output_profile,
+            extra_outputs=extra_outputs,
+            overwrite_run_dirs=
+                overwrite_run_dirs,
+        )
 
-                except Exception as exc:
-                  res = _failure_status(i, exc)
-                statuses.append(res)
-        # anticipating problem pickling LHD objects
-        except Exception as exc:
-            print(
-                f"[run_experiment] Parallel execution failed ({exc}); falling back to sequential execution."
-            )
-            statuses = []
-            for i in indices:
-                res = run_parameter_set(
-                    contacts_df,
-                    policy_config,
-                    configs_list[i],
-                    master_gd,
-                    str(out_base),
-                    i,
-                    seed=seed,
-                    register_defaults=register_defaults,
-                    save_summary=save_summary,
-                    save_incidence=save_incidence,
-                    save_prevalence=save_prevalence,
-                    save_lhd_results=save_lhd_results,
-                    summary_metrics=summary_metrics,
-                    save_daily_epi=save_daily_epi,
-                    save_events=save_events,
-                    save_tasks=save_tasks,
-                    save_transmissions=save_transmissions,
-                    save_factual_summary=save_factual_summary,
-                    overwrite=overwrite_runs,
-                )
-                statuses.append(res)
-
-    # Sequential run branch
     else:
-        print("[run_experiment] Running sequentially...")
-        statuses = []
-        for i in indices:
-          try:
-            res = run_parameter_set(
-                contacts_df,
-                policy_config,
-                configs_list[i],
-                master_gd,
-                str(out_base),
-                i,
-                seed=seed,
-                register_defaults=register_defaults,
-                save_summary=save_summary,
-                save_incidence=save_incidence,
-                save_prevalence=save_prevalence,
-                save_lhd_results=save_lhd_results,
-                summary_metrics=summary_metrics,
-                save_daily_epi=save_daily_epi,
-                save_events=save_events,
-                save_tasks=save_tasks,
-                save_transmissions=save_transmissions,
-                save_factual_summary=save_factual_summary,
-                overwrite=overwrite_runs,
+        for index in indices:
+            status, models = (
+                _run_one_parameter_set(
+                    contacts=contacts,
+                    policy_config=
+                        policy_config,
+                    cfg=configs[index],
+                    master_graphdata=
+                        master_graphdata,
+                    output_dir=output_dir,
+                    index=index,
+                    base_seed=base_seed,
+                    output_profile=
+                        output_profile,
+                    extra_outputs=
+                        extra_outputs,
+                    overwrite_run_dirs=
+                        overwrite_run_dirs,
+                    return_models=
+                        return_models,
+                )
             )
-          except Exception as exc:
-            res = _failure_status(i, exc)
-          
-          statuses.append(res)
 
-    # Write a run status manifest
-    sorted_statuses = sorted(statuses, key=lambda x: int(x.get("index", -1)))
-    try:
-        with open(out_base / "run_status.json", "w") as fh:
-            json.dump(sorted_statuses, fh, indent=2)
-    except Exception:
-        pass
+            statuses.append(status)
 
-    # 3) Aggregate per-run results to a single file
-    print("[run_experiment] Runs completed, aggregating data...")
-    aggregated_paths: Dict[str, str] = {}
+            if (
+                retained_models is not None
+                and models is not None
+            ):
+                retained_models[index] = models
 
-    lhs_csv = out_base / "LHS.csv"
-    lhs_df = None
-    if lhs_csv.exists():
-        try:
-            lhs_df = pd.read_csv(lhs_csv)
-            lhs_df["model_index"] = range(len(lhs_df))
-        except:
-            lhs_df = None
+    statuses.sort(
+        key=lambda row: int(row["index"])
+    )
 
-    def _collect_and_concat(fname: str) -> Optional[pd.DataFrame]:
-        # Quick helper function to aggregate files by name to a big pd
-        parts = []
-        for i in indices:
-            run_dir = out_base / f"model_{int(i):04d}"
-            fpath = run_dir / fname
-            if not fpath.exists():
-                continue
+    write_json(
+        statuses,
+        output_dir / "run_status.json",
+    )
+
+    aggregated_paths = (
+        _aggregate_experiment_outputs(
+            output_dir=output_dir,
+            indices=indices,
+            outputs=outputs,
+        )
+    )
+
+    if clean_model_dirs:
+        for index in indices:
+            model_dir = (
+                output_dir
+                / f"model_{index:04d}"
+            )
+
+            if model_dir.exists():
+                shutil.rmtree(model_dir)
+
+    return ExperimentResult(
+        run_dir=output_dir,
+        n_parameter_sets=len(configs),
+        statuses=statuses,
+        aggregated_paths=aggregated_paths,
+        models=retained_models,
+    )
+
+
+def _run_parallel(
+    *,
+    contacts: pd.DataFrame,
+    configs: List[ModelConfig],
+    master_graphdata: Dict[str, Any],
+    policy_config: PolicyConfig,
+    output_dir: Path,
+    indices: List[int],
+    base_seed: int,
+    workers: int,
+    output_profile: str,
+    extra_outputs: Optional[
+        Iterable[str]
+    ],
+    overwrite_run_dirs: bool,
+) -> List[Dict[str, Any]]:
+    statuses: List[Dict[str, Any]] = []
+
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=workers
+    ) as executor:
+        futures = {
+            executor.submit(
+                run_parameter_set,
+                contacts,
+                policy_config,
+                configs[index],
+                master_graphdata,
+                output_dir,
+                index,
+                seed=base_seed,
+                output_profile=output_profile,
+                extra_outputs=extra_outputs,
+                overwrite=overwrite_run_dirs,
+                return_models=False,
+            ): index
+            for index in indices
+        }
+
+        for future in (
+            concurrent.futures.as_completed(
+                futures
+            )
+        ):
+            index = futures[future]
+
             try:
-                df = pd.read_parquet(str(fpath))
-                # ensure column run_number present
-                if "run_number" not in df.columns:
-                    df.insert(0, "run_number", range(len(df)))
-                df.insert(0, "model_index", i)
-                if "run_number" in df.columns:
-                    df["pair_id"] = (
-                        "model_"
-                        + str(int(i)).zfill(4)
+                result = future.result()
+                statuses.append(
+                    _status_from_result(result)
+                )
+            except Exception as exception:
+                statuses.append(
+                    _failure_status(
+                        index=index,
+                        output_dir=output_dir,
+                        exception=exception,
+                    )
+                )
+
+    return statuses
+
+
+def _run_one_parameter_set(
+    *,
+    contacts: pd.DataFrame,
+    policy_config: PolicyConfig,
+    cfg: ModelConfig,
+    master_graphdata: Dict[str, Any],
+    output_dir: Path,
+    index: int,
+    base_seed: int,
+    output_profile: str,
+    extra_outputs: Optional[
+        Iterable[str]
+    ],
+    overwrite_run_dirs: bool,
+    return_models: bool,
+) -> tuple[
+    Dict[str, Any],
+    Optional[Dict[str, Any]],
+]:
+    try:
+        result = run_parameter_set(
+            contacts_df=contacts,
+            policy_config=policy_config,
+            cfg=cfg,
+            master_graphdata=master_graphdata,
+            output_dir=output_dir,
+            i=index,
+            seed=base_seed,
+            output_profile=output_profile,
+            extra_outputs=extra_outputs,
+            overwrite=overwrite_run_dirs,
+            return_models=return_models,
+        )
+
+        return (
+            _status_from_result(result),
+            result.models,
+        )
+
+    except Exception as exception:
+        return (
+            _failure_status(
+                index=index,
+                output_dir=output_dir,
+                exception=exception,
+            ),
+            None,
+        )
+
+
+def _status_from_result(
+    result: ParameterSetResult,
+) -> Dict[str, Any]:
+    return {
+        "index": int(result.index),
+        "run_dir": result.run_dir,
+        "success": bool(result.success),
+        "models_run": int(result.models_run),
+        "output_paths": dict(
+            result.output_paths
+        ),
+        "error": result.error,
+    }
+
+
+def _failure_status(
+    *,
+    index: int,
+    output_dir: Path,
+    exception: Exception,
+) -> Dict[str, Any]:
+    return {
+        "index": int(index),
+        "run_dir": str(
+            output_dir
+            / f"model_{int(index):04d}"
+        ),
+        "success": False,
+        "models_run": 0,
+        "output_paths": {},
+        "error": str(exception),
+        "trace": traceback.format_exc(),
+    }
+
+
+def _aggregate_experiment_outputs(
+    *,
+    output_dir: Path,
+    indices: List[int],
+    outputs: set[str],
+) -> Dict[str, Path]:
+    aggregated_paths: Dict[str, Path] = {}
+
+    aggregatable = (
+        set(AGGREGATED_FILENAMES)
+        & outputs
+    )
+
+    for output_name in sorted(aggregatable):
+        filename = OUTPUT_FILENAMES[
+            output_name
+        ]
+        parts = []
+
+        for index in indices:
+            path = (
+                output_dir
+                / f"model_{index:04d}"
+                / filename
+            )
+
+            if not path.exists():
+                continue
+
+            dataframe = pd.read_parquet(path)
+
+            if dataframe.empty:
+                continue
+
+            dataframe.insert(
+                0,
+                "model_index",
+                int(index),
+            )
+
+            if "run_number" in dataframe.columns:
+                dataframe.insert(
+                    1,
+                    "pair_id",
+                    (
+                        f"model_{index:04d}"
                         + "__run_"
-                        + df["run_number"]
+                        + dataframe[
+                            "run_number"
+                        ]
                         .astype(int)
                         .astype(str)
                         .str.zfill(4)
-                    )
-                else:
-                    df["pair_id"] = (
-                        "model_"
-                        + str(int(i)).zfill(4)
-                    )
-                parts.append(df)
-            except Exception as exc:
-                print(f"[run_experiment] Failed to read {fpath}: {exc}")
+                    ),
+                )
+            else:
+                dataframe.insert(
+                    1,
+                    "pair_id",
+                    f"model_{index:04d}",
+                )
+
+            parts.append(dataframe)
+
         if not parts:
-            return None
-        big = pd.concat(parts, ignore_index=True, sort=False)
-
-        return big
-
-
-    if save_summary:
-        df_all = _collect_and_concat("summary.parquet")
-        if df_all is not None:
-            outp = out_base / "aggregated_summary.parquet"
-            _atomic_write_parquet(df_all, outp)
-            aggregated_paths["summary"] = str(outp)
-
-    if save_incidence:
-        df_all = _collect_and_concat("incidence.parquet")
-        if df_all is not None:
-            outp = out_base / "aggregated_incidence.parquet"
-            _atomic_write_parquet(df_all, outp)
-            aggregated_paths["incidence"] = str(outp)
-
-    if save_prevalence:
-        df_all = _collect_and_concat("prevalence.parquet")
-        if df_all is not None:
-            outp = out_base / "aggregated_prevalence.parquet"
-            _atomic_write_parquet(df_all, outp)
-            aggregated_paths["prevalence"] = str(outp)
-
-    if save_lhd_results:
-        df_all = _collect_and_concat("lhd_results.parquet")
-        if df_all is not None:
-            outp = out_base / "aggregated_lhd_results.parquet"
-            _atomic_write_parquet(df_all, outp)
-            aggregated_paths["lhd_results"] = str(outp)
-
-    if clean_dir:
-        print("[run_experiment] cleaning per-model run directories...")
-        for i in indices:
-            run_dir = out_base / f"model_{int(i):04d}"
-            if run_dir.exists() and run_dir.is_dir():
-                shutil.rmtree(run_dir)
-
-
-      # Output aggregation
-    additional_outputs = {
-        "daily_epi": (
-            save_daily_epi,
-            "daily_epi.parquet",
-            "aggregated_daily_epi.parquet",
-        ),
-        "events": (
-            save_events,
-            "events.parquet",
-            "aggregated_events.parquet",
-        ),
-        "tasks": (
-            save_tasks,
-            "tasks.parquet",
-            "aggregated_tasks.parquet",
-        ),
-        "transmissions": (
-            save_transmissions,
-            "transmissions.parquet",
-            "aggregated_transmissions.parquet",
-        ),
-        "factual_summary": (
-            save_factual_summary,
-            "factual_run_summary.parquet",
-            "aggregated_factual_summary.parquet",
-        ),
-    }
-
-    for (
-        output_name,
-        (
-            should_save,
-            per_run_filename,
-            aggregate_filename,
-        ),
-    ) in additional_outputs.items():
-        if not should_save:
             continue
 
-        df_all = _collect_and_concat(
-            per_run_filename
+        combined = pd.concat(
+            parts,
+            ignore_index=True,
+            sort=False,
         )
 
-        if df_all is None:
-            continue
-
-        output_path = (
-            out_base / aggregate_filename
-        )
-        _atomic_write_parquet(
-            df_all,
-            output_path,
-        )
-        aggregated_paths[output_name] = str(
-            output_path
+        aggregate_path = (
+            output_dir
+            / AGGREGATED_FILENAMES[
+                output_name
+            ]
         )
 
-    return {
-        "run_dir": str(out_base),
-        "n_parameter_sets": n_configs,
-        "statuses": sorted_statuses,
-        "aggregated_paths": aggregated_paths,
-    }
+        atomic_write_parquet(
+            combined,
+            aggregate_path,
+        )
+        aggregated_paths[
+            output_name
+        ] = aggregate_path
 
-
-def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
-    # Helper to atomic-write parquets
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    df.to_parquet(str(tmp), index=False)
-    os.replace(str(tmp), str(path))
+    return aggregated_paths
 
 
 if __name__ == "__main__":
-    #let terminal calls overwrite the output_dir default if they don't match
+    import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", default="model_runs/TEST_RUN")
+    parser.add_argument(
+        "--output-dir",
+        default=(
+            "model_runs/"
+            "control_boundary_pilot"
+        ),
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=5,
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--profile",
+        choices=[
+            "none",
+            "core",
+            "audit",
+            "full",
+        ],
+        default="core",
+    )
     args = parser.parse_args()
 
-    # Uses POLICY_CONFIGURATION defined in scripts/lhd/policy_config.py
     result = run_experiment(
         csv_path="testLHS.csv",
-        n_samples=2,
-        policy_config=POLICY_CONFIGURATION,
+        n_samples=args.samples,
+        policy_config=
+            POLICY_CONFIGURATION,
         output_dir=args.output_dir,
-        base_cfg=None,
+        base_cfg=ModelConfig(),
         seed=5,
-        workers=1,
-        save_summary=True,
-        save_incidence=True,
-        save_prevalence=True,
-        clean_dir=True,
+        workers=args.workers,
+        output_profile=args.profile,
+        return_models=False,
+        overwrite_run_dirs=True,
+        clean_output_dir=True,
+        clean_model_dirs=False,
     )
-    print("Done. aggregated:", result["run_dir"])
 
-    structured_paths = []
-    for filepath in result['aggregated_paths'].values():
-        if "aggregated_summary" in filepath:
-            export_prcc_inputs_for_matlab(
-                results_path = filepath,
-                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
-                kind = "summary",
-                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "summary"),
-                aggregate_replicates = True
-            )
-        elif "aggregated_incidence" in filepath:
-            export_prcc_inputs_for_matlab(
-                results_path = filepath,
-                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
-                kind = "timeseries",
-                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "incidence"),
-                aggregate_replicates = True
-
-                
-            )
-        elif "aggregated_prevalence" in filepath:
-            export_prcc_inputs_for_matlab(
-                results_path = filepath,
-                lhs_path = os.path.join(result['run_dir'], "LHS.csv"),
-                kind = "timeseries",
-                out_dir = os.path.join(result['run_dir'], "StructuredPRCCs", "prevalence"),
-                aggregate_replicates = True
-
-            )
-
+    print(
+        "Experiment completed:",
+        result.run_dir,
+    )
+    print(
+        "Aggregated outputs:",
+        result.aggregated_paths,
+    )
