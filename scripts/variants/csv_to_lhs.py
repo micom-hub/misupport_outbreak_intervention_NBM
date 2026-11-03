@@ -10,7 +10,7 @@ from scripts.config import ModelConfig
 def csv_to_LHS(
     csv_path: str, 
     n_samples: int, 
-    output_dir: Optional[str] = None,
+    output_dir: Optional[str],
     seed: Optional[int] = None) -> pd.DataFrame:
     """
     Reads a CSV containing a column for:

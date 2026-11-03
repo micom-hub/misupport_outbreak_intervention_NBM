@@ -2093,7 +2093,6 @@ class LocalHealthDepartment:
 
     @staticmethod
     def _array_size(
-        self,
         mapping: Dict[str, Any],
         key: str,
     ) -> int:
