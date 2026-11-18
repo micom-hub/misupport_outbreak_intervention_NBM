@@ -66,8 +66,8 @@ def get_known_network_snapshot(
                     "node_id": nid,
                     "report_time": batch_t,
                     "is_reported": True,
-                    "is_passively_reported": source in {"passive", "imported_passive"},
-                    "is_tested_positive": (source == "tested_positive"),
+                    "is_passively_reported": source in {"passive_symptomatic", "passive_asymptomatic", "imported_ascertainment"},
+                    "is_tested_positive": (source == "active_test"),
                     "is_traced_contact": False,
                     "stage_at_report": int(rep_stages[i]) if len(rep_stages) > i else 0,
                     "is_vax": bool(rep_is_vax[i]) if len(rep_is_vax) > i else False,
@@ -75,9 +75,9 @@ def get_known_network_snapshot(
             else:
                 known_nodes[nid]["is_reported"] = True
                 known_nodes[nid]["is_passively_reported"] = (
-    source in {"passive", "imported_passive"}
-)
-                known_nodes[nid]["is_tested_positive"] = source == "tested_positive"
+                    source in {"passive_symptomatic", "passive_asymptomatic", "imported_ascertainment"}
+                )
+                known_nodes[nid]["is_tested_positive"] = source == "active_test"
                 known_nodes[nid]["is_traced_contact"] = False
 
         # Keep track of all reported nodes to distinguish from traced-only nodes

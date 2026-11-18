@@ -10,7 +10,7 @@ from scripts.config import ModelConfig
 def csv_to_LHS(
     csv_path: str, 
     n_samples: int, 
-    output_dir: Optional[str] = None,
+    output_dir: Optional[str],
     seed: Optional[int] = None) -> pd.DataFrame:
     """
     Reads a CSV containing a column for:
@@ -201,7 +201,7 @@ def _dotted_key_exists(cfg_dict: dict, dotted: str) -> bool:
 def csv_to_cfg(
     csv_path: str, 
     N: int, 
-    output_dir: Optional[str, None],
+    output_dir: Optional[str],
     default_config: Optional[ModelConfig],
     seed: Optional[int] = None) -> List[ModelConfig]:
 

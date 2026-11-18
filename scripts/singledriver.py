@@ -1,308 +1,507 @@
-"""
-Driver to structure data, configure, and run NetworkModel objects
+# scripts/singledriver.py
+from __future__ import annotations
 
-The script:
-1) Ensures data for the desired county exists
-2) Checks for a master edge list, or builds it and a GraphData object
-3) Samples an edge list from master edge list per model object
-4) Builds GraphData object and caches it
-5) Instantiates NetworkModel with ModelConfig and GraphData objects
-"""
-
-import os
+import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Union
 
 import pandas as pd
-from line_profiler import profile
 
 from scripts.config import ModelConfig
 from scripts.graph.graph_utils import (
+    GraphData,
     build_graph_data,
     build_minimal_graphdata_from_edge_list,
     sample_from_master_graphdata,
 )
 from scripts.simulation.outbreak_model import NetworkModel
 from scripts.utils.fred_fetch import downloadPopData
-from scripts.utils.synth_data_processing import build_edge_list, synthetic_data_process
-from scripts.visualization.network_visualization import (
-    lhd_evolution_movie,
-    visualize_lhd_evolution,
+from scripts.utils.output_profiles import (
+    OUTPUT_FILENAMES,
+    atomic_write_parquet,
+    resolve_outputs,
+)
+from scripts.utils.synth_data_processing import (
+    build_edge_list,
+    synthetic_data_process,
 )
 
-# Prepare and structure contact data
+
+ContactsSource = Union[pd.DataFrame, str, Path]
+ConfigSource = Union[ModelConfig, str, Path]
 
 
 def prepare_contacts(
     county: str,
     state: str,
     data_dir: str = "data",
-    overwrite_files: bool = True,
-    save_files: bool = False,
-):
-    """
-    Handles data retrieval for FRED synthetic population, processes data, and returns a dataframe of all contact data
+    *,
+    overwrite_files: bool = False,
+    save_files: bool = True,
+) -> pd.DataFrame:
+    """Load or prepare a county synthetic population."""
+    county_name = str(county).strip().title()
+    state_name = str(state).strip().title()
 
-    Always returns contacts_df or raises error
-    """
+    data_path = Path(data_dir).expanduser().resolve()
+    data_path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    county_name = county.lower().capitalize()
-    state_name = state.lower().capitalize()
+    county_dir = data_path / county_name
+    contacts_path = county_dir / "contacts.parquet"
+    county_zip = data_path / f"{county_name}.zip"
 
-    os.makedirs(data_dir, exist_ok=True)
-    # find any entries in data_dir that start with county_name
-    entries = [f for f in os.listdir(data_dir) if f.startswith(county_name)]
-    if not entries:
-        downloadPopData(state=state_name, county=county_name)
-        # re-list
-        entries = [f for f in os.listdir(data_dir) if f.startswith(county_name)]
-        if not entries:
-            raise RuntimeError(
-                f"downloadPopData did not produce any data files for {county_name} in {data_dir}"
+    if (
+        contacts_path.exists()
+        and not overwrite_files
+    ):
+        contacts = pd.read_parquet(contacts_path)
+        _validate_contacts_df(contacts)
+        return contacts.reset_index(drop=True)
+
+    if (
+        not county_dir.exists()
+        and not county_zip.exists()
+    ):
+        downloadPopData(
+            state=state_name,
+            county=county_name,
+            projectDirectory=str(data_path.parent),
+        )
+
+    try:
+        contacts = synthetic_data_process(
+            county_name,
+            save_files=save_files,
+        )
+    except Exception as exception:
+        raise RuntimeError(
+            "Failed to prepare synthetic population "
+            f"for {county_name}, {state_name}: "
+            f"{exception}"
+        ) from exception
+
+    _validate_contacts_df(contacts)
+    return contacts.reset_index(drop=True)
+
+
+def load_contacts_source(
+    contacts_src: ContactsSource,
+    cfg: ModelConfig,
+    *,
+    data_dir: str = "data",
+) -> pd.DataFrame:
+    """Normalize a DataFrame, Parquet path, or county name."""
+    if isinstance(contacts_src, pd.DataFrame):
+        contacts = contacts_src.copy()
+
+    elif isinstance(contacts_src, (str, Path)):
+        candidate = Path(contacts_src).expanduser()
+
+        if candidate.exists():
+            if candidate.suffix.lower() != ".parquet":
+                raise ValueError(
+                    "A contacts filepath must point "
+                    "to a Parquet file."
+                )
+
+            contacts = pd.read_parquet(candidate)
+        else:
+            contacts = prepare_contacts(
+                county=str(contacts_src),
+                state=cfg.sim.state,
+                data_dir=data_dir,
+                overwrite_files=False,
+                save_files=True,
             )
 
-    # prefer a directory if present, else take zip or folder
-    dir_entries = [e for e in entries if os.path.isdir(os.path.join(data_dir, e))]
-    if dir_entries:
-        countyfoldername = dir_entries[0]
     else:
-        countyfoldername = entries[0]
+        raise TypeError(
+            "contacts_src must be a DataFrame, "
+            "Parquet path, or county name."
+        )
 
-    countyfolder = os.path.join(data_dir, countyfoldername)
-
-    # If data is a zipfile, extract data and delete zip
-    if os.path.isfile(countyfolder) and countyfolder.lower().endswith(".zip"):
-        try:
-            contacts_df = synthetic_data_process(county)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to process synthetic data from zip for {county_name}: {e}"
-            ) from e
-
-        if save_files and os.path.exists(countyfolder):
-            try:
-                os.remove(countyfolder)
-            except OSError:
-                pass
-        _validate_contacts_df(contacts_df)
-        return contacts_df
-
-    # check county folder for contacts.parquet, and read it. if doesn't exist, build
-    if os.path.isdir(countyfolder):
-        parquet_path = os.path.join(countyfolder, "contacts.parquet")
-        if os.path.exists(parquet_path) and not overwrite_files:
-            return pd.read_parquet(parquet_path)
-        else:
-            try:
-                contacts_df = synthetic_data_process(county_name, save_files=save_files)
-                _validate_contacts_df(contacts_df)
-                return contacts_df
-            except Exception as e:
-                raise RuntimeError(
-                    f"Could not find contacts.parquet in {countyfolder} and synthetic_data_process failed: {e}"
-                ) from e
-
-    raise RuntimeError(f"Unhandled data entry for county {county_name}: {countyfolder}")
+    contacts = contacts.reset_index(drop=True)
+    _validate_contacts_df(contacts)
+    return contacts
 
 
-# Read or build master edge list for county population
-@profile
 def read_or_build_master(
     contacts_df: pd.DataFrame,
     cfg: ModelConfig,
-    run_dir: str,
+    run_dir: Union[str, Path],
+    *,
     seed: Optional[int] = None,
-    variant: Optional[bool] = False,
+    save_master: bool = False,
 ) -> pd.DataFrame:
     """
-    Trys to read in a master edge list if it exists in the run directory, otherwise builds one
-
-    Saves config to a json
-
+    Load a cached master graph or build one using the supplied seed.
     """
-    run_dir = Path(run_dir).expanduser()
-    run_dir.mkdir(parents = True, exist_ok = True)
-
+    run_dir = Path(run_dir).expanduser().resolve()
     master_path = run_dir / "MasterEdgelist.parquet"
-    config_path = run_dir / "ModelConfig.json"
-    if not variant:
-        try:
-            cfg.to_json(str(config_path))  # Save ModelConfig for this run
-        except Exception as e:
-            print(f"WARNING: Failed to save ModelConfig to {config_path}: {e}")
 
-    # If master already exists and we aren't overwriting, read in
-    if master_path.exists() and not bool(cfg.sim.overwrite_master):
-        return pd.read_parquet(str(master_path))
+    if (
+        master_path.exists()
+        and not bool(cfg.sim.overwrite_master)
+    ):
+        return pd.read_parquet(master_path)
 
-    master_df = build_edge_list(
+    master = build_edge_list(
         contacts_df=contacts_df,
         config=cfg,
-        seed= int(seed) if seed is not None else int(cfg.sim.seed),
+        seed=(
+            int(seed)
+            if seed is not None
+            else int(cfg.sim.seed)
+        ),
         save=False,
         county=cfg.sim.county,
-        master_casual_contacts=int(cfg.sim.master_casual_candidates)
-)
-    if cfg.sim.save_master:
-        try:
-            master_df.to_parquet(str(master_path), index=False)
-        except Exception as e:
-            print(f"WARNING: Failed to save MasterEdgelist to {master_path}: {e}")
+        master_casual_contacts=int(
+            cfg.sim.master_casual_candidates
+        ),
+    )
 
-    return master_df
+    if save_master:
+        atomic_write_parquet(
+            master,
+            master_path,
+        )
 
-# Single model run
+    return master
+
+
+def build_run_graphdata(
+    contacts_df: pd.DataFrame,
+    cfg: ModelConfig,
+    *,
+    run_dir: Union[str, Path],
+    seed: int,
+    save_master: bool = False,
+) -> tuple[
+    GraphData,
+    pd.DataFrame,
+    pd.DataFrame,
+]:
+    """
+    Build the master graph, sample one run graph, and construct GraphData.
+
+    The same seed is used throughout this single-run graph pipeline, preserving
+    the established single-driver RNG behavior.
+    """
+    master = read_or_build_master(
+        contacts_df=contacts_df,
+        cfg=cfg,
+        run_dir=run_dir,
+        seed=int(seed),
+        save_master=save_master,
+    )
+
+    minimal_master = (
+        build_minimal_graphdata_from_edge_list(
+            master,
+            N=int(len(contacts_df)),
+        )
+    )
+
+    sampled_edges = sample_from_master_graphdata(
+        minimal_master,
+        cfg,
+        seed=int(seed),
+    )
+
+    graphdata = build_graph_data(
+        edge_list=sampled_edges,
+        contacts_df=contacts_df,
+        config=cfg,
+        seed=int(seed),
+        N=int(len(contacts_df)),
+    )
+
+    return graphdata, sampled_edges, master
+
+
 def run_single_model(
-    contacts_src: Union[pd.DataFrame, str],
-    cfg: Union[ModelConfig, str, Path],
-    output_dir: Optional[str] = None,
+    contacts_src: ContactsSource,
+    cfg: ConfigSource,
+    output_dir: Union[
+        str,
+        Path,
+    ] = "model_runs",
     *,
     seed: Optional[int] = None,
     policy_name: Optional[str] = None,
-    lhd_overrides: Optional[Dict[str, Any]] = None,
-    save_lhd_results: bool = True
-    ) -> NetworkModel:
+    lhd_overrides: Optional[
+        Dict[str, Any]
+    ] = None,
+    data_dir: str = "data",
+    output_profile: str = "core",
+    extra_outputs: Optional[
+        Iterable[str]
+    ] = None,
+    save_master_graph: bool = False,
+    overwrite: bool = False,
+) -> NetworkModel:
     """
-    Driver function to run a single model
-    
-    Args:
-        contacts_src: as a contacts_df object, a filepath, or county name
-        cfg: ModelConfig object for run or absolute filepath to a ModelConfig.json saved by ModelConfig.to_json
-        output_dir: base directory for model outputs, defaults to "model_runs"
+    Build and run one model.
 
-
-        seed: optional seed to overwrite cfg.sim.seed
-        policy_name: optional policy name override 
+    The fully populated model is returned regardless of the output profile.
     """
+    cfg = _normalize_config(cfg)
 
-    # If cfg is a filepath, build ModelConfig
-    if isinstance(cfg, (str, Path)):
-        cfg_path = Path(cfg).expanduser()
-        if not cfg_path.is_file():
-            raise FileNotFoundError(f"ModelConfig JSON not found at {cfg_path}")
-        cfg = ModelConfig.from_json(str(cfg_path))
-
-    try:
-        cfg.validate()
-    except Exception:
-        raise
-
-    # Overwrite seed if provided
     if seed is not None:
-        cfg = cfg.copy_with({"sim": {"seed": int(seed)}})
-
-    # overwrite policy or parameters if necessary
-    if policy_name is not None or lhd_overrides:
-        patch = {"lhd": {}}
-        if policy_name is not None:
-            patch["lhd"]["policy_name"] = str(policy_name)
-        if lhd_overrides:
-            patch["lhd"].update(dict(lhd_overrides))
-        cfg = cfg.copy_with(patch)
-
-    # Figure out what contacts_src is, and normalize
-    if isinstance(contacts_src, pd.DataFrame):
-        contacts_df = contacts_src.reset_index(drop=True)
-    elif isinstance(contacts_src, str):
-        # Try as a filepath
-        if os.path.exists(contacts_src) and contacts_src.endswith(".parquet"):
-            contacts_df = pd.read_parquet(contacts_src).reset_index(drop=True)
-        else:
-            # Try as a county
-            contacts_df = prepare_contacts(
-                contacts_src, 
-                cfg.sim.state, 
-                data_dir = "data", 
-                overwrite_files = cfg.sim.overwrite_master,
-                save_files = cfg.sim.save_data_files
-            )
-    else:
-        raise TypeError("contacts_src must be a DataFrame or a path/county string")
-
-    # Determine if output_dir is relative or absolute and save
-    if output_dir is None:
-        output_dir = "model_runs"
-    base_output = Path(output_dir).expanduser()
-    if not base_output.is_absolute():
-        base_output = Path.cwd() / base_output
-    run_name = cfg.sim.run_name
-    run_dir = (base_output / run_name).resolve()
-
-    if cfg.sim.save_data_files:
-        run_dir.mkdir(parents = True, exist_ok = True)
-
-    # Build or load master
-    master_df = read_or_build_master(
-        contacts_df,
-        cfg, 
-        run_dir = run_dir,
-        seed = cfg.sim.seed
+        cfg = cfg.copy_with(
+            {
+                "sim": {
+                    "seed": int(seed),
+                }
+            }
         )
 
-    # Build minimal graphdata from master that can be sampled from
-    minimal_graphdata = build_minimal_graphdata_from_edge_list(master_df, N=int(contacts_df.shape[0]))
+    if policy_name is not None or lhd_overrides:
+        lhd_patch: Dict[str, Any] = {}
 
-    sampled_edges_df = sample_from_master_graphdata(
-        minimal_graphdata, 
-        cfg, 
-        seed = cfg.sim.seed
+        if policy_name is not None:
+            lhd_patch["policy_name"] = str(
+                policy_name
+            )
+
+        if lhd_overrides:
+            lhd_patch.update(
+                dict(lhd_overrides)
+            )
+
+        cfg = cfg.copy_with(
+            {
+                "lhd": lhd_patch,
+            }
+        )
+
+    cfg.validate()
+
+    outputs = resolve_outputs(
+        output_profile,
+        extra_outputs,
     )
 
-    # Build full run GraphData (this is the heavy step)
-    run_graphdata = build_graph_data(
-        edge_list=sampled_edges_df, 
-        contacts_df=contacts_df, 
-        config = cfg, 
-        seed = cfg.sim.seed, 
-        N=int(contacts_df.shape[0])
+    contacts = load_contacts_source(
+        contacts_src,
+        cfg,
+        data_dir=data_dir,
     )
 
-    # Instantiate NetworkModel with provided prebuilt GraphData
+    base_output_dir = Path(
+        output_dir
+    ).expanduser().resolve()
+    run_dir = base_output_dir / str(cfg.sim.run_name)
+
+    if outputs:
+        _prepare_output_directory(
+            run_dir,
+            overwrite=overwrite,
+        )
+
+    # Preserve the original single-driver behavior: the configured simulation
+    # seed controls both graph construction and the model base seed.
+    run_seed = int(cfg.sim.seed)
+
+    graphdata, sampled_edges, _master = (
+        build_run_graphdata(
+            contacts,
+            cfg,
+            run_dir=run_dir,
+            seed=run_seed,
+            save_master=save_master_graph,
+        )
+    )
+
     model = NetworkModel(
-        config = cfg,
-        graphdata = run_graphdata, 
-        run_dir = str(run_dir),
-        seed = cfg.sim.seed,
+        config=cfg,
+        graphdata=graphdata,
+        run_dir=str(run_dir),
+        seed=run_seed,
     )
-
-    # Run simulation
     model.simulate()
 
+    output_paths = _save_single_outputs(
+        model=model,
+        cfg=cfg,
+        sampled_edges=sampled_edges,
+        run_dir=run_dir,
+        outputs=outputs,
+    )
 
-    model.results_to_df().to_csv(os.path.join(run_dir, "summary.csv"), index=False)
+    # Attach runtime objects for interactive use without requiring disk reloads.
+    model.run_dir = run_dir
+    model.output_paths = output_paths
+    model.run_graphdata = graphdata
+    model.sampled_edges = sampled_edges
 
     return model
 
-# Helper function to make sure contacts_df looks right
-def _validate_contacts_df(df: pd.DataFrame) -> None:
-    """
-    Throws error if contacts_df doesn't have necessary columns
-    """
-    
-    required = {"PID", "hh_id", "wp_id", "sch_id", "gq_id", "age", "sex", "gq"}
-    missing = [c for c in required if c not in df.columns]
+
+def _save_single_outputs(
+    *,
+    model: NetworkModel,
+    cfg: ModelConfig,
+    sampled_edges: pd.DataFrame,
+    run_dir: Path,
+    outputs: set[str],
+) -> Dict[str, Path]:
+    """Write only outputs selected by the output profile."""
+    output_paths: Dict[str, Path] = {}
+
+    if not outputs:
+        return output_paths
+
+    run_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    config_path = run_dir / "ModelConfig.json"
+    cfg.to_json(str(config_path))
+    output_paths["config"] = config_path
+
+    producers = {
+        "factual_summary":
+            model.factual_run_summary_to_df,
+        "daily_epi":
+            model.daily_epi_to_df,
+        "daily_lhd":
+            model.lhd_daily_to_df,
+        "events":
+            model.event_log_to_df,
+        "tasks":
+            model.lhd_tasks_to_df,
+        "incidence":
+            lambda: model.timeseries_to_df(
+                "incidence"
+            ),
+        "prevalence":
+            lambda: model.timeseries_to_df(
+                "prevalence"
+            ),
+        "transmissions":
+            model.transmissions_to_df,
+    }
+
+    for output_name in sorted(outputs):
+        if output_name == "sampled_edges":
+            dataframe = sampled_edges
+        else:
+            producer = producers.get(output_name)
+
+            if producer is None:
+                continue
+
+            dataframe = producer()
+
+        if (
+            not isinstance(dataframe, pd.DataFrame)
+            or dataframe.empty
+        ):
+            continue
+
+        path = (
+            run_dir
+            / OUTPUT_FILENAMES[output_name]
+        )
+
+        atomic_write_parquet(
+            dataframe,
+            path,
+        )
+        output_paths[output_name] = path
+
+    return output_paths
+
+
+def _normalize_config(
+    cfg: ConfigSource,
+) -> ModelConfig:
+    if isinstance(cfg, ModelConfig):
+        return cfg
+
+    path = Path(cfg).expanduser()
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"ModelConfig JSON not found: {path}"
+        )
+
+    return ModelConfig.from_json(str(path))
+
+
+def _prepare_output_directory(
+    run_dir: Path,
+    *,
+    overwrite: bool,
+) -> None:
+    if run_dir.exists():
+        if not overwrite:
+            raise FileExistsError(
+                f"Run directory already exists: {run_dir}. "
+                "Use overwrite=True to replace it."
+            )
+
+        shutil.rmtree(run_dir)
+
+    run_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+def _validate_contacts_df(
+    dataframe: pd.DataFrame,
+) -> None:
+    required = {
+        "PID",
+        "hh_id",
+        "wp_id",
+        "sch_id",
+        "gq_id",
+        "age",
+        "sex",
+        "gq",
+    }
+    missing = required - set(dataframe.columns)
+
     if missing:
-        raise ValueError(f"Contacts DataFrame missing required columns: {missing}")
+        raise ValueError(
+            "Contacts DataFrame is missing: "
+            f"{sorted(missing)}"
+        )
 
 
 if __name__ == "__main__":
     cfg = ModelConfig().copy_with(
-        {"sim": {"county": "Alcona", "display_plots": True, "I0": 3}}
-    )
-    contacts = prepare_contacts(cfg.sim.county, cfg.sim.state, save_files=True)
-    model = run_single_model(
-        contacts,
-        cfg,
-        seed=13,
-        policy_name="trace_and_test",
-        lhd_overrides={
-            "lhd_daily_capacity": 1000,
-            "lhd_default_int_reduction": 0.99,
-            "lhd_default_int_duration": 14,
-            "p_detect_inf": 0.80,
-        },
+        {
+            "sim": {
+                "county": "Keweenaw",
+                "I0": 2,
+                "n_replicates": 3,
+                "simulation_duration": 60,
+            },
+            "lhd": {
+                "policy_name":
+                    "adaptive_escalation",
+                "lhd_daily_capacity": 100.0,
+            },
+        }
     )
 
-    # Visualize the LHD's network discovery and intervention evolution
-    # visualize_lhd_evolution(model, run_number=0, plots = 100)
-    # lhd_evolution_movie(model, run_number=4, frames=50)
+    model = run_single_model(
+        contacts_src=cfg.sim.county,
+        cfg=cfg,
+        seed=13,
+        policy_name="adaptive_escalation",
+        output_profile="core",
+        overwrite=True,
+    )
+
+    print(
+        model.factual_run_summary_to_df()
+    )
