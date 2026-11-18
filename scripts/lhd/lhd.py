@@ -76,6 +76,11 @@ class LocalHealthDepartment:
         self.escalation_trigger_name: Optional[str] = None
         self.escalation_trigger_value: Optional[float] = None
 
+        # Phase 2 is absorbing once entered. This separate flag records
+        # whether the population-level mitigation multiplier is currently
+        # active, which may differ when mitigation has a finite duration.
+        self.community_mitigation_active = False
+
         self._trigger_streak = 0
         self._scheduled_escalations_by_day = defaultdict(list)
         self._expiry_tokens_by_day = defaultdict(list)
@@ -387,8 +392,20 @@ class LocalHealthDepartment:
                     self.escalation_order_day,
                 "escalation_effective_day":
                     self.escalation_effective_day,
-                "escalation_active": bool(
+                # Phase 2 remains absorbing once entered.
+                "phase2_active": bool(
                     self.policy_phase == 2
+                ),
+
+                # This indicates whether the broad population-level
+                # multiplier is currently active. It may become False after
+                # a finite-duration intervention expires while phase2_active
+                # remains True.
+                "escalation_active": bool(
+                    self.community_mitigation_active
+                ),
+                "community_mitigation_active": bool(
+                    self.community_mitigation_active
                 ),
                 "escalation_profile": (
                     self.model.config.lhd
@@ -891,6 +908,12 @@ class LocalHealthDepartment:
                 self.default_iso_duration,
             )
         )
+
+        if duration <= 0:
+            raise ValueError(
+                "Individual isolation duration must be greater than zero"
+            )
+
         contact_types = list(
             params.get(
                 "contact_types",
@@ -916,29 +939,25 @@ class LocalHealthDepartment:
             factor=factor,
         )
 
-        expires_at = int(
-            t + max(duration, 1)
-        )
+        expires_at = int(t + duration)
+        
         self.state.isolated_until[
             eligible
         ] = expires_at
 
-        tokens_added = 0
-
-        if duration > 0:
-            self._schedule_token(
-                MultiplierToken(
-                    expires_at=expires_at,
-                    nodes=eligible.copy(),
-                    contact_types=tuple(
-                        contact_types
-                    ),
-                    in_factor=factor,
-                    out_factor=factor,
-                    action="isolate",
-                )
+        self._schedule_token(
+            MultiplierToken(
+                expires_at=expires_at,
+                nodes=eligible.copy(),
+                contact_types=tuple(
+                    contact_types
+                ),
+                in_factor=factor,
+                out_factor=factor,
+                action="isolate",
             )
-            tokens_added = 1
+        )
+        tokens_added = 1
 
         for node in eligible:
             self.model.record_event(
@@ -1470,6 +1489,7 @@ class LocalHealthDepartment:
 
             self.escalation_end_day = expires_at
             self.policy_phase = 2
+            self.community_mitigation_active = True
 
             if (
                 self.model.config.lhd
@@ -1741,9 +1761,17 @@ class LocalHealthDepartment:
             token.revert(self.model)
 
             if token.action == "community_mitigation":
+                # Phase 2 remains active as an absorbing policy phase, but
+                # the finite-duration population multiplier is no longer
+                # active after this token is reversed.
+                self.community_mitigation_active = False
+
                 self.model.record_event(
                     day=day,
                     event_type="escalation_ended",
+                    metadata={
+                        "policy_phase_remains": 2,
+                    },
                 )
                 continue
 
@@ -2155,6 +2183,7 @@ class LocalHealthDepartment:
         self.escalation_end_day = None
         self.escalation_trigger_name = None
         self.escalation_trigger_value = None
+        self.community_mitigation_active = False
         self._trigger_streak = 0
         self._tokens_expired_today = 0
         self._tasks_cancelled_before_step = 0

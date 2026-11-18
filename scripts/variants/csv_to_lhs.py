@@ -201,7 +201,7 @@ def _dotted_key_exists(cfg_dict: dict, dotted: str) -> bool:
 def csv_to_cfg(
     csv_path: str, 
     N: int, 
-    output_dir: Optional[str, None],
+    output_dir: Optional[str],
     default_config: Optional[ModelConfig],
     seed: Optional[int] = None) -> List[ModelConfig]:
 

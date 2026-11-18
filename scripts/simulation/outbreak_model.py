@@ -407,6 +407,9 @@ class NetworkModel:
         """Initialize one epidemic replicate and its operational LHD."""
         self.current_time = 0
         self.replicate_ind = int(run)
+        # clear LHD from last run 
+        self.lhd = None
+
 
         self.replicate_seed = int(
             derive_seed_from_base(
@@ -414,6 +417,7 @@ class NetworkModel:
                 self.replicate_ind,
             )
         )
+
         self.rng = np.random.default_rng(
             self.replicate_seed
         )
